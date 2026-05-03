@@ -1,0 +1,18 @@
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.jar binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.zip binary
+
+gradlew text eol=lf
+*.java text diff=java
+*.kt text diff=java
+*.gradle text
+*.toml text
+*.json text
+*.md text
