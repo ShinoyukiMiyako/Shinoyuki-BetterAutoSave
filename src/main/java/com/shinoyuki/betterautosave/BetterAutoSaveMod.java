@@ -2,6 +2,7 @@ package com.shinoyuki.betterautosave;
 
 import com.mojang.logging.LogUtils;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
+import com.shinoyuki.betterautosave.command.BetterAutoSaveCommand;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.dispatch.SaveDispatcher;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
@@ -10,6 +11,7 @@ import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.diagnostic.DiagnosticLogger;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.server.ServerStartingEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
@@ -56,6 +58,11 @@ public final class BetterAutoSaveMod {
 
         BetterAutoSaveCore.install(metrics, scheduler, pipeline, ioBridge, diagnosticLogger);
         LOGGER.info("BetterAutoSave pipeline installed");
+    }
+
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
+        BetterAutoSaveCommand.register(event.getDispatcher());
     }
 
     @SubscribeEvent
