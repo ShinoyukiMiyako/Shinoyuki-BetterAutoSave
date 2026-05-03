@@ -6,6 +6,7 @@ import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import org.slf4j.Logger;
 
@@ -34,11 +35,14 @@ public final class ChunkSaveTask implements SaveTask {
 
     @Override
     public void execute() {
+        CompoundTag tag = ChunkNbtAssembler.assemble(snapshot);
+        metrics.decInFlightSerializing();
+
         ChunkSaveState state = snapshot.state();
         state.enterIoPending();
         metrics.incInFlightIoPending();
         long submitNs = System.nanoTime();
-        CompletableFuture<Void> future = ioBridge.storeChunk(level, snapshot.pos(), snapshot.preBuiltFullTag());
+        CompletableFuture<Void> future = ioBridge.storeChunk(level, snapshot.pos(), tag);
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
