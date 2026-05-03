@@ -32,8 +32,11 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
 
     @Override
     public void onPriorityDrained(ChunkSavePriority priority) {
+        metrics.recordChunkSubmitted();
+
         MinecraftServer server = pipeline.server();
         if (server == null) {
+            metrics.recordChunkFallback();
             return;
         }
         ServerLevel target = findLevel(server, priority.dimensionId());
@@ -45,24 +48,30 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
         ChunkPos pos = new ChunkPos(priority.packedPos());
         ChunkHolder holder = ((ChunkMapAccessor) chunkMap).betterautosave$getVisibleChunkMap().get(pos.toLong());
         if (holder == null) {
+            metrics.recordChunkFallback();
             return;
         }
         ChunkAccess chunk = holder.getLastAvailable();
         if (!(chunk instanceof LevelChunk)) {
+            metrics.recordChunkFallback();
             return;
         }
+
+        long t0 = System.nanoTime();
         try {
             boolean saved = ((ChunkMapInvoker) chunkMap).betterautosave$save(chunk);
+            metrics.recordCaptureNs(System.nanoTime() - t0);
             if (saved) {
                 metrics.recordChunkCompleted();
                 if (firstSuccessLogged.compareAndSet(false, true)) {
-                    LOGGER.info("BetterAutoSave first throttled chunk dispatched: {} dim={} - throttling path verified",
-                            pos, priority.dimensionId());
+                    LOGGER.info("[BetterAutoSave] throttling path verified: first chunk dispatched [{}, {}] @ {}",
+                            pos.x, pos.z, priority.dimensionId());
                 }
             }
         } catch (Throwable t) {
+            metrics.recordCaptureNs(System.nanoTime() - t0);
             metrics.recordChunkFailed();
-            LOGGER.error("Throttled chunk save failed for {} dim={}, falling back to vanilla on next tick",
+            LOGGER.error("[BetterAutoSave] throttled chunk save failed for {} dim={}, falling back",
                     pos, priority.dimensionId(), t);
         }
     }
