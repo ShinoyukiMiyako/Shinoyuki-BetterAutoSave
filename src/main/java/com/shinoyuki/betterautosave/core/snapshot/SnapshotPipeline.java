@@ -90,7 +90,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             entityWorkerThreads.add(t);
             t.start();
         }
-        LOGGER.info("BetterAutoSave pipeline started with {} chunk workers and {} entity workers",
+        LOGGER.debug("[BetterAutoSave] worker pool ready: {} chunk + {} entity",
                 chunkWorkers.size(), entityWorkers.size());
     }
 
@@ -148,7 +148,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
     public void triggerDegraded() {
         if (degraded.compareAndSet(false, true)) {
-            LOGGER.error("BetterAutoSave entered degraded mode; chunk and entity saves will fall back to vanilla synchronous path");
+            LOGGER.error("[BetterAutoSave] entered DEGRADED mode; all saves fall back to vanilla synchronous path");
         }
     }
 

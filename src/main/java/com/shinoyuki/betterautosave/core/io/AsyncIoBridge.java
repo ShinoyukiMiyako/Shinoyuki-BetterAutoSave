@@ -36,7 +36,7 @@ public final class AsyncIoBridge {
         try {
             return worker.synchronize(true);
         } catch (Throwable t) {
-            LOGGER.error("IOWorker synchronize failed for level {}", level.dimension().location(), t);
+            LOGGER.error("[BetterAutoSave] IOWorker synchronize failed for level {}", level.dimension().location(), t);
             CompletableFuture<Void> failed = new CompletableFuture<>();
             failed.completeExceptionally(t);
             return failed;

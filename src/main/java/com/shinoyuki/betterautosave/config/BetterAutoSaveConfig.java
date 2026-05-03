@@ -71,13 +71,13 @@ public final class BetterAutoSaveConfig {
 
     public static void onLoad(ModConfigEvent.Loading event) {
         refresh();
-        LOGGER.info("BetterAutoSave config loaded: enabled={}, chunksPerTickBase={}, workers={}, eventCompatMode={}",
+        LOGGER.info("[BetterAutoSave] config loaded enabled={} chunksPerTickBase={} workers={} eventCompat={}",
                 enabled, chunksPerTickBase, workerThreads, eventCompatMode);
     }
 
     public static void onReload(ModConfigEvent.Reloading event) {
         refresh();
-        LOGGER.info("BetterAutoSave config reloaded: enabled={}, chunksPerTickBase={}, workers={}, eventCompatMode={}",
+        LOGGER.info("[BetterAutoSave] config reloaded enabled={} chunksPerTickBase={} workers={} eventCompat={}",
                 enabled, chunksPerTickBase, workerThreads, eventCompatMode);
     }
 

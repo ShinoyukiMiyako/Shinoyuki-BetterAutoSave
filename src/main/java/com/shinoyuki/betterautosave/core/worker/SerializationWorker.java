@@ -39,7 +39,7 @@ public final class SerializationWorker implements Runnable {
     @Override
     public void run() {
         ServerThreadAssert.markCurrentThreadAsWorker();
-        LOGGER.info("Worker {} started", name);
+        LOGGER.info("[BetterAutoSave] worker started: {}", name);
         try {
             while (running || !queue.isEmpty()) {
                 SaveTask task;
@@ -58,18 +58,19 @@ public final class SerializationWorker implements Runnable {
                     metrics.recordWorkerBuildNs(System.nanoTime() - t0);
                 } catch (Throwable t) {
                     metrics.recordWorkerBuildNs(System.nanoTime() - t0);
-                    LOGGER.error("Worker {} task {} threw, escalating to task fallback", name, task.taskName(), t);
+                    LOGGER.error("[BetterAutoSave] worker {} task {} threw, escalating to task fallback",
+                            name, task.taskName(), t);
                     try {
                         task.onUnhandledError(t);
                     } catch (Throwable inner) {
-                        LOGGER.error("Task fallback for {} itself threw", task.taskName(), inner);
+                        LOGGER.error("[BetterAutoSave] task fallback for {} itself threw", task.taskName(), inner);
                     }
                 }
             }
             drainedAfterStop = true;
         } finally {
             ServerThreadAssert.unmarkCurrentThreadAsWorker();
-            LOGGER.info("Worker {} stopped, queue size {}", name, queue.size());
+            LOGGER.info("[BetterAutoSave] worker stopped: {} (queue={})", name, queue.size());
         }
     }
 }
