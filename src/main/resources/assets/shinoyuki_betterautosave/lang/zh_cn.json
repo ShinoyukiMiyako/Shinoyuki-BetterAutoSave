@@ -1,0 +1,4 @@
+{
+  "mod.shinoyuki_betterautosave.name": "Shinoyuki BetterAutoSave",
+  "mod.shinoyuki_betterautosave.description": "主线程快照加 worker 线程 NBT 序列化的低卡顿存档优化。"
+}

@@ -3,7 +3,7 @@
   "minVersion": "0.8.5",
   "package": "com.shinoyuki.betterautosave.mixin",
   "compatibilityLevel": "JAVA_17",
-  "refmap": "betterautosave.refmap.json",
+  "refmap": "shinoyuki_betterautosave.refmap.json",
   "mixins": [
     "ChunkAccessMixin",
     "ChunkMapMixin",

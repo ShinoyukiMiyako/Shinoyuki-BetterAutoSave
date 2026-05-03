@@ -1,0 +1,4 @@
+{
+  "mod.shinoyuki_betterautosave.name": "Shinoyuki BetterAutoSave",
+  "mod.shinoyuki_betterautosave.description": "Main-thread snapshot plus worker-thread NBT serialization for low-stutter chunk saving."
+}

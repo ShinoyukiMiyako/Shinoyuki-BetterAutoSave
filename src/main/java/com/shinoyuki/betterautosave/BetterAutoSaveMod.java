@@ -26,7 +26,7 @@ import org.slf4j.Logger;
 @Mod(BetterAutoSaveMod.MOD_ID)
 public final class BetterAutoSaveMod {
 
-    public static final String MOD_ID = "betterautosave";
+    public static final String MOD_ID = "shinoyuki_betterautosave";
     public static final Logger LOGGER = LogUtils.getLogger();
 
     public BetterAutoSaveMod() {
