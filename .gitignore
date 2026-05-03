@@ -31,5 +31,7 @@ Thumbs.db
 
 /src/main/resources/shinoyuki_betterautosave.refmap.json
 
+CLAUDE.md
+
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
