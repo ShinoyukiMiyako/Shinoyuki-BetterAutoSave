@@ -84,6 +84,37 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 
 构建产物: `build/libs/betterautosave-0.1.0.jar`
 
+## 快速回退
+
+服上出现异常需要恢复, 三档可选, 都不会破坏世界数据:
+
+1. 临时禁用: 编辑 `config/betterautosave-server.toml` 把 `general.enabled` 改 `false`, 服务端 `/reload` 或重启。mod 仍加载但所有逻辑跳过, 等价 vanilla 行为
+2. 完全卸载: 把 `betterautosave-0.1.0.jar` 从 `mods/` 移走重启即可。world data 由 vanilla autosave 持续保护, 卸载不会丢数据
+3. 配置回滚: 仅调 `chunksPerTickBase` (1-64) 与 `adaptiveEnabled` 找平衡, 不必整 mod 卸载
+
+## 跑图观察清单 (生产首跑)
+
+服务端日志按时间顺序应出现:
+1. 启动: `BetterAutoSave installing pipeline for <ServerName>`
+2. 启动: `BetterAutoSave pipeline started with N chunk workers and M entity workers`
+3. 启动: 每个 worker 一行 `Worker BetterAutoSave-Chunk-Worker-K started`
+4. 启动: `BetterAutoSave pipeline installed`
+5. 第一次 autosave 触发 (5min 后): `BetterAutoSave intercepted autosave: enqueued N dirty chunks from minecraft:overworld`
+6. 几秒内: `BetterAutoSave first throttled chunk dispatched: <pos> dim=minecraft:overworld - throttling path verified` (此行只打一次, 是节流路径生效的关键证据)
+7. 之后每隔 `diagnosticLogIntervalTicks` (默认 200=10s) 一行 metrics 摘要, 仅在有变化时输出
+
+如出现:
+- 未见 5/6 行: 说明 mixin 未注入或路径短路, 立刻 `/betterautosave debug` 看 `submitted` 是否 > 0
+- 大量 `Throttled chunk save failed` ERROR: 说明 vanilla save 内部某处对 invoker 路径不友好, 切回退档 1
+- worker 异常 + 进入 degraded mode WARN: 自动 fallback vanilla, 但需排查根因
+
+关服必须出现:
+- `BetterAutoSave server stopping, draining workers`
+- 每个 worker 一行 `Worker ... stopped, queue size 0`
+- `BetterAutoSave all workers joined cleanly`
+
+任一缺失或 `queue size > 0` 说明有 in-flight 任务被丢, 重启后跑 `/betterautosave debug` 对比 `failed` 计数。
+
 ## 工程纪律
 
 参见 `CLAUDE.md`。摘要:

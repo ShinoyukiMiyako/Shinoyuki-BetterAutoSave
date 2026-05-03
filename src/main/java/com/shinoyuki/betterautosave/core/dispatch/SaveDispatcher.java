@@ -15,12 +15,15 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.slf4j.Logger;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHook, SnapshotPipeline.EntityResolutionHook {
 
     private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
 
     private final SnapshotPipeline pipeline;
     private final SaveMetrics metrics;
+    private final AtomicBoolean firstSuccessLogged = new AtomicBoolean(false);
 
     public SaveDispatcher(SnapshotPipeline pipeline, SaveMetrics metrics) {
         this.pipeline = pipeline;
@@ -52,6 +55,10 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
             boolean saved = ((ChunkMapInvoker) chunkMap).betterautosave$save(chunk);
             if (saved) {
                 metrics.recordChunkCompleted();
+                if (firstSuccessLogged.compareAndSet(false, true)) {
+                    LOGGER.info("BetterAutoSave first throttled chunk dispatched: {} dim={} - throttling path verified",
+                            pos, priority.dimensionId());
+                }
             }
         } catch (Throwable t) {
             metrics.recordChunkFailed();

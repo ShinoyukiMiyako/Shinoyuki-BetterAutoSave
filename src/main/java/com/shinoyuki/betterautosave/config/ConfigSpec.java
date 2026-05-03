@@ -100,8 +100,9 @@ public final class ConfigSpec {
         BUILDER.comment("Diagnostics").push("diagnostics");
 
         DIAGNOSTIC_LOGGING = BUILDER
-                .comment("Periodically log queue depth, throughput, and latency percentiles to the server log.")
-                .define("diagnosticLogging", false);
+                .comment("Periodically log queue depth, throughput, and latency percentiles to the server log.",
+                         "Default true on v0.1 to surface anomalies in production. Set false once stability proven.")
+                .define("diagnosticLogging", true);
 
         DIAGNOSTIC_LOG_INTERVAL_TICKS = BUILDER
                 .comment("How often diagnostic summaries are emitted, in server ticks (20 ticks = 1s).")
