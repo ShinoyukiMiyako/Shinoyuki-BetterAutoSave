@@ -36,7 +36,7 @@ class SaveMetricsTest {
     }
 
     @Test
-    void p99_falls_into_largest_observed_bucket() {
+    void max_tracks_outlier_while_p99_reflects_majority() {
         SaveMetrics m = new SaveMetrics();
         for (int i = 0; i < 99; i++) {
             m.recordWorkerBuildNs(50_000L);
@@ -45,8 +45,26 @@ class SaveMetricsTest {
 
         SaveMetrics.HistogramSnapshot h = m.snapshot().workerNbtBuild();
         assertEquals(100, h.count());
-        assertTrue(h.p99Ns() >= 100_000_000L,
-                "p99 should reach the bucket of the 800ms outlier, got " + h.p99Ns());
+        assertEquals(800_000_000L, h.maxNs(),
+                "max must reflect the single outlier exactly");
+        assertTrue(h.p99Ns() <= 1_000_000L,
+                "1 percent outlier in 100 samples must not pull p99 into a high bucket; got " + h.p99Ns());
+    }
+
+    @Test
+    void p99_reaches_outlier_bucket_when_outliers_exceed_one_percent() {
+        SaveMetrics m = new SaveMetrics();
+        for (int i = 0; i < 90; i++) {
+            m.recordWorkerBuildNs(50_000L);
+        }
+        for (int i = 0; i < 10; i++) {
+            m.recordWorkerBuildNs(800_000_000L);
+        }
+
+        SaveMetrics.HistogramSnapshot h = m.snapshot().workerNbtBuild();
+        assertEquals(100, h.count());
+        assertTrue(h.p99Ns() >= 500_000_000L,
+                "10 of 100 samples in the 1s bucket must lift p99 to that bucket; got " + h.p99Ns());
     }
 
     @Test
