@@ -1,0 +1,4 @@
+{
+  "mod.betterautosave.name": "BetterAutoSave",
+  "mod.betterautosave.description": "Main-thread snapshot plus worker-thread NBT serialization for low-stutter chunk saving."
+}
