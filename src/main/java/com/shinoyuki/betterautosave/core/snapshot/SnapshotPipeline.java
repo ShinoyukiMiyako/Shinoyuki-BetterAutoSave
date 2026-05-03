@@ -112,7 +112,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         }
         metrics.recordCaptureNs(System.nanoTime() - t0);
 
-        ChunkSnapshot snapshot = new ChunkSnapshot(chunk.getPos(), level.dimension(), tag, captured, state);
+        ChunkSnapshot snapshot = ChunkSnapshot.ofPrebuiltFullTag(
+                chunk.getPos(), level.dimension(), tag, captured, state, mode);
         ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics);
         metrics.recordChunkSubmitted();
         metrics.incInFlightSerializing();
