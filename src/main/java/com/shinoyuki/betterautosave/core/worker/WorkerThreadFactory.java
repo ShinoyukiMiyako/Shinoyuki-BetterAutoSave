@@ -25,13 +25,13 @@ public final class WorkerThreadFactory implements ThreadFactory {
         t.setDaemon(false);
         t.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
         t.setUncaughtExceptionHandler((thread, throwable) -> {
-            LOGGER.error("Worker thread {} died from uncaught throwable, triggering degraded mode",
+            LOGGER.error("[BetterAutoSave] worker {} died from uncaught throwable, triggering degraded mode",
                     thread.getName(), throwable);
             if (onUncaught != null) {
                 try {
                     onUncaught.run();
                 } catch (Throwable inner) {
-                    LOGGER.error("onUncaught hook itself threw", inner);
+                    LOGGER.error("[BetterAutoSave] degraded-mode hook itself threw", inner);
                 }
             }
         });

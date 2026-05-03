@@ -43,7 +43,7 @@ public final class ChunkSaveTask implements SaveTask {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             if (error != null) {
-                LOGGER.error("IO store failed for chunk {} dim={}", snapshot.pos(), snapshot.dimension().location(), error);
+                LOGGER.error("[BetterAutoSave] IO store failed for chunk {} dim={}", snapshot.pos(), snapshot.dimension().location(), error);
                 ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
                 if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
                     metrics.recordChunkFailed();
@@ -70,6 +70,6 @@ public final class ChunkSaveTask implements SaveTask {
         } else {
             metrics.recordChunkRetried();
         }
-        LOGGER.error("Worker uncaught for {}", taskName(), cause);
+        LOGGER.error("[BetterAutoSave] worker uncaught for {}", taskName(), cause);
     }
 }
