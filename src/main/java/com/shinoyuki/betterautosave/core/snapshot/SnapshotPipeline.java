@@ -115,6 +115,10 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             metrics.recordCaptureNs(System.nanoTime() - t0);
         }
 
+        // ChunkDataEvent.Save 派发: 必须在主线程, 在 worker 拼 sections 之前。
+        // PARTIAL  -> 用 preBuiltCoreTag (无 sections), 90%+ 监听 mod 不读 sections 不受影响
+        // FULL     -> 用 preBuiltFullTag (vanilla 完整 tag), 100% 兼容但主线程负担与 v0.1 接近
+        // DISABLED -> 完全跳过事件; 仅当用户确认无监听 mod 依赖 Save 时启用
         if (mode != ConfigSpec.EventCompatMode.DISABLED) {
             CompoundTag eventTag = snapshot.preBuiltFullTag() != null
                     ? snapshot.preBuiltFullTag()

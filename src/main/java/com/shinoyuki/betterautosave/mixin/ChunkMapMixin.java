@@ -85,6 +85,7 @@ public abstract class ChunkMapMixin {
         }
         if (enqueued > 0) {
             LOGGER.info("[BetterAutoSave] autosave intercepted @ {}", dimensionId);
+            LOGGER.info("[BetterAutoSave]   |- mode: {}", BetterAutoSaveConfig.eventCompatMode());
             LOGGER.info("[BetterAutoSave]   `- enqueued {} dirty chunks (deadline +{}s)",
                     enqueued, BetterAutoSaveConfig.deadlineGuardSeconds());
         } else {

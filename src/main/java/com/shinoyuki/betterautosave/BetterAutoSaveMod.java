@@ -80,6 +80,10 @@ public final class BetterAutoSaveMod {
                 BetterAutoSaveConfig.deadlineGuardSeconds());
         LOGGER.info("[BetterAutoSave]   |- event compat: {}", BetterAutoSaveConfig.eventCompatMode());
         LOGGER.info("[BetterAutoSave]   `- config: {}/{}/common.toml", SERIES_CONFIG_DIR, MOD_ID);
+        if (BetterAutoSaveConfig.eventCompatMode() == ConfigSpec.EventCompatMode.DISABLED) {
+            LOGGER.warn("[BetterAutoSave] eventCompatMode=DISABLED: ChunkDataEvent.Save listeners will NOT fire. "
+                    + "Switch to PARTIAL or FULL if any mod depends on Save event.");
+        }
         LOGGER.info("[BetterAutoSave] pipeline installed");
     }
 

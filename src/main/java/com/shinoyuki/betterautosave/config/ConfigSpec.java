@@ -89,10 +89,16 @@ public final class ConfigSpec {
         BUILDER.comment("Event compatibility").push("compat");
 
         EVENT_COMPAT_MODE = BUILDER
-                .comment("ChunkDataEvent.Save dispatch mode.",
-                         "PARTIAL: main-thread tag without sections (highest performance). Most mods only attach sub-tags and are unaffected.",
-                         "FULL: main-thread builds the complete tag including sections, halving the perf gain but matching vanilla semantics.",
-                         "DISABLED: skip the event entirely. Use only when no listener mod relies on it.")
+                .comment("ChunkDataEvent.Save dispatch mode (v0.2).",
+                         "PARTIAL (default, recommended): main thread fires the event with a core tag that excludes sections.",
+                         "  Most mods only attach sub-tags or read non-section fields and are unaffected.",
+                         "  Listeners that call tag.get(\"sections\") will see null - flip to FULL if you have such a listener.",
+                         "  Worker thread assembles sections after the event fires; perf gain is highest in this mode.",
+                         "FULL: main thread builds the complete tag (sections included) and fires the event with full data.",
+                         "  100% vanilla-equivalent semantics. Worker only does IO. Perf gain reduced (sections encoded on main thread).",
+                         "DISABLED: skip the event entirely. Worker assembles sections (same path as PARTIAL).",
+                         "  Use only when you are certain no listener mod relies on ChunkDataEvent.Save.",
+                         "  Saves the per-chunk event dispatch overhead but breaks any mod that hooks Save.")
                 .defineEnum("eventCompatMode", EventCompatMode.PARTIAL);
 
         BUILDER.pop();
