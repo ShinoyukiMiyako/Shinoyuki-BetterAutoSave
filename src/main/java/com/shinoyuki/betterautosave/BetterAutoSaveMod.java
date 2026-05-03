@@ -47,8 +47,8 @@ public final class BetterAutoSaveMod {
         } catch (IOException e) {
             throw new IllegalStateException("Cannot create config directory " + configRoot, e);
         }
-        String configRelative = SERIES_CONFIG_DIR + "/" + MOD_ID + "/server.toml";
-        ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, ConfigSpec.SPEC, configRelative);
+        String configRelative = SERIES_CONFIG_DIR + "/" + MOD_ID + "/common.toml";
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, ConfigSpec.SPEC, configRelative);
 
         MinecraftForge.EVENT_BUS.register(this);
     }
@@ -79,7 +79,7 @@ public final class BetterAutoSaveMod {
                 BetterAutoSaveConfig.adaptiveEnabled(),
                 BetterAutoSaveConfig.deadlineGuardSeconds());
         LOGGER.info("[BetterAutoSave]   |- event compat: {}", BetterAutoSaveConfig.eventCompatMode());
-        LOGGER.info("[BetterAutoSave]   `- config: {}/{}/server.toml", SERIES_CONFIG_DIR, MOD_ID);
+        LOGGER.info("[BetterAutoSave]   `- config: {}/{}/common.toml", SERIES_CONFIG_DIR, MOD_ID);
         LOGGER.info("[BetterAutoSave] pipeline installed");
     }
 

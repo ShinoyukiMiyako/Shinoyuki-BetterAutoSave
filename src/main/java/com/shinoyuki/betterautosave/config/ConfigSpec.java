@@ -28,7 +28,7 @@ public final class ConfigSpec {
     public static final ForgeConfigSpec SPEC;
 
     static {
-        BUILDER.comment("BetterAutoSave server-side configuration").push("general");
+        BUILDER.comment("BetterAutoSave common configuration (shared across all worlds)").push("general");
 
         ENABLED = BUILDER
                 .comment("Master switch. When false, all mod logic is bypassed and chunk saving falls back to vanilla behavior.")
