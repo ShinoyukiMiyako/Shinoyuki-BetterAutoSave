@@ -17,7 +17,6 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.level.ChunkDataEvent;
 import org.slf4j.Logger;
@@ -94,31 +93,42 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
                 chunkWorkers.size(), entityWorkers.size());
     }
 
-    public CompoundTag captureAndDispatchChunk(LevelChunk chunk, ServerLevel level, ChunkSaveState state) {
+    public boolean captureAndDispatchChunk(LevelChunk chunk, ServerLevel level, ChunkSaveState state) {
         ServerThreadAssert.assertOnServerThread(level.getServer());
         if (degraded.get()) {
             throw new IllegalStateException("Pipeline is in degraded mode");
         }
 
-        long t0 = System.nanoTime();
-        long captured = state.enterSerializing();
-        CompoundTag tag = ChunkSerializer.write(level, chunk);
+        if (!state.trySnapshot()) {
+            return false;
+        }
+
+        chunk.setUnsaved(false);
 
         ConfigSpec.EventCompatMode mode = BetterAutoSaveConfig.eventCompatMode();
+
+        long t0 = System.nanoTime();
+        ChunkSnapshot snapshot;
+        try {
+            snapshot = ChunkCaptureProcedure.capture(chunk, level, state, mode);
+        } finally {
+            metrics.recordCaptureNs(System.nanoTime() - t0);
+        }
+
         if (mode != ConfigSpec.EventCompatMode.DISABLED) {
+            CompoundTag eventTag = snapshot.preBuiltFullTag() != null
+                    ? snapshot.preBuiltFullTag()
+                    : snapshot.preBuiltCoreTag();
             long evT0 = System.nanoTime();
-            MinecraftForge.EVENT_BUS.post(new ChunkDataEvent.Save(chunk, level, tag));
+            MinecraftForge.EVENT_BUS.post(new ChunkDataEvent.Save(chunk, level, eventTag));
             metrics.recordEventDispatchNs(System.nanoTime() - evT0);
         }
-        metrics.recordCaptureNs(System.nanoTime() - t0);
 
-        ChunkSnapshot snapshot = ChunkSnapshot.ofPrebuiltFullTag(
-                chunk.getPos(), level.dimension(), tag, captured, state, mode);
         ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics);
         metrics.recordChunkSubmitted();
         metrics.incInFlightSerializing();
         chunkWorkerQueue.offer(task);
-        return tag;
+        return true;
     }
 
     @Override
