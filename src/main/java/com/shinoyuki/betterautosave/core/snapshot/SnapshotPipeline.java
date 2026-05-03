@@ -125,7 +125,6 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         }
 
         ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics);
-        metrics.recordChunkSubmitted();
         metrics.incInFlightSerializing();
         chunkWorkerQueue.offer(task);
         return true;
