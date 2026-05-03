@@ -33,6 +33,8 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
 
     @Override
     public void onPriorityDrained(ChunkSavePriority priority) {
+        metrics.recordChunkSubmitted();
+
         MinecraftServer server = pipeline.server();
         if (server == null) {
             metrics.recordChunkFallback();
