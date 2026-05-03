@@ -38,7 +38,7 @@ public final class ChunkSaveTask implements SaveTask {
         state.enterIoPending();
         metrics.incInFlightIoPending();
         long submitNs = System.nanoTime();
-        CompletableFuture<Void> future = ioBridge.storeChunk(level, snapshot.pos(), snapshot.tag());
+        CompletableFuture<Void> future = ioBridge.storeChunk(level, snapshot.pos(), snapshot.preBuiltFullTag());
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
