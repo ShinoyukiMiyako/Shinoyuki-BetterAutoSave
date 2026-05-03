@@ -4,7 +4,9 @@
   "package": "com.shinoyuki.betterautosave.mixin",
   "compatibilityLevel": "JAVA_17",
   "refmap": "betterautosave.refmap.json",
-  "mixins": [],
+  "mixins": [
+    "accessor.ChunkStorageAccessor"
+  ],
   "client": [],
   "server": [],
   "injectors": {
