@@ -40,8 +40,6 @@ import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
 import net.minecraft.world.level.lighting.LevelLightEngine;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.event.level.ChunkDataEvent;
 import org.slf4j.Logger;
 
 import java.util.EnumMap;
@@ -129,7 +127,6 @@ public final class ChunkCaptureProcedure {
 
         if (mode == ConfigSpec.EventCompatMode.FULL) {
             preBuiltFullTag = ChunkSerializer.write(level, chunk);
-            MinecraftForge.EVENT_BUS.post(new ChunkDataEvent.Save(chunk, level, preBuiltFullTag));
         } else {
             preBuiltCoreTag = buildCoreTag(
                     level,
@@ -150,9 +147,6 @@ public final class ChunkCaptureProcedure {
                     upgradeData,
                     blendingData,
                     belowZeroRetrogen);
-            if (mode == ConfigSpec.EventCompatMode.PARTIAL) {
-                MinecraftForge.EVENT_BUS.post(new ChunkDataEvent.Save(chunk, level, preBuiltCoreTag));
-            }
         }
 
         return new ChunkSnapshot(

@@ -3,9 +3,10 @@ package com.shinoyuki.betterautosave.core.dispatch;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
+import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
+import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor;
-import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapInvoker;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
@@ -32,8 +33,6 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
 
     @Override
     public void onPriorityDrained(ChunkSavePriority priority) {
-        metrics.recordChunkSubmitted();
-
         MinecraftServer server = pipeline.server();
         if (server == null) {
             metrics.recordChunkFallback();
@@ -52,26 +51,33 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
             return;
         }
         ChunkAccess chunk = holder.getLastAvailable();
-        if (!(chunk instanceof LevelChunk)) {
+        if (!(chunk instanceof LevelChunk levelChunk)) {
+            metrics.recordChunkFallback();
+            return;
+        }
+        ChunkSaveState state = ((ChunkSaveStateAccess) chunk).betterautosave$getState();
+        if (state == null) {
+            metrics.recordChunkFallback();
+            return;
+        }
+        if (!chunk.isUnsaved()) {
             metrics.recordChunkFallback();
             return;
         }
 
-        long t0 = System.nanoTime();
         try {
-            boolean saved = ((ChunkMapInvoker) chunkMap).betterautosave$save(chunk);
-            metrics.recordCaptureNs(System.nanoTime() - t0);
-            if (saved) {
-                metrics.recordChunkCompleted();
-                if (firstSuccessLogged.compareAndSet(false, true)) {
-                    LOGGER.info("[BetterAutoSave] throttling path verified: first chunk dispatched [{}, {}] @ {}",
-                            pos.x, pos.z, priority.dimensionId());
-                }
+            boolean dispatched = pipeline.captureAndDispatchChunk(levelChunk, target, state);
+            if (!dispatched) {
+                metrics.recordChunkFallback();
+                return;
+            }
+            if (firstSuccessLogged.compareAndSet(false, true)) {
+                LOGGER.info("[BetterAutoSave] async pipeline verified: first chunk dispatched [{}, {}] @ {}",
+                        pos.x, pos.z, priority.dimensionId());
             }
         } catch (Throwable t) {
-            metrics.recordCaptureNs(System.nanoTime() - t0);
             metrics.recordChunkFailed();
-            LOGGER.error("[BetterAutoSave] throttled chunk save failed for {} dim={}, falling back",
+            LOGGER.error("[BetterAutoSave] async dispatch failed for {} dim={}, falling back",
                     pos, priority.dimensionId(), t);
         }
     }
