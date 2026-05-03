@@ -29,7 +29,7 @@ Thumbs.db
 
 /forge-*-changelog.txt
 
-/src/main/resources/betterautosave.refmap.json
+/src/main/resources/shinoyuki_betterautosave.refmap.json
 
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
