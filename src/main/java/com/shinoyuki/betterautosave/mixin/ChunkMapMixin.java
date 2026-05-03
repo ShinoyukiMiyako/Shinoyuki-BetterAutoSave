@@ -84,9 +84,11 @@ public abstract class ChunkMapMixin {
             }
         }
         if (enqueued > 0) {
-            LOGGER.info("BetterAutoSave intercepted autosave: enqueued {} dirty chunks from {}", enqueued, dimensionId);
+            LOGGER.info("[BetterAutoSave] autosave intercepted @ {}", dimensionId);
+            LOGGER.info("[BetterAutoSave]   `- enqueued {} dirty chunks (deadline +{}s)",
+                    enqueued, BetterAutoSaveConfig.deadlineGuardSeconds());
         } else {
-            LOGGER.debug("BetterAutoSave intercepted autosave for {} (no dirty chunks)", dimensionId);
+            LOGGER.debug("[BetterAutoSave] autosave intercepted @ {} (no dirty chunks)", dimensionId);
         }
         ci.cancel();
     }

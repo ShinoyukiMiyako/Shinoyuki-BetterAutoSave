@@ -39,19 +39,25 @@ public final class DiagnosticLogger {
             return;
         }
         lastSubmittedSeen = snap.chunksSubmitted();
-        LOGGER.info(
-                "BetterAutoSave metrics: submitted={} completed={} failed={} retried={} fallback={} workerQueue={} inFlight={}/{} captureP99={}us workerP99={}us ioP99={}us",
+        LOGGER.info("[BetterAutoSave] metrics");
+        LOGGER.info("[BetterAutoSave]   |- chunks: submitted={} completed={} failed={} retried={} fallback={}",
                 snap.chunksSubmitted(),
                 snap.chunksCompleted(),
                 snap.chunksFailed(),
                 snap.chunksRetried(),
-                snap.chunksFallback(),
+                snap.chunksFallback());
+        LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} entityDepth={}",
                 snap.workerQueueDepth(),
+                snap.entityQueueDepth());
+        LOGGER.info("[BetterAutoSave]   |- inflight: serializing={} ioPending={}",
                 snap.inFlightSerializing(),
-                snap.inFlightIoPending(),
+                snap.inFlightIoPending());
+        LOGGER.info("[BetterAutoSave]   `- latency p50/p99 (us): capture={}/{} worker={}/{} io={}/{}",
+                snap.mainThreadCapture().p50Ns() / 1000,
                 snap.mainThreadCapture().p99Ns() / 1000,
+                snap.workerNbtBuild().p50Ns() / 1000,
                 snap.workerNbtBuild().p99Ns() / 1000,
-                snap.ioStore().p99Ns() / 1000
-        );
+                snap.ioStore().p50Ns() / 1000,
+                snap.ioStore().p99Ns() / 1000);
     }
 }
