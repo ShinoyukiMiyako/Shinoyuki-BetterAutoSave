@@ -3,12 +3,22 @@ package com.shinoyuki.betterautosave.command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
+import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
+import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
+import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
+import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ChunkHolder;
+import net.minecraft.server.level.ChunkMap;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunk;
 
 public final class BetterAutoSaveCommand {
 
@@ -22,6 +32,7 @@ public final class BetterAutoSaveCommand {
                         .then(Commands.literal("metrics").executes(BetterAutoSaveCommand::metrics))
                         .then(Commands.literal("flush").executes(BetterAutoSaveCommand::flush))
                         .then(Commands.literal("status").executes(BetterAutoSaveCommand::status))
+                        .then(Commands.literal("force-async").executes(BetterAutoSaveCommand::forceAsync))
         );
     }
 
@@ -108,6 +119,75 @@ public final class BetterAutoSaveCommand {
         String mode = pipeline.isDegraded() ? "DEGRADED" : (BetterAutoSaveConfig.enabled() ? "ACTIVE" : "DISABLED");
         ctx.getSource().sendSuccess(() -> Component.literal("BetterAutoSave: " + mode), false);
         return 1;
+    }
+
+    /**
+     * 诊断命令: 强制对当前维度的所有 visibleChunkMap LevelChunk 走一次完整异步路径,
+     * 绕开 vanilla autosave 的 6000-tick 周期与 chunk dirty 状态。每个 chunk 都会
+     * markDirty + setUnsaved(true) 然后调 pipeline.captureAndDispatchChunk, dev 单机
+     * 环境下用于验证 worker NBT 拼装路径是否真实跑起来。生产环境使用相当于一次手动
+     * autosave (除节流外行为等价), 仍受 BAS 常规 fallback / state 守卫保护。
+     */
+    private static int forceAsync(CommandContext<CommandSourceStack> ctx) {
+        if (!BetterAutoSaveCore.isInstalled()) {
+            ctx.getSource().sendFailure(Component.literal("BetterAutoSave is not installed"));
+            return 0;
+        }
+        if (!BetterAutoSaveConfig.enabled()) {
+            ctx.getSource().sendFailure(Component.literal("BetterAutoSave is disabled in config"));
+            return 0;
+        }
+        SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
+        if (pipeline.isDegraded()) {
+            ctx.getSource().sendFailure(Component.literal("BetterAutoSave is in DEGRADED mode"));
+            return 0;
+        }
+        ServerLevel level = ctx.getSource().getLevel();
+        String dimensionId = level.dimension().location().toString();
+        SaveScheduler scheduler = BetterAutoSaveCore.scheduler();
+        SaveMetrics metrics = BetterAutoSaveCore.metrics();
+        ChunkMap chunkMap = level.getChunkSource().chunkMap;
+
+        int dispatched = 0;
+        int fallback = 0;
+        int errors = 0;
+        for (ChunkHolder holder : ((ChunkMapAccessor) chunkMap).betterautosave$getVisibleChunkMap().values()) {
+            ChunkAccess chunk = holder.getLastAvailable();
+            if (!(chunk instanceof LevelChunk levelChunk)) {
+                continue;
+            }
+            long packed = chunk.getPos().toLong();
+            long sequence = scheduler.nextEnqueueSequence();
+            ChunkSaveState state = ((ChunkSaveStateAccess) chunk).betterautosave$getOrCreateState(
+                    packed, dimensionId, sequence);
+            chunk.setUnsaved(true);
+            state.markDirty();
+            metrics.recordChunkSubmitted();
+            try {
+                if (pipeline.captureAndDispatchChunk(levelChunk, level, state)) {
+                    dispatched++;
+                } else {
+                    metrics.recordChunkFallback();
+                    fallback++;
+                }
+            } catch (Throwable t) {
+                metrics.recordChunkFailed();
+                errors++;
+                BetterAutoSaveMod.LOGGER.error(
+                        "[BetterAutoSave] force-async failed for chunk {} dim={}",
+                        chunk.getPos(), dimensionId, t);
+            }
+        }
+
+        int finalDispatched = dispatched;
+        int finalFallback = fallback;
+        int finalErrors = errors;
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "force-async @ " + dimensionId
+                        + ": dispatched=" + finalDispatched
+                        + " fallback=" + finalFallback
+                        + " errors=" + finalErrors), true);
+        return finalDispatched;
     }
 
     private BetterAutoSaveCommand() {
