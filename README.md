@@ -148,13 +148,6 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 
 任一缺失或 `queue size > 0` 说明有 in-flight 任务被丢, 重启后跑 `/betterautosave debug` 对比 `failed` 计数。
 
-## 工程纪律
-
-参见 `CLAUDE.md`。摘要:
-- 严禁幻觉 API, 所有 vanilla 类名/方法名/字段名以 1.20.1 真实反编译为准
-- 严禁吞异常, 失败必须 ERROR 日志加状态机降级
-- 严禁 emoji 与 TODO 占位, 注释只解释 why
-- 提交规范 Conventional Commits 中文, 严禁 Co-Authored-By Claude 之类 AI 署名
 
 ## 许可
 
