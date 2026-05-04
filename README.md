@@ -82,16 +82,18 @@ v0.2 把 NBT 编码从主线程移到 worker, 收益分两个维度:
 - v0.1: capture p99 = 500us, worker p99 = 0us (worker 仅做 IO 提交)
 - v0.2: capture p99 < 100us (主线程更轻), worker p99 > 0us (worker 真实跑 assemble)
 
-## v0.2 路线图回顾
+## 路线图
 
-v0.1 -> v0.2 路线图已落地:
+v0.1 -> v0.2 已落地:
 - worker 端完整 NBT 构建 (走 mixin Invoker 暴露 vanilla `ChunkSerializer` 私有 helper, 不复制 vanilla 代码)
 - ChunkDataEvent.Save 三档兼容生效 (PARTIAL / FULL / DISABLED)
+- 生产 80mod 60p 服实测: fallback 0%, capture p99 0.5ms, worker p99 5ms
 
-未做项保留至 v0.3+:
-- 实体保存路径异步化 (`EntityStorage.storeEntities` / `PersistentEntitySectionManager.autoSave`), v0.3 目标
-- ChunkMap.processUnloads 路径异步化 (unload 后的 save 仍主线程), v0.4 目标; 涉及 chunk 即将释放与 worker 持有快照的同步问题, 风险最高
-- chunk **load** 路径异步化 (`ChunkSerializer.read` 也是主线程消耗), v0.5+
+v0.3+ 详细路线、技术方案、风险评估与实战数据汇总见 [ROADMAP.md](ROADMAP.md):
+- v0.3 实体路径异步化 (`EntityStorage.storeEntities`)
+- v0.4 chunk unload 路径异步化 (mustDrain + Phaser, 实战 spike 元凶之一)
+- v0.5 chunk load 路径异步化 (实验性, `ChunkSerializer.read`)
+- v0.6+ Prometheus exporter / mod tick trace / 图形化诊断面板
 
 ## 已知限制 / 兼容性
 
