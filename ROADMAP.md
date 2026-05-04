@@ -169,7 +169,82 @@ mixin 目标:
 
 v0.5 进入前先做技术调研 PR, 确认可行性后才 implementation.
 
-## v0.6+ — 工具化与诊断
+## v0.6.0 — SavedData (DimensionDataStorage) 异步化
+
+**优先级**: 中 (依赖具体服 mod, 装大型 mod 如 MTR 时升至高)
+**技术风险**: 低 (与 v0.2 同构, 文件粒度比 chunk 粗)
+**期望收益**: 消除 vanilla autosave 周期内 `dataStorage.save()` 主线程同步序列化, 大型 SavedData 文件场景显著降低 spike
+
+### 背景
+
+vanilla `ServerLevel.save` 在 autosave 周期内顺序调用:
+```java
+this.dataStorage.save();          // SavedData 全部同步序列化 (主线程)
+serverChunkCache.save(flush);     // chunk 路径 (v0.2 已接管)
+```
+
+`DimensionDataStorage.save()` 同步遍历 cache map, 每个 SavedData 调 `savedData.save(file)` 直接写盘。
+mod 注册的 SavedData (典型例子: MTR `mtr_train_data.dat` 包含全部路线 / 车站 / 列车 / 调度 NBT, ANTE
+进出闸统计持续累积) 文件越大单次序列化越慢, > 10 MB 时单文件 50-200 ms 主线程 spike。
+
+### 范围
+
+mixin 目标:
+- `net.minecraft.world.level.storage.DimensionDataStorage.save()` 拦截
+- 内部 `cache` field accessor (mixin Accessor 暴露 `private final Map<String, SavedData> cache`)
+
+数据结构 (新建独立于 chunk pipeline):
+```
+SavedDataSnapshot record {
+    String fileName;
+    File targetFile;
+    CompoundTag preBuiltTag;       // 主线程 SavedData.save 内的 tag 构建结果
+    long capturedDirtyMark;
+    SavedData state;               // 反引用, 用于 onSaveSuccess 清 dirty
+}
+```
+
+主线程做:
+1. 遍历 dataStorage.cache, 对每个 dirty SavedData (`isDirty()` true)
+2. 调用 SavedData 内部 `save(CompoundTag tag)` 拿到 NBT (这一步在主线程, 因 SavedData 实现可能持有 mod 内部状态引用, 不安全 worker 化 — 与 v0.2 BlockEntity 同样思路)
+3. 包装为 SavedDataSnapshot 入新建 savedDataWorkerQueue
+
+worker 线程做:
+1. NbtIo.writeCompressed(tag, file) 写盘
+2. 完成后回调 SavedData.setDirty(false)
+
+### 与 v0.2 chunk pipeline 的关系
+
+不复用 chunkWorkerQueue (避免影响 chunk 优先级), 新建独立 savedDataWorkerQueue + 1-2 worker thread。
+配置项新增:
+- `workers.savedDataWorkerThreads` (默认 1)
+- `safety.savedDataMaxFileSizeMB` (单文件超过阈值时降级为同步, 防止 worker queue 被几十 MB 单文件堵死)
+
+### 风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| SavedData 实现持有 mod 内部 mutable state, worker 序列化时被改 | 主线程 `SavedData.save(CompoundTag)` 拿到完整 tag 后 worker 仅 IO, 不读 mod 状态 |
+| 关服时 SavedData 仍在 worker queue 未落盘 | 复用 v0.2 关服 join 流程 (新 worker 池一并 join) |
+| 文件写到一半崩溃 | NbtIo.writeCompressed 内部已是写临时文件 + atomic rename, vanilla 行为不变 |
+| mod 在 SavedData.save 内部抛异常 | task.onUnhandledError 走 FAILED, 下个 autosave 周期 fallback vanilla 同步 |
+
+### Commit 计划 (6 个原子提交)
+
+1. `feat(mixin): DimensionDataStorage cache + save 拦截`
+2. `feat(snapshot): SavedDataSnapshot record`
+3. `feat(snapshot): SavedDataSaveTask worker 路径`
+4. `refactor(dispatch): DimensionDataStorage.save 入 savedDataWorkerQueue`
+5. `feat(config): savedDataWorkerThreads + maxFileSizeMB 降级开关`
+6. `docs(readme): v0.6 SavedData 异步化说明 + 已知大型 mod 提示 (MTR / ANTE)`
+
+### 实战触发条件
+
+- `du -h world/data/*.dat world/DIM-1/data/*.dat world/DIM1/data/*.dat` 出现 > 10 MB 单文件
+- spark spike-only profile 中 `DimensionDataStorage.save` 或 `SavedData.save` frame 占比 > 0.5%
+- mtr_train_data.dat 持续增长 (ANTE 进出闸统计无清理机制)
+
+## v0.7+ — 工具化与诊断
 
 **优先级**: 中低
 **目的**: 让用户能自己定位 mod hot path / vanilla 瓶颈, 不依赖外部 spark profiler
@@ -194,11 +269,14 @@ v0.5 进入前先做技术调研 PR, 确认可行性后才 implementation.
 
 ## 优先级总结
 
-| 版本 | 优先 | 风险 | 技术新颖度 | 实战收益 (spark spike-only 占比) |
+| 版本 | 优先 | 风险 | 技术新颖度 | 实战收益 |
 |---|---|---|---|---|
 | v0.3 实体异步 | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
 | v0.4 unload 异步 | 高 | 高 | 新机制 (Phaser) | 0.55% spike 直接消除 |
 | v0.5 load 异步 | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
-| v0.6 工具化 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
+| v0.6 SavedData 异步 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
+| v0.7 工具化 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
 
-实施顺序建议: **v0.3 → v0.4 → v0.6 (中间穿插) → v0.5 (实验性)**.
+实施顺序建议: **v0.3 → v0.4 → v0.6 → v0.7 (中间穿插) → v0.5 (实验性)**.
+
+v0.6 提到 v0.5 之前的原因: 风险低 + 技术与 v0.2 同构, 实施快; 装大型 mod 服(尤其 MTR)收益直接.
