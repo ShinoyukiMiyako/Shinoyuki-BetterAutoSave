@@ -39,7 +39,7 @@ BAS 接管全部三条路径, 走同一套异步管线:
 - Minecraft Forge 47.3.22 或更新 (47.3 / 47.4 系列均可)
 - Java 17 (Eclipse Temurin)
 
-把构建产物 `build/libs/shinoyuki_betterautosave-0.4.0.jar` 放进服务端 `mods/` 目录, 启动后配置文件生成在 `config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml`。所有 Shinoyuki 系列优化 mod 共享 `config/Shinoyuki-Optimize/` 父目录, 每 mod 一个子文件夹便于集中管理。
+把构建产物 `build/libs/shinoyuki_betterautosave-0.5.1.jar` 放进服务端 `mods/` 目录, 启动后配置文件生成在 `config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml`。所有 Shinoyuki 系列优化 mod 共享 `config/Shinoyuki-Optimize/` 父目录, 每 mod 一个子文件夹便于集中管理。
 
 ## 配置项 (config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml)
 
@@ -96,22 +96,26 @@ PARTIAL 是默认与推荐档。若你确认无 mod 监听 `ChunkDataEvent.Save`
 - ChunkMap.save Async 计数 > 0 (跑图后), Fallback 应 = 0
 - MustDrain pending 静止 30s 后归零
 
-实战参考 (生产 80mod 60p 服, Forge 47.4 / Java 21 ZGC / Ryzen 9950X / 30 GB heap, autosave 路径单独验证): fallback 0%, capture p99 0.5ms, worker p99 5ms, BAS 自身 chunk worker 占 1.46% (873ms / 600s). unload + eager save 路径生产数据待回填。
+实战参考 (生产 80mod 60p 服, Forge 47.4 / Java 21 ZGC / Ryzen 9950X / 30 GB heap):
+- autosave 路径: fallback 0%, capture p99 0.5ms, worker p99 5ms, BAS chunk worker 占 1.46%
+- unload + eager save 路径 (v0.5.0 / 32 view 满速跑图 + 远距 TP 6h+): failed=0 fallback=0 mustDrainPending leak=0 chunkMapSaveAsync 数百万级 capture p99 500us worker p99 500us
+- v0.5.1 cooldown 优化: bypass 速率从 100k/s 降到 ~400/s, 主线程 mixin check 开销 -0.05 ms/tick
 
 ## 路线图
 
-当前已实现:
+当前已实现 (v0.5.1):
 - autosave 路径 NBT 编码异步化 + EventCompatMode 三档兼容
 - unload + eager save 路径 mixin 接管 (`ChunkMap.save` HEAD 拦截)
 - mustDrain 状态机 + 关服 shutdownMode 守卫
-- `/betterautosave debug / metrics / flush / status / force-async / drain-unload` 命令套件
+- `/betterautosave debug / metrics / flush / status / force-async / drain-unload` 命令套件 (全部异步, 主线程 0 阻塞)
+- bypass cooldown 优化 (POI flush + setReturnValue, 让 vanilla saveChunkIfNeeded cooldown 正确更新)
 - adaptive TPS 节流 + deadline guard
 
 候选 (详细方案与风险评估见 [ROADMAP.md](ROADMAP.md)):
-- 实体路径异步化 (`EntityStorage.storeEntities`, 与 chunk 路径同构, 复用 entity worker pool)
-- SavedData / DimensionDataStorage 异步化 (装大型 mod 如 MTR / ANTE 时收益高)
-- chunk load 路径异步化 (实验性, `ChunkSerializer.read`, 风险高)
-- 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace)
+- v0.6 实体路径异步化 (`EntityStorage.storeEntities`, 与 chunk 路径同构, 复用 entity worker pool, 下一个 minor)
+- v0.7 SavedData / DimensionDataStorage 异步化 (装大型 mod 如 MTR / ANTE 时收益高)
+- v0.8 chunk load 路径异步化 (实验性, `ChunkSerializer.read`, 风险高)
+- v0.9 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace)
 
 ## 已知限制 / 兼容性
 
@@ -133,14 +137,14 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)   # 或 Windows 等价
 ./gradlew runClient     # 启 dev client (run/client)
 ```
 
-构建产物: `build/libs/shinoyuki_betterautosave-0.4.0.jar`
+构建产物: `build/libs/shinoyuki_betterautosave-0.5.1.jar`
 
 ## 快速回退
 
 服上出现异常需要恢复, 三档可选, 都不会破坏世界数据:
 
 1. **临时禁用**: 编辑 `config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml` 把 `general.enabled` 改 `false`, 服务端 `/reload` 或重启。mod 仍加载但所有逻辑跳过, 等价 vanilla 行为 (含 unload + eager save 路径)
-2. **完全卸载**: 把 `shinoyuki_betterautosave-0.4.0.jar` 从 `mods/` 移走重启即可。world data 由 vanilla autosave 持续保护, 卸载不会丢数据
+2. **完全卸载**: 把 `shinoyuki_betterautosave-0.5.1.jar` 从 `mods/` 移走重启即可。world data 由 vanilla autosave 持续保护, 卸载不会丢数据
 3. **配置回滚**: 仅调 `chunksPerTickBase` (1-64) 与 `eventCompatMode` 找平衡, 不必整 mod 卸载。怀疑 PARTIAL 引起 mod 兼容性问题就切 FULL
 
 ## 跑图观察清单 (生产首跑)

@@ -2,19 +2,23 @@
 
 记录 v0.2 之后的演进路线、技术方案、实战数据与风险评估。
 
-## v0.1 / v0.2 / v0.4 现状
+## v0.1 / v0.2 / v0.4 / v0.5.x 现状
 
 | 版本 | 范围 | 主线程主要消除点 | 实战指标 |
 |---|---|---|---|
 | v0.1 | autosave 节流分摊 + IOWorker 代理 | 集中尖刺 → 分散小幅 | fallback 31-68% (跑图场景) |
 | v0.2 | NBT 编码异步化 + EventCompatMode 三档 | `ChunkSerializer.write` 完全离开主线程 | fallback 0%, capture p99 0.5ms, worker p99 5ms |
-| v0.4 | unload + eager save 路径接管 | `processUnloads` 内 `save` 主线程同步 NBT 消除 | (实施完成, 待生产数据) |
+| v0.4 | unload + eager save 路径接管 | `processUnloads` 内 `save` 主线程同步 NBT 消除 | mustDrain 接通 + 三计数 + drain-unload |
+| v0.5.0 | v0.4 + 3 个稳定 fix | drain-unload 异步化 / mustDrain gauge 配对 / DiagnosticLogger 输出 v0.4 计数 | 生产 6h+ 跑图: failed=0 fallback=0 mustDrain leak 0 |
+| v0.5.1 | bypass cooldown 优化 + flush 异步化 | `chunkMapSave bypass` 速率 100k/s -> ~400/s | mixin 在 isUnsaved=false 时 setReturnValue(true) 让 saveChunkIfNeeded cooldown 正确更新 |
 
-> **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms), 实体路径的 mod 服收益相对低. v0.3 工作转为 v0.5 之后候选.
+> **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
 
 v0.2 把 vanilla autosave 周期内的 NBT 编码主线程开销 (`PalettedContainer` codec / `BlockState` codec / `biomeCodec`) 完全搬到 worker 线程, 主线程仅保留浅拷贝、BlockEntity 序列化、core tag 构建三件不可避免的工作。
 
 v0.4 把同等的处理覆盖到 vanilla `ChunkMap.save(ChunkAccess)` 入口, 同时接管 `scheduleUnload` (unload 路径) 与 `saveChunkIfNeeded` (eager save 10s cooldown 路径) 两条调用点。设计上**无 Phaser 主线程阻塞** — 详见 v0.4 段。
+
+v0.5.1 修复 v0.5.0 生产观察到的 bypass 暴涨 (chunk 已 clean 但 vanilla 每 tick 全扫 visibleChunkMap 反复进 mixin), 通过让 mixin 在 isUnsaved=false 时主动 flush POI + setReturnValue(true) 让 saveChunkIfNeeded 把 cooldown 设到 10s 后, 该 chunk 安静一段时间不再被反复检查.
 
 ## v0.2 实战数据 (生产 80mod 60p 服, Forge 47.4 / Java 21 ZGC / Ryzen 9950X / 30 GB heap)
 
@@ -40,10 +44,9 @@ IO-Worker (vanilla, x14): 2.79% (1670ms / 600s)
 
 v0.2 已 100% 解决其能解决的部分 (`saveAllChunks(false)` 路径主线程 NBT). 剩余 spike 元凶分两类: (1) mod hot path 需 mod 自身或社区 fork 解决; (2) vanilla `read` / unload 路径同步 IO, BAS v0.4 / v0.5 接管。
 
-## v0.3.0 — 实体路径异步化 (跳过, 转 v0.5+ 候选)
+## v0.6.0 — 实体路径异步化 (原 v0.3, 顺延)
 
-**当前状态**: 跳过, 实施顺序调整为 v0.4 优先 (unload 用户痛点).
-**重新调度**: 见下方 v0.5+ 实体路径段.
+**当前状态**: 候选, 下一个 minor 目标. v0.5.x patch 测试稳定后启动.
 
 **优先级**: 中
 **技术风险**: 低 (与 v0.2 同构)
@@ -82,13 +85,14 @@ worker 线程做:
 ### Commit 计划 (8 个原子提交)
 
 1. `feat(mixin): 暴露 EntityStorage.worker 字段 + 私有 helper invoker`
-2. `refactor(snapshot): 新增 EntitySnapshot v0.3 字段清单`
-3. `feat(snapshot): 新增 EntityCaptureProcedure 主线程预序列化`
-4. `feat(snapshot): 新增 EntityNbtAssembler worker 拼装`
-5. `refactor(snapshot): EntitySaveTask 改走 assembler + entity ioBridge`
-6. `refactor(dispatch): EntityDispatcher 接入 SnapshotPipeline`
-7. `feat(scheduler): SaveScheduler.entity 路径接通异步`
-8. `docs(readme): v0.3 实体路径说明`
+2. `refactor(snapshot): EntitySnapshot v0.6 字段清单 (与 ChunkSnapshot 同构)`
+3. `feat(state): EntitySaveState 状态机 (与 ChunkSaveState 平行)`
+4. `feat(snapshot): EntityCaptureProcedure 主线程预序列化 Entity.save`
+5. `feat(snapshot): EntityNbtAssembler worker 拼装 outer tag`
+6. `refactor(snapshot): EntitySaveTask 改走 assembler + entity ioBridge`
+7. `feat(mixin+dispatch): PersistentEntitySectionManager.autoSave 拦截 + EntityDispatcher 接通`
+8. `feat(scheduler+command): scheduler.entity 路径接通 + /betterautosave debug entity 段`
+9. `docs(readme+roadmap): v0.6 实体路径说明`
 
 ### 风险
 
@@ -165,9 +169,9 @@ mixin 目标:
 
 待 stress test 验证 (后续工作). 理论分析: 已 dispatch 到 worker 但未完成 IO 的 chunk, 在 kill -9 下数据丢失边界与 v0.2 autosave 同等。
 
-## v0.5.0 — chunk load 路径异步化 (实验性)
+## v0.8.0 — chunk load 路径异步化 (实验性, 原 v0.5)
 
-**优先级**: 中
+**优先级**: 中 (实验性, 不承诺时间表)
 **技术风险**: 极高 (玩家会看到空白 chunk)
 **期望收益**: 消除 `ChunkSerializer.read` 同步 IO, teleport / 跑图场景减少 100-200ms 单 tick spike
 
@@ -193,11 +197,11 @@ mixin 目标:
 | 玩家进入 chunk 时看到空白方块 | 客户端发送暂缓数据包, 直到 worker 完成 |
 | Entity 同步 spawn 在尚未加载的 chunk | 阻塞 entity spawn, 直到 chunk ready |
 | 与其他 chunk loading mod (Lithium / Starlight / C2ME) 冲突 | 兼容性测试矩阵 |
-| 实施复杂度高于 v0.2 / v0.3 / v0.4 | 先做实验性预研, 不承诺时间表 |
+| 实施复杂度高于 v0.2 / v0.4 / v0.6 / v0.7 | 先做实验性预研, 不承诺时间表 |
 
-v0.5 进入前先做技术调研 PR, 确认可行性后才 implementation.
+v0.8 进入前先做技术调研 PR, 确认可行性后才 implementation.
 
-## v0.6.0 — SavedData (DimensionDataStorage) 异步化
+## v0.7.0 — SavedData (DimensionDataStorage) 异步化 (原 v0.6)
 
 **优先级**: 中 (依赖具体服 mod, 装大型 mod 如 MTR 时升至高)
 **技术风险**: 低 (与 v0.2 同构, 文件粒度比 chunk 粗)
@@ -272,7 +276,7 @@ worker 线程做:
 - spark spike-only profile 中 `DimensionDataStorage.save` 或 `SavedData.save` frame 占比 > 0.5%
 - mtr_train_data.dat 持续增长 (ANTE 进出闸统计无清理机制)
 
-## v0.7+ — 工具化与诊断
+## v0.9+ — 工具化与诊断 (原 v0.7)
 
 **优先级**: 中低
 **目的**: 让用户能自己定位 mod hot path / vanilla 瓶颈, 不依赖外部 spark profiler
@@ -295,15 +299,19 @@ worker 线程做:
 - **ZGC** 在 30GB heap 配置下表现完美 (STW max 34μs, 0 allocation stall), 内存维度无需进一步优化。
 - **多人(2+) 跑图 + 建筑** 场景 max mspt 79ms→206ms, 但 95%ile 仍 4ms, TPS 全程 20。spike 是孤立 outlier 而非常态。
 
-## 优先级总结 (v0.4 落地后更新)
+## 优先级总结 (v0.5.x 落地后更新)
 
 | 版本 | 状态 | 优先 | 风险 | 技术新颖度 | 实战收益 |
 |---|---|---|---|---|---|
 | v0.2 autosave 异步 | [已落地] | n/a | 已验证 | n/a | 200ms-2s autosave spike 消除 |
 | v0.4 unload + eager 异步 | [已落地] | n/a | 实施后中 (无 Phaser) | mustDrain 状态机 | 0.55% spike 消除, eager save 常态开销 |
-| v0.5 实体异步 (原 v0.3) | 候选 | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
-| v0.6 SavedData 异步 | 候选 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
-| v0.6 chunk load 异步 | 候选 (实验性) | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
-| v0.7 工具化 | 候选 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
+| v0.5.0 v0.4 + 3 fix | [已落地] | n/a | 低 | 同构 | drain-unload async, mustDrain gauge, DiagnosticLogger |
+| v0.5.1 bypass cooldown | [已落地] | n/a | 低 | POI flush + setReturnValue 技巧 | bypass 速率 100k/s -> 400/s |
+| v0.6 实体异步 (原 v0.3) | 候选 (下一个 minor) | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
+| v0.7 SavedData 异步 (原 v0.6) | 候选 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
+| v0.8 chunk load 异步 (原 v0.5) | 候选 (实验性) | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
+| v0.9 工具化 (原 v0.7) | 候选 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
 
-后续实施顺序建议: **v0.5 实体 → v0.6 SavedData → v0.7 工具化 → v0.6 chunk load (实验性)**.
+后续实施顺序建议: **v0.6 实体 → v0.7 SavedData → v0.9 工具化 (穿插) → v0.8 chunk load (实验性)**.
+
+> 顺序原则: 风险低 + 与 v0.2/v0.4 同构的优先, 装 MTR 类大型 mod 时 SavedData 立即升优先级, 实验性 chunk load 留最后.
