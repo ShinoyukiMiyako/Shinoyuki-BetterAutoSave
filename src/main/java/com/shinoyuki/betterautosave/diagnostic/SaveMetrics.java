@@ -26,6 +26,11 @@ public final class SaveMetrics {
     private final LongAdder chunksRetried = new LongAdder();
     private final LongAdder chunksFallback = new LongAdder();
 
+    private final LongAdder chunkMapSaveAsync = new LongAdder();
+    private final LongAdder chunkMapSaveFallback = new LongAdder();
+    private final LongAdder chunkMapSaveBypass = new LongAdder();
+    private final AtomicLong mustDrainPending = new AtomicLong();
+
     private final LongAdder entitiesSubmitted = new LongAdder();
     private final LongAdder entitiesCompleted = new LongAdder();
     private final LongAdder entitiesFailed = new LongAdder();
@@ -58,6 +63,26 @@ public final class SaveMetrics {
 
     public void recordChunkFallback() {
         chunksFallback.increment();
+    }
+
+    public void recordChunkMapSaveAsync() {
+        chunkMapSaveAsync.increment();
+    }
+
+    public void recordChunkMapSaveFallback() {
+        chunkMapSaveFallback.increment();
+    }
+
+    public void recordChunkMapSaveBypass() {
+        chunkMapSaveBypass.increment();
+    }
+
+    public void incMustDrainPending() {
+        mustDrainPending.incrementAndGet();
+    }
+
+    public void decMustDrainPending() {
+        mustDrainPending.decrementAndGet();
     }
 
     public void recordEntitySubmitted() {
@@ -119,6 +144,10 @@ public final class SaveMetrics {
                 chunksFailed.sum(),
                 chunksRetried.sum(),
                 chunksFallback.sum(),
+                chunkMapSaveAsync.sum(),
+                chunkMapSaveFallback.sum(),
+                chunkMapSaveBypass.sum(),
+                mustDrainPending.get(),
                 entitiesSubmitted.sum(),
                 entitiesCompleted.sum(),
                 entitiesFailed.sum(),
@@ -199,6 +228,10 @@ public final class SaveMetrics {
             long chunksFailed,
             long chunksRetried,
             long chunksFallback,
+            long chunkMapSaveAsync,
+            long chunkMapSaveFallback,
+            long chunkMapSaveBypass,
+            long mustDrainPending,
             long entitiesSubmitted,
             long entitiesCompleted,
             long entitiesFailed,

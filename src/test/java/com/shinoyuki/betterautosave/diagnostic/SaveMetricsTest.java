@@ -88,4 +88,31 @@ class SaveMetricsTest {
         assertEquals(0, h.avgNs());
         assertEquals(0, h.p99Ns());
     }
+
+    @Test
+    void chunk_map_save_counters_accumulate_independently() {
+        SaveMetrics m = new SaveMetrics();
+        m.recordChunkMapSaveAsync();
+        m.recordChunkMapSaveAsync();
+        m.recordChunkMapSaveAsync();
+        m.recordChunkMapSaveFallback();
+        m.recordChunkMapSaveBypass();
+        m.recordChunkMapSaveBypass();
+
+        SaveMetrics.Snapshot snap = m.snapshot();
+        assertEquals(3, snap.chunkMapSaveAsync());
+        assertEquals(1, snap.chunkMapSaveFallback());
+        assertEquals(2, snap.chunkMapSaveBypass());
+    }
+
+    @Test
+    void must_drain_pending_gauge_tracks_inc_dec() {
+        SaveMetrics m = new SaveMetrics();
+        m.incMustDrainPending();
+        m.incMustDrainPending();
+        m.incMustDrainPending();
+        m.decMustDrainPending();
+
+        assertEquals(2, m.snapshot().mustDrainPending());
+    }
 }
