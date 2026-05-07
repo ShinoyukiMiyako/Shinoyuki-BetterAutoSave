@@ -46,9 +46,13 @@ public final class ChunkSaveTask implements SaveTask {
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
+            boolean wasDraining = state.mustDrain();
             if (error != null) {
                 LOGGER.error("[BetterAutoSave] IO store failed for chunk {} dim={}", snapshot.pos(), snapshot.dimension().location(), error);
                 ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
+                if (wasDraining && !state.mustDrain()) {
+                    metrics.decMustDrainPending();
+                }
                 if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
                     metrics.recordChunkFailed();
                 } else {
@@ -57,6 +61,9 @@ public final class ChunkSaveTask implements SaveTask {
                 return;
             }
             ChunkSaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
+            if (wasDraining && !state.mustDrain()) {
+                metrics.decMustDrainPending();
+            }
             if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
                 metrics.recordChunkCompleted();
             } else {
@@ -68,7 +75,11 @@ public final class ChunkSaveTask implements SaveTask {
     @Override
     public void onUnhandledError(Throwable cause) {
         ChunkSaveState state = snapshot.state();
+        boolean wasDraining = state.mustDrain();
         ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
+        if (wasDraining && !state.mustDrain()) {
+            metrics.decMustDrainPending();
+        }
         if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
             metrics.recordChunkFailed();
         } else {
