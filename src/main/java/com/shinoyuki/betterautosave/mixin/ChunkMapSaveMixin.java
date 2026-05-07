@@ -10,6 +10,7 @@ import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.ai.village.poi.PoiManager;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.slf4j.Logger;
@@ -39,6 +40,10 @@ public abstract class ChunkMapSaveMixin {
     @Final
     ServerLevel level;
 
+    @Shadow
+    @Final
+    private PoiManager poiManager;
+
     @Inject(method = "save(Lnet/minecraft/world/level/chunk/ChunkAccess;)Z",
             at = @At("HEAD"),
             cancellable = true)
@@ -64,11 +69,26 @@ public abstract class ChunkMapSaveMixin {
         }
 
         if (!(chunk instanceof LevelChunk levelChunk)) {
+            // 非 LevelChunk (ProtoChunk / ImposterProtoChunk) 不接管, 让 vanilla
+            // 自己处理 (POI flush + isUnsaved 检查 + 可能的 ChunkSerializer.write).
             metrics.recordChunkMapSaveBypass();
             return;
         }
         if (!chunk.isUnsaved()) {
+            // chunk 已 clean (BAS 异步路径已 save 过, 或 vanilla 上次已 save).
+            // 关键优化 (v0.5.1): vanilla saveChunkIfNeeded 内的 cooldown 仅在 save
+            // 返 true 时才更新; 我们 return 不 cancel 让 vanilla 第二行返 false,
+            // cooldown 不更新 -> 下 tick 又被检查 -> mixin bypass 暴涨 (生产 ~100k/s).
+            //
+            // 修复: 手动 flush POI (与 vanilla 行为等价, vanilla save 第一行就 flush
+            // POI 不论 isUnsaved), 然后 cancel + setReturnValue(true), 让
+            // saveChunkIfNeeded 把 cooldown 设到 10s 后, 该 chunk 安静一段时间.
+            //
+            // 副作用: setReturnValue(true) 让 saveChunkIfNeeded 的 l 计数器累加,
+            // 更快达到 20 跳出循环, 减少 visibleChunkMap 全扫成本.
+            poiManager.flush(chunk.getPos());
             metrics.recordChunkMapSaveBypass();
+            cir.setReturnValue(true);
             return;
         }
 
