@@ -2,6 +2,7 @@
 /out/
 /classes/
 /bin/
+/tools/
 
 /.gradle/
 /gradle-app.setting
