@@ -99,21 +99,74 @@ public final class BetterAutoSaveCommand {
         return 1;
     }
 
+    /**
+     * v0.5.1: flush 命令异步化. 之前 pipeline.drainPending 内部跑 Thread.sleep(50)
+     * 循环, 命令在主线程执行, 主线程被 sleep 锁死最多 60s ("Can't keep up").
+     * 与 drain-unload 同款 bug, 同款修复方式: 派后台 daemon 线程轮询.
+     */
     private static int flush(CommandContext<CommandSourceStack> ctx) {
         if (!BetterAutoSaveCore.isInstalled()) {
             ctx.getSource().sendFailure(Component.literal("BetterAutoSave is not installed"));
             return 0;
         }
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
-        long timeoutMs = (long) BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L;
-        boolean drained = pipeline.drainPending(timeoutMs);
-        if (drained) {
-            ctx.getSource().sendSuccess(() -> Component.literal("BetterAutoSave drained all in-flight saves"), true);
+        SaveMetrics metrics = BetterAutoSaveCore.metrics();
+        SaveMetrics.Snapshot snap0 = metrics.snapshot();
+        if (pipeline.chunkWorkerQueue().isEmpty()
+                && pipeline.entityWorkerQueue().isEmpty()
+                && snap0.inFlightIoPending() == 0L) {
+            ctx.getSource().sendSuccess(() -> Component.literal(
+                    "BetterAutoSave flush: nothing in-flight"
+                            + " (cumulative chunkMapSaveAsync=" + snap0.chunkMapSaveAsync()
+                            + " chunksCompleted=" + snap0.chunksCompleted() + ")"), false);
             return 1;
         }
-        ctx.getSource().sendFailure(Component.literal(
-                "BetterAutoSave drain timed out after " + timeoutMs + " ms; vanilla flush will catch remainder"));
-        return 0;
+
+        long timeoutMs = (long) BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L;
+        net.minecraft.server.MinecraftServer server = ctx.getSource().getServer();
+        CommandSourceStack source = ctx.getSource();
+        int initialChunkQ = pipeline.chunkWorkerQueue().size();
+        int initialEntityQ = pipeline.entityWorkerQueue().size();
+        long initialIo = snap0.inFlightIoPending();
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "BetterAutoSave flush: watching chunkQueue=" + initialChunkQ
+                        + " entityQueue=" + initialEntityQ
+                        + " ioPending=" + initialIo
+                        + " (timeout " + timeoutMs + "ms, async)"), false);
+
+        Thread watcher = new Thread(() -> {
+            long t0 = System.currentTimeMillis();
+            long deadline = t0 + timeoutMs;
+            while (System.currentTimeMillis() < deadline) {
+                if (pipeline.chunkWorkerQueue().isEmpty()
+                        && pipeline.entityWorkerQueue().isEmpty()
+                        && metrics.snapshot().inFlightIoPending() == 0L) {
+                    long elapsed = System.currentTimeMillis() - t0;
+                    server.execute(() -> source.sendSuccess(() -> Component.literal(
+                            "BetterAutoSave flush: drained in " + elapsed + "ms"), true));
+                    return;
+                }
+                try {
+                    Thread.sleep(100L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "BetterAutoSave flush: interrupted")));
+                    return;
+                }
+            }
+            SaveMetrics.Snapshot finalSnap = metrics.snapshot();
+            int qC = pipeline.chunkWorkerQueue().size();
+            int qE = pipeline.entityWorkerQueue().size();
+            server.execute(() -> source.sendFailure(Component.literal(
+                    "BetterAutoSave flush: timed out after " + timeoutMs + "ms"
+                            + " (chunkQueue=" + qC + " entityQueue=" + qE
+                            + " ioPending=" + finalSnap.inFlightIoPending()
+                            + "); vanilla flush will catch remainder")));
+        }, "BetterAutoSave-Flush-Watch");
+        watcher.setDaemon(true);
+        watcher.start();
+        return 1;
     }
 
     private static int status(CommandContext<CommandSourceStack> ctx) {
@@ -216,8 +269,14 @@ public final class BetterAutoSaveCommand {
         long initial = snap0.mustDrainPending();
         if (initial == 0L && pipeline.chunkWorkerQueue().isEmpty()
                 && snap0.inFlightIoPending() == 0L) {
+            // 报告累计计数让用户确认 v0.4 mixin 在工作 (生产 100k+ 调用属正常),
+            // 而不是误以为 mod 没生效.
             ctx.getSource().sendSuccess(() -> Component.literal(
-                    "BetterAutoSave drain-unload: nothing pending"), false);
+                    "BetterAutoSave drain-unload: nothing pending"
+                            + " (cumulative chunkMapSaveAsync=" + snap0.chunkMapSaveAsync()
+                            + " bypass=" + snap0.chunkMapSaveBypass()
+                            + " fallback=" + snap0.chunkMapSaveFallback()
+                            + ")"), false);
             return 1;
         }
 
