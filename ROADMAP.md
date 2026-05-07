@@ -2,7 +2,7 @@
 
 记录 v0.2 之后的演进路线、技术方案、实战数据与风险评估。
 
-## v0.1 / v0.2 / v0.4 / v0.5.x 现状
+## v0.1 / v0.2 / v0.4 / v0.5.x / v0.6 现状
 
 | 版本 | 范围 | 主线程主要消除点 | 实战指标 |
 |---|---|---|---|
@@ -11,6 +11,7 @@
 | v0.4 | unload + eager save 路径接管 | `processUnloads` 内 `save` 主线程同步 NBT 消除 | mustDrain 接通 + 三计数 + drain-unload |
 | v0.5.0 | v0.4 + 3 个稳定 fix | drain-unload 异步化 / mustDrain gauge 配对 / DiagnosticLogger 输出 v0.4 计数 | 生产 6h+ 跑图: failed=0 fallback=0 mustDrain leak 0 |
 | v0.5.1 | bypass cooldown 优化 + flush 异步化 | `chunkMapSave bypass` 速率 100k/s -> ~400/s | mixin 在 isUnsaved=false 时 setReturnValue(true) 让 saveChunkIfNeeded cooldown 正确更新 |
+| v0.6.0 | entity 路径接管 + Histogram bucket 扩展 | `EntityStorage.storeEntities` 主线程 entity.save 循环移到 BAS dispatch + worker | BAS-Entity-Worker 池终于真实工作 (v0.5.x 之前空闲 1.46%) |
 
 > **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
 
@@ -44,12 +45,12 @@ IO-Worker (vanilla, x14): 2.79% (1670ms / 600s)
 
 v0.2 已 100% 解决其能解决的部分 (`saveAllChunks(false)` 路径主线程 NBT). 剩余 spike 元凶分两类: (1) mod hot path 需 mod 自身或社区 fork 解决; (2) vanilla `read` / unload 路径同步 IO, BAS v0.4 / v0.5 接管。
 
-## v0.6.0 — 实体路径异步化 (原 v0.3, 顺延)
+## v0.6.0 — 实体路径异步化 [已落地]
 
-**当前状态**: 候选, 下一个 minor 目标. v0.5.x patch 测试稳定后启动.
+**当前状态**: 已落地. 9 commit 连推, gradle build pass, 待生产数据回填.
 
 **优先级**: 中
-**技术风险**: 低 (与 v0.2 同构)
+**技术风险**: 低 (与 v0.2 同构, 实测如此)
 **期望收益**: 实体多场景 (大型农场 / 怪物刷怪) 主线程消除 entity NBT 编码开销
 
 ### 范围
@@ -100,18 +101,38 @@ worker 线程做:
    - 副作用: SaveMetricsTest 已用 `<= 1_000_000L` 等宽容断言, 不需改
    - 工作量: < 30 行, 1 commit
 
-### Commit 计划 (1 + 9 个原子提交)
+### 已落地 commit (10 个原子提交)
 
-0. `fix(diag): Histogram bucket 扩展到 60s + p99 溢出标签` (顺手清理)
-1. `feat(mixin): 暴露 EntityStorage.worker 字段 + 私有 helper invoker`
-2. `refactor(snapshot): EntitySnapshot v0.6 字段清单 (与 ChunkSnapshot 同构)`
-3. `feat(state): EntitySaveState 状态机 (与 ChunkSaveState 平行)`
-4. `feat(snapshot): EntityCaptureProcedure 主线程预序列化 Entity.save`
-5. `feat(snapshot): EntityNbtAssembler worker 拼装 outer tag`
-6. `refactor(snapshot): EntitySaveTask 改走 assembler + entity ioBridge`
-7. `feat(mixin+dispatch): PersistentEntitySectionManager.autoSave 拦截 + EntityDispatcher 接通`
-8. `feat(scheduler+command): scheduler.entity 路径接通 + /betterautosave debug entity 段`
-9. `docs(readme+roadmap): v0.6 实体路径说明`
+0. `fix(diag): Histogram bucket 扩展到 60s + p99 溢出 ">60s" 标签` (Phase 0 顺手清理)
+1. `feat(mixin): EntityStorageAccessor 暴露 worker 字段` (Phase 1)
+2. `feat(state): EntitySaveState 状态机 + EntitySaveStateAccess 接口` (Phase 2.2)
+3. `refactor(snapshot): EntitySnapshot v0.6 字段清单 (与 ChunkSnapshot 同构)` (Phase 2.1)
+4. `feat(snapshot): EntityCaptureProcedure 主线程预序列化 Entity.save` (Phase 2.3)
+5. `feat(snapshot): EntityNbtAssembler worker 拼 outer tag` (Phase 3.1)
+6. `feat(snapshot): EntitySaveTask + SaveMetrics 加 entityRetried/Fallback` (Phase 3.2)
+7. `feat(mixin): EntityStorage.storeEntities HEAD 拦截 v0.6 entity 路径接管` (Phase 4)
+8. `feat(command+diag): /betterautosave debug + DiagnosticLogger entity 段` (Phase 5)
+9. `docs(readme+roadmap): v0.6 entity 路径接管说明` (Phase 6)
+
+### 实施 vs 设计 — 偏差
+
+设计 vs 实施基本吻合. 几个细节调整:
+
+- **拦截点选 EntityStorage.storeEntities 而非 PESM.autoSave**: 后者是上层调度,
+  前者是真正主线程开销. 拦底层一刀切, 同时覆盖 autoSave / saveAll /
+  processChunkUnload 三条调用点. 与 ChunkMapSaveMixin 拦底层 ChunkMap.save
+  策略一致.
+- **EntitySaveStateAccess 用 ConcurrentHashMap by packed pos**: EntityStorage
+  是 per-level 单例, 不像 ChunkAccess per-chunk 实例可挂字段. 折中方案是
+  mixin 给 EntityStorage 实例挂一个 ConcurrentHashMap 索引 per-chunk 状态机.
+- **EntitySaveTask 持有 IOWorker 引用而非走 AsyncIoBridge**: 避免
+  ServerLevel -> entityManager (private) -> permanentStorage (private) ->
+  worker (private) 三层 accessor 链, mixin inject 时 EntityStorage 实例已经
+  提供 worker 字段访问.
+- **空 chunk 让 vanilla 处理**: vanilla EntityStorage.storeEntities 内 isEmpty()
+  分支有 emptyChunks 优化 + null tag 写盘语义, 绕开会破坏该优化.
+- **inFlightSerializing / inFlightIoPending 与 chunk 路径共享**: gauge 反映
+  总管线压力, 不分 chunk / entity.
 
 ### 风险
 
@@ -326,11 +347,11 @@ worker 线程做:
 | v0.4 unload + eager 异步 | [已落地] | n/a | 实施后中 (无 Phaser) | mustDrain 状态机 | 0.55% spike 消除, eager save 常态开销 |
 | v0.5.0 v0.4 + 3 fix | [已落地] | n/a | 低 | 同构 | drain-unload async, mustDrain gauge, DiagnosticLogger |
 | v0.5.1 bypass cooldown | [已落地] | n/a | 低 | POI flush + setReturnValue 技巧 | bypass 速率 100k/s -> 400/s |
-| v0.6 实体异步 (原 v0.3) | 候选 (下一个 minor) | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
-| v0.7 SavedData 异步 (原 v0.6) | 候选 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
+| v0.6 实体异步 | [已落地] | n/a | 低 (实施验证) | 与 v0.2 同构 | BAS-Entity-Worker 池真实工作 |
+| v0.7 SavedData 异步 (原 v0.6) | 候选 (下一个 minor) | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
 | v0.8 chunk load 异步 (原 v0.5) | 候选 (实验性) | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
 | v0.9 工具化 (原 v0.7) | 候选 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
 
-后续实施顺序建议: **v0.6 实体 → v0.7 SavedData → v0.9 工具化 (穿插) → v0.8 chunk load (实验性)**.
+后续实施顺序建议: **v0.7 SavedData → v0.9 工具化 (穿插) → v0.8 chunk load (实验性)**.
 
 > 顺序原则: 风险低 + 与 v0.2/v0.4 同构的优先, 装 MTR 类大型 mod 时 SavedData 立即升优先级, 实验性 chunk load 留最后.
