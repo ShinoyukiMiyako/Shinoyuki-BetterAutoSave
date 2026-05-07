@@ -93,6 +93,7 @@ public final class ChunkSaveState {
         if (generation.get() == inFlightGeneration) {
             phase.set(Phase.CLEAN);
             retryCount.set(0);
+            mustDrain = false;
             return IoOutcome.CLEAN_LANDED;
         }
         phase.set(Phase.DIRTY);
@@ -103,6 +104,7 @@ public final class ChunkSaveState {
         int n = retryCount.incrementAndGet();
         if (n > maxRetries) {
             phase.set(Phase.FAILED);
+            mustDrain = false;
             return IoOutcome.FAILED_TERMINAL;
         }
         phase.set(Phase.DIRTY);

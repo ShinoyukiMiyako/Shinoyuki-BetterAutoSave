@@ -140,4 +140,66 @@ class ChunkSaveStateTest {
         s.clearMustDrain();
         assertFalse(s.mustDrain());
     }
+
+    @Test
+    void io_completed_clean_landed_clears_must_drain() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        s.markDirty();
+        s.trySnapshot();
+        s.enterSerializing();
+        s.enterIoPending();
+        s.markMustDrain();
+        assertTrue(s.mustDrain());
+
+        ChunkSaveState.IoOutcome outcome = s.ioCompletedSuccessfully();
+        assertEquals(ChunkSaveState.IoOutcome.CLEAN_LANDED, outcome);
+        assertFalse(s.mustDrain(),
+                "CLEAN_LANDED must clear mustDrain so shutdown join does not wait forever");
+    }
+
+    @Test
+    void io_completed_requeue_dirty_keeps_must_drain() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        s.markDirty();
+        s.trySnapshot();
+        s.enterSerializing();
+        s.enterIoPending();
+        s.markMustDrain();
+        s.markDirty();
+
+        ChunkSaveState.IoOutcome outcome = s.ioCompletedSuccessfully();
+        assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, outcome);
+        assertTrue(s.mustDrain(),
+                "REQUEUE_DIRTY must keep mustDrain so the next pass still drains the chunk");
+    }
+
+    @Test
+    void io_failed_terminal_clears_must_drain() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        s.markDirty();
+        s.trySnapshot();
+        s.enterSerializing();
+        s.enterIoPending();
+        s.markMustDrain();
+
+        ChunkSaveState.IoOutcome outcome = s.ioFailed(0);
+        assertEquals(ChunkSaveState.IoOutcome.FAILED_TERMINAL, outcome);
+        assertFalse(s.mustDrain(),
+                "FAILED_TERMINAL must clear mustDrain so shutdown join does not wait forever");
+    }
+
+    @Test
+    void io_failed_retry_keeps_must_drain() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        s.markDirty();
+        s.trySnapshot();
+        s.enterSerializing();
+        s.enterIoPending();
+        s.markMustDrain();
+
+        ChunkSaveState.IoOutcome outcome = s.ioFailed(2);
+        assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, outcome);
+        assertTrue(s.mustDrain(),
+                "Non-terminal retry must keep mustDrain so the next attempt still drains");
+    }
 }
