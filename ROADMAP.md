@@ -98,7 +98,7 @@ worker 线程做:
 | 持久化实体 (mob, item, vehicle) 与 LootTable / EntityType 注册时序 | 引用持有 RegistryAccess.Frozen, 与 v0.2 同处理 |
 | 大批量实体 (刷怪塔) 主线程预序列化时间过长 | 可配置每 tick 实体上限 (复用 entityChunksPerTickBase) |
 
-## v0.4.0 — chunk unload + eager save 路径异步化 (Phase C) ✅ 已落地
+## v0.4.0 — chunk unload + eager save 路径异步化 (Phase C) [已落地]
 
 **优先级**: 高 (实战 spike 0.55% 占比, 用户最痛点)
 **实施技术风险**: 中 (低于初设计预期)
@@ -152,10 +152,10 @@ mixin 目标:
 
 | 原设计列出的风险 | 实施后状态 |
 |---|---|
-| chunk 内存释放但 worker 还在拼 NBT | ✅ 不发生: capture 已固化独立内存, worker 不读活 chunk |
-| Phaser 死锁 | ✅ N/A: 无 Phaser |
-| 主线程阻塞反而比同步慢 | ✅ N/A: 无主线程阻塞 |
-| 服务器崩溃丢数据 | ⚠️ 边界与 v0.2 autosave 等价: chunk 在 worker 完成前崩溃, 该 chunk 落盘失败, 与 vanilla autosave 失败等价 |
+| chunk 内存释放但 worker 还在拼 NBT | OK 不发生: capture 已固化独立内存, worker 不读活 chunk |
+| Phaser 死锁 | OK N/A: 无 Phaser |
+| 主线程阻塞反而比同步慢 | OK N/A: 无主线程阻塞 |
+| 服务器崩溃丢数据 | NOTE 边界与 v0.2 autosave 等价: chunk 在 worker 完成前崩溃, 该 chunk 落盘失败, 与 vanilla autosave 失败等价 |
 
 新发现的风险:
 - **mod 兼容**: 其他 mod 也 mixin `ChunkMap.save` 时 (例如未知优化 mod), 二者注入顺序可能 conflict, BAS Fallback 计数会上升, 不影响数据安全, 仅性能损失。监控 `/betterautosave debug` 的 ChunkMap.save Fallback 列。
@@ -299,8 +299,8 @@ worker 线程做:
 
 | 版本 | 状态 | 优先 | 风险 | 技术新颖度 | 实战收益 |
 |---|---|---|---|---|---|
-| v0.2 autosave 异步 | ✅ 已落地 | n/a | 已验证 | n/a | 200ms-2s autosave spike 消除 |
-| v0.4 unload + eager 异步 | ✅ 已落地 | n/a | 实施后中 (无 Phaser) | mustDrain 状态机 | 0.55% spike 消除, eager save 常态开销 |
+| v0.2 autosave 异步 | [已落地] | n/a | 已验证 | n/a | 200ms-2s autosave spike 消除 |
+| v0.4 unload + eager 异步 | [已落地] | n/a | 实施后中 (无 Phaser) | mustDrain 状态机 | 0.55% spike 消除, eager save 常态开销 |
 | v0.5 实体异步 (原 v0.3) | 候选 | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
 | v0.6 SavedData 异步 | 候选 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
 | v0.6 chunk load 异步 | 候选 (实验性) | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
