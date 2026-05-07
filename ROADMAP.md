@@ -82,8 +82,27 @@ worker 线程做:
 
 复用 v0.2 已就位的 entity worker pool (默认 2 thread)。
 
-### Commit 计划 (8 个原子提交)
+### 顺手做 (Phase 0 — 垃圾回收, CLAUDE.md 第 0 步法则)
 
+实体路径开发前先做诊断 cosmetic 清理:
+
+1. **`fix(diag): Histogram p99 / max 溢出 bucket 显示 ">5s"`**
+   - 现状: `BUCKET_UPPER_BOUNDS_NS` 最后一个 bucket 是 `Long.MAX_VALUE`,
+     当 IO p99 落到 [5s, ∞) bucket 时, `percentile()` 返回 `Long.MAX_VALUE`,
+     除以 1000 显示为 9223372036854775us, 数字反人类
+   - 触发场景: TP 集中 / 跑图集中导致 vanilla IOWorker 单线程串行写
+     region file 排队, 单次 IO > 5s. 与 v0.5.x 已知现象一致, 非 BAS bug
+   - 修复方案 A (推荐): 扩 bucket 到 10s / 30s / 60s, 让常见极端场景
+     有合理 p99 数值, 仅最罕见的 > 60s 才落到 ">60s" 标签
+   - 修复方案 B: DiagnosticLogger / debug 命令输出层加格式化, 检测
+     `p99Ns == Long.MAX_VALUE` 时显示 ">5s" / ">60s"
+   - 选 A: 数据更精确, 代码改动小, percentile 算法不变, 仅扩 bucket 数组
+   - 副作用: SaveMetricsTest 已用 `<= 1_000_000L` 等宽容断言, 不需改
+   - 工作量: < 30 行, 1 commit
+
+### Commit 计划 (1 + 9 个原子提交)
+
+0. `fix(diag): Histogram bucket 扩展到 60s + p99 溢出标签` (顺手清理)
 1. `feat(mixin): 暴露 EntityStorage.worker 字段 + 私有 helper invoker`
 2. `refactor(snapshot): EntitySnapshot v0.6 字段清单 (与 ChunkSnapshot 同构)`
 3. `feat(state): EntitySaveState 状态机 (与 ChunkSaveState 平行)`
