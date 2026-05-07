@@ -209,37 +209,62 @@ mixin 目标:
 
 待 stress test 验证 (后续工作). 理论分析: 已 dispatch 到 worker 但未完成 IO 的 chunk, 在 kill -9 下数据丢失边界与 v0.2 autosave 同等。
 
-## v0.8.0 — chunk load 路径异步化 (实验性, 原 v0.5)
+## Forge 1.20.1 生态调研与 BAS 定位 (2026-05)
 
-**优先级**: 中 (实验性, 不承诺时间表)
-**技术风险**: 极高 (玩家会看到空白 chunk)
-**期望收益**: 消除 `ChunkSerializer.read` 同步 IO, teleport / 跑图场景减少 100-200ms 单 tick spike
+调研 chunk 异步化方向上的生态竞品后, 确认 BAS 在 Forge 1.20.1 上无活跃维护的竞争对手, 并据此**放弃 v0.8 chunk load 异步化方向** (详见下一节).
 
-### 范围
+### 主流 chunk 异步化 mod 状态
 
-mixin 目标:
-- `ChunkSerializer.read` 主线程同步反序列化路径
+| Mod | 平台 | 1.20.1 Forge 支持 | 当前状态 | 覆盖范围 |
+|---|---|---|---|---|
+| Moonrise (Spottedleaf, [Tuinity/Moonrise](https://github.com/Tuinity/Moonrise)) | Fabric + NeoForge | 否 | 活跃维护 (1.21.x 起) | Paper chunk system 移植 + Starlight |
+| C2ME (Fabric, ishland) | Fabric | n/a | 活跃维护 | chunk gen + IO + load 全套 |
+| C2MEF ([RelativityMC/C2ME-forge](https://github.com/RelativityMC/C2ME-forge)) | Forge | 是 (0.2.0+alpha.12) | 2025-07-12 已 archived | chunk gen + IO + load, 不碰 SavedData |
+| Starlight Forge | Forge | 是 (1.1.2) | 已 archived | LightEngine 重写 |
+| BAS | Forge | 是, 活跃维护 | 当前 v0.6 | chunk save + entity save (v0.7 加 SavedData) |
 
-技术核心: 两阶段 load
-1. 主线程仅做 NBT 解码 (轻量, 因 NBT 已 IO 完成读到内存)
-2. PalettedContainer 反序列化 (重头) 移到 worker
-3. worker 完成后回调主线程 install 到 ChunkMap
+**结论**: Forge 1.20.1 上 BAS 是**唯一活跃维护**的 chunk save 异步化方案, 无活跃竞品. v0.7 SavedData 异步化更是完全空白生态位 — Moonrise / C2MEF / 任何已知 mod 都不覆盖 `DimensionDataStorage.save()`.
 
-但 vanilla 强依赖 chunk 立即可用 (玩家进入新 chunk 时 server 必须能 setBlock / spawn entity 等). 异步化方案需:
-- 临时 placeholder chunk 占位 (vanilla 已有 ProtoChunk 雏形)
-- 玩家请求该 chunk 数据时被阻塞或返回空 chunk view
-- worker 完成后切换到真实 chunk
+### BAS 兼容性矩阵 (代码核对)
 
-### 风险
+BAS mixin 拦截点 (见 [shinoyuki_betterautosave.mixins.json](src/main/resources/shinoyuki_betterautosave.mixins.json)):
+- `ChunkMap.saveAllChunks(boolean)` HEAD
+- `ChunkMap.save(ChunkAccess)` HEAD
+- `EntityStorage.storeEntities(ChunkEntities)` HEAD
+- 几个 Accessor / Invoker (纯 getter, 无业务逻辑撞车)
 
-| 风险 | 缓解 |
-|---|---|
-| 玩家进入 chunk 时看到空白方块 | 客户端发送暂缓数据包, 直到 worker 完成 |
-| Entity 同步 spawn 在尚未加载的 chunk | 阻塞 entity spawn, 直到 chunk ready |
-| 与其他 chunk loading mod (Lithium / Starlight / C2ME) 冲突 | 兼容性测试矩阵 |
-| 实施复杂度高于 v0.2 / v0.4 / v0.6 / v0.7 | 先做实验性预研, 不承诺时间表 |
+BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升级链 / entity tick / 网络包 / 渲染.
 
-v0.8 进入前先做技术调研 PR, 确认可行性后才 implementation.
+| 优化 mod | 兼容性 | 理由 |
+|---|---|---|
+| Starlight (Forge 1.20.1) | 兼容 | BAS 只用公共 API `getDataLayerData()` 读 DataLayer, Starlight 必须保持该 API 契约 (vanilla save 也用), `DataLayer.copy()` 是 `byte[].clone` 与底层引擎实现解耦 |
+| C2MEF (Forge 1.20.1 alpha) | 直接冲突 | 都拦 `ChunkMap.save()`, 同装会双层 mixin. 但 C2MEF 已 archived, 不构成实际威胁 |
+| Modernfix | 兼容 | 内存 / 启动优化, 不碰 chunk save 路径 |
+| FerriteCore | 兼容 | 改 BlockState 内存表示, BAS 用 `PalettedContainer.copy()` 走标准路径 |
+| Radium / Canary (Lithium 移植) | 兼容 | 改 entity / block tick, 不碰 save 路径 |
+| Embeddium / Rubidium | 完全无关 | 客户端渲染, 不影响服务端 chunk save |
+| Forge worldgen mod (Terralith / BetterEnd / Tectonic / Cataclysm) | 兼容 (FULL 模式) | FULL 模式调 `ChunkSerializer.write` 触发 `ChunkDataEvent.Save`, 跟 vanilla 路径一致, mod inject 正常 |
+| 同上 (DISABLED 模式) | 可能冲突 | DISABLED 跳过事件触发, 深度依赖 `ChunkDataEvent.Save` 的 mod 会丢自定义 NBT. 默认是 FULL, 用户主动切 DISABLED 才有问题, 配置说明已标注 |
+| DimThread | 中风险 | 给每维度独立 tick 线程, BAS 的 `ServerThreadAssert` 可能炸. 需单独适配 |
+
+## v0.8.0 — chunk load 路径异步化 [已废弃]
+
+**状态**: 废弃 (2026-05 生态调研后决定不做)
+
+### 放弃理由
+
+1. **vanilla 1.20.1 已经把容易的部分异步化了**: `IOWorker.loadAsync` 已异步, `ChunkSerializer.read` 已在 `Util.backgroundExecutor`, `ProtoChunk` 构造已在 worker 池. 真正还在主线程的是 ChunkStatus 升级链 + LightEngine 增量 + PoiManager 加载 + EntityStorage 注入, 不是简单"丢线程池"能解决.
+
+2. **核心难点是 ChunkStatus 升级链的跨区块依赖图**: feature 阶段需要邻 8 区块的 noise 完成 (worldgen 跨区块结构生成), light 阶段需要邻区块的 features 完成 (光照传播). 这是有向依赖图, 需要 actor 模型 + async/await 重构 (vanilla 自己用 `ChunkTaskPriorityQueueSorter` + `ChunkHolder.FullChunkStatus` 做这件事, 但保留主线程作为协调点). 工作量数量级超出 BAS 单人项目可行范围 — C2ME 团队多人多年迭代 + ishland 自研, 仍然不时报线程安全 bug.
+
+3. **mod 兼容是地雷**: 大量 worldgen mod (Terralith / BetterEnd / Tectonic / Cataclysm 等) 在 ChunkStatus 升级链上 `@Inject`, BAS 动这里几乎必然撞车; chunk save 路径只有少数 mod inject 自定义 NBT, 冲突面小一个数量级.
+
+4. **替代方案存在 (虽不完美)**: 若用户真有 chunk load 痛点, 装 archived 的 C2MEF 0.2.0+alpha.12 + 自担 alpha 风险, 比 BAS 重新设计实现一个生产级 chunk load 异步化更现实. BAS 不复刻 C2ME, 专注 SAVE 路径继续做透.
+
+### 替代方向
+
+- **v0.9 工具化优先级提升**: 出 chunk save / load 阶段耗时 metrics, 让用户用真实数据自己判断瓶颈, 不盲改.
+- **v0.7 完成后**, 如果用户压测仍提到 chunk load spike, 再考虑做**单一阶段** (例如只做 PoiManager 加载或 EntityStorage 注入), 不正面铺开整个 ChunkStatus 升级链.
 
 ## v0.7.0 — SavedData (DimensionDataStorage) 异步化 (原 v0.6)
 
@@ -349,9 +374,9 @@ worker 线程做:
 | v0.5.1 bypass cooldown | [已落地] | n/a | 低 | POI flush + setReturnValue 技巧 | bypass 速率 100k/s -> 400/s |
 | v0.6 实体异步 | [已落地] | n/a | 低 (实施验证) | 与 v0.2 同构 | BAS-Entity-Worker 池真实工作 |
 | v0.7 SavedData 异步 (原 v0.6) | 候选 (下一个 minor) | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
-| v0.8 chunk load 异步 (原 v0.5) | 候选 (实验性) | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
-| v0.9 工具化 (原 v0.7) | 候选 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
+| v0.8 chunk load 异步 (原 v0.5) | [已废弃] | n/a | n/a | n/a | 见专门小节, 2026-05 生态调研后决定不做 |
+| v0.9 工具化 (原 v0.7) | 候选 | 中 (v0.8 废弃后升一档) | 低 | 工程类 | 让用户自己定位 mod / vanilla 瓶颈 |
 
-后续实施顺序建议: **v0.7 SavedData → v0.9 工具化 (穿插) → v0.8 chunk load (实验性)**.
+后续实施顺序建议: **v0.7 SavedData → v0.9 工具化**.
 
-> 顺序原则: 风险低 + 与 v0.2/v0.4 同构的优先, 装 MTR 类大型 mod 时 SavedData 立即升优先级, 实验性 chunk load 留最后.
+> 顺序原则: 风险低 + 与 v0.2/v0.4 同构的优先, 装 MTR 类大型 mod 时 SavedData 立即升优先级. v0.8 chunk load 已废弃 (2026-05 生态调研后决定), 不在路线图中.
