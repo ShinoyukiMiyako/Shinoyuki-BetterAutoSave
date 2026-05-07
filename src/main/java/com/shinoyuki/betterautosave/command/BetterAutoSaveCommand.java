@@ -61,6 +61,14 @@ public final class BetterAutoSaveCommand {
         out.append("Fallback: ").append(s.chunkMapSaveFallback()).append('\n');
         out.append("Bypass: ").append(s.chunkMapSaveBypass()).append('\n');
         out.append("MustDrain pending: ").append(s.mustDrainPending()).append('\n');
+        out.append("\n-- Entity (v0.6) --\n");
+        out.append("EntityWorkerThreads: ").append(BetterAutoSaveConfig.entityWorkerThreads()).append('\n');
+        out.append("EntityChunksPerTickBase: ").append(BetterAutoSaveConfig.entityChunksPerTickBase()).append('\n');
+        out.append("Submitted: ").append(s.entitiesSubmitted()).append('\n');
+        out.append("Completed: ").append(s.entitiesCompleted()).append('\n');
+        out.append("Failed: ").append(s.entitiesFailed()).append('\n');
+        out.append("Retried: ").append(s.entitiesRetried()).append('\n');
+        out.append("Fallback: ").append(s.entitiesFallback()).append('\n');
         out.append("\n-- Queue --\n");
         out.append("Worker queue depth: ").append(s.workerQueueDepth()).append('\n');
         out.append("Entity queue depth: ").append(s.entityQueueDepth()).append('\n');

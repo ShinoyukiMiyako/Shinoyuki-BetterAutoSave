@@ -12,6 +12,7 @@ public final class DiagnosticLogger {
     private int tickCounter;
     private long lastSubmittedSeen;
     private long lastChunkMapSaveAsyncSeen;
+    private long lastEntitiesSubmittedSeen;
 
     public DiagnosticLogger(SaveMetrics metrics) {
         this.metrics = metrics;
@@ -34,7 +35,9 @@ public final class DiagnosticLogger {
         SaveMetrics.Snapshot snap = metrics.snapshot();
         boolean idle = snap.chunksSubmitted() == lastSubmittedSeen
                 && snap.chunkMapSaveAsync() == lastChunkMapSaveAsyncSeen
+                && snap.entitiesSubmitted() == lastEntitiesSubmittedSeen
                 && snap.workerQueueDepth() == 0L
+                && snap.entityQueueDepth() == 0L
                 && snap.inFlightSerializing() == 0L
                 && snap.inFlightIoPending() == 0L
                 && snap.mustDrainPending() == 0L;
@@ -43,6 +46,7 @@ public final class DiagnosticLogger {
         }
         lastSubmittedSeen = snap.chunksSubmitted();
         lastChunkMapSaveAsyncSeen = snap.chunkMapSaveAsync();
+        lastEntitiesSubmittedSeen = snap.entitiesSubmitted();
         LOGGER.info("[BetterAutoSave] metrics");
         LOGGER.info("[BetterAutoSave]   |- chunks: submitted={} completed={} failed={} retried={} fallback={}",
                 snap.chunksSubmitted(),
@@ -55,6 +59,14 @@ public final class DiagnosticLogger {
                 snap.chunkMapSaveFallback(),
                 snap.chunkMapSaveBypass(),
                 snap.mustDrainPending());
+        if (snap.entitiesSubmitted() > 0L || snap.entityQueueDepth() > 0L) {
+            LOGGER.info("[BetterAutoSave]   |- entities: submitted={} completed={} failed={} retried={} fallback={}",
+                    snap.entitiesSubmitted(),
+                    snap.entitiesCompleted(),
+                    snap.entitiesFailed(),
+                    snap.entitiesRetried(),
+                    snap.entitiesFallback());
+        }
         LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} entityDepth={}",
                 snap.workerQueueDepth(),
                 snap.entityQueueDepth());
