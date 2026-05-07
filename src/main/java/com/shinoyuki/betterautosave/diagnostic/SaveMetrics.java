@@ -5,6 +5,12 @@ import java.util.concurrent.atomic.LongAdder;
 
 public final class SaveMetrics {
 
+    /**
+     * Histogram bucket 上界 (纳秒). v0.6 扩展到 60s 给 vanilla IOWorker
+     * 极端排队场景留合理空间 (TP 集中 / 跑图集中时 IO p99 可达数十秒).
+     * Long.MAX_VALUE 仍保留作 catch-all, percentile 落到该 bucket 时
+     * 调用方应识别并显示为 ">60s".
+     */
     private static final long[] BUCKET_UPPER_BOUNDS_NS = new long[]{
             10_000L,
             100_000L,
@@ -17,8 +23,22 @@ public final class SaveMetrics {
             500_000_000L,
             1_000_000_000L,
             5_000_000_000L,
+            10_000_000_000L,
+            30_000_000_000L,
+            60_000_000_000L,
             Long.MAX_VALUE
     };
+
+    /** 公开 bucket 上界供格式化层识别溢出 bucket (Long.MAX_VALUE -> ">60s"). */
+    public static final long OVERFLOW_BUCKET_UPPER_NS = Long.MAX_VALUE;
+
+    /** 格式化纳秒延迟为 us 字符串, 溢出 bucket (>60s) 显示 ">60s". */
+    public static String formatLatencyUs(long ns) {
+        if (ns >= OVERFLOW_BUCKET_UPPER_NS) {
+            return ">60s";
+        }
+        return String.valueOf(ns / 1000);
+    }
 
     private final LongAdder chunksSubmitted = new LongAdder();
     private final LongAdder chunksCompleted = new LongAdder();

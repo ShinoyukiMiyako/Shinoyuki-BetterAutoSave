@@ -66,19 +66,19 @@ public final class BetterAutoSaveCommand {
         out.append("Entity queue depth: ").append(s.entityQueueDepth()).append('\n');
         out.append("In-flight serializing: ").append(s.inFlightSerializing()).append('\n');
         out.append("In-flight IO_PENDING: ").append(s.inFlightIoPending()).append('\n');
-        out.append("\n-- Latency (ns -> us) --\n");
+        out.append("\n-- Latency (us, '>60s' = overflow bucket) --\n");
         out.append("Capture p50/p99/max: ")
-                .append(s.mainThreadCapture().p50Ns() / 1000).append("/")
-                .append(s.mainThreadCapture().p99Ns() / 1000).append("/")
-                .append(s.mainThreadCapture().maxNs() / 1000).append("\n");
+                .append(SaveMetrics.formatLatencyUs(s.mainThreadCapture().p50Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.mainThreadCapture().p99Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.mainThreadCapture().maxNs())).append("\n");
         out.append("Worker p50/p99/max: ")
-                .append(s.workerNbtBuild().p50Ns() / 1000).append("/")
-                .append(s.workerNbtBuild().p99Ns() / 1000).append("/")
-                .append(s.workerNbtBuild().maxNs() / 1000).append("\n");
+                .append(SaveMetrics.formatLatencyUs(s.workerNbtBuild().p50Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.workerNbtBuild().p99Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.workerNbtBuild().maxNs())).append("\n");
         out.append("IO p50/p99/max: ")
-                .append(s.ioStore().p50Ns() / 1000).append("/")
-                .append(s.ioStore().p99Ns() / 1000).append("/")
-                .append(s.ioStore().maxNs() / 1000).append("\n");
+                .append(SaveMetrics.formatLatencyUs(s.ioStore().p50Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.ioStore().p99Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.ioStore().maxNs())).append("\n");
         ctx.getSource().sendSuccess(() -> Component.literal(out.toString()), false);
         return 1;
     }

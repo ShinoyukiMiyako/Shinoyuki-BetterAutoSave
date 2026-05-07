@@ -62,11 +62,11 @@ public final class DiagnosticLogger {
                 snap.inFlightSerializing(),
                 snap.inFlightIoPending());
         LOGGER.info("[BetterAutoSave]   `- latency p50/p99 (us): capture={}/{} worker={}/{} io={}/{}",
-                snap.mainThreadCapture().p50Ns() / 1000,
-                snap.mainThreadCapture().p99Ns() / 1000,
-                snap.workerNbtBuild().p50Ns() / 1000,
-                snap.workerNbtBuild().p99Ns() / 1000,
-                snap.ioStore().p50Ns() / 1000,
-                snap.ioStore().p99Ns() / 1000);
+                SaveMetrics.formatLatencyUs(snap.mainThreadCapture().p50Ns()),
+                SaveMetrics.formatLatencyUs(snap.mainThreadCapture().p99Ns()),
+                SaveMetrics.formatLatencyUs(snap.workerNbtBuild().p50Ns()),
+                SaveMetrics.formatLatencyUs(snap.workerNbtBuild().p99Ns()),
+                SaveMetrics.formatLatencyUs(snap.ioStore().p50Ns()),
+                SaveMetrics.formatLatencyUs(snap.ioStore().p99Ns()));
     }
 }
