@@ -1,6 +1,7 @@
 /build/
 /out/
 /classes/
+/bin/
 
 /.gradle/
 /gradle-app.setting
