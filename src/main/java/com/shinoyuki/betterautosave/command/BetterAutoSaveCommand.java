@@ -33,6 +33,7 @@ public final class BetterAutoSaveCommand {
                         .then(Commands.literal("flush").executes(BetterAutoSaveCommand::flush))
                         .then(Commands.literal("status").executes(BetterAutoSaveCommand::status))
                         .then(Commands.literal("force-async").executes(BetterAutoSaveCommand::forceAsync))
+                        .then(Commands.literal("drain-unload").executes(BetterAutoSaveCommand::drainUnload))
         );
     }
 
@@ -55,6 +56,11 @@ public final class BetterAutoSaveCommand {
         out.append("Failed: ").append(s.chunksFailed()).append('\n');
         out.append("Retried: ").append(s.chunksRetried()).append('\n');
         out.append("Fallback: ").append(s.chunksFallback()).append('\n');
+        out.append("\n-- ChunkMap.save (v0.4) --\n");
+        out.append("Async: ").append(s.chunkMapSaveAsync()).append('\n');
+        out.append("Fallback: ").append(s.chunkMapSaveFallback()).append('\n');
+        out.append("Bypass: ").append(s.chunkMapSaveBypass()).append('\n');
+        out.append("MustDrain pending: ").append(s.mustDrainPending()).append('\n');
         out.append("\n-- Queue --\n");
         out.append("Worker queue depth: ").append(s.workerQueueDepth()).append('\n');
         out.append("Entity queue depth: ").append(s.entityQueueDepth()).append('\n');
@@ -188,6 +194,61 @@ public final class BetterAutoSaveCommand {
                         + " fallback=" + finalFallback
                         + " errors=" + finalErrors), true);
         return finalDispatched;
+    }
+
+    /**
+     * v0.4: 等所有 mustDrain (经 ChunkMap.save mixin 接管走异步的) chunks 落盘。
+     * 主用途: 关服前手动检查 unload + eager save 路径异步任务是否全部完成,
+     * 或 stress test 后验证 mustDrainPending 收敛到 0。
+     *
+     * 实现: 轮询 metrics.mustDrainPending() 直至 0 或 timeout (复用
+     * shutdownTimeoutSeconds), 不阻塞主线程超过 50ms 一段。
+     */
+    private static int drainUnload(CommandContext<CommandSourceStack> ctx) {
+        if (!BetterAutoSaveCore.isInstalled()) {
+            ctx.getSource().sendFailure(Component.literal("BetterAutoSave is not installed"));
+            return 0;
+        }
+        SaveMetrics metrics = BetterAutoSaveCore.metrics();
+        SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
+        long initial = metrics.snapshot().mustDrainPending();
+        if (initial == 0L && pipeline.chunkWorkerQueue().isEmpty()
+                && metrics.snapshot().inFlightIoPending() == 0L) {
+            ctx.getSource().sendSuccess(() -> Component.literal(
+                    "BetterAutoSave drain-unload: nothing pending"), false);
+            return 1;
+        }
+
+        long timeoutMs = (long) BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L;
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        long t0 = System.currentTimeMillis();
+        while (System.currentTimeMillis() < deadline) {
+            SaveMetrics.Snapshot snap = metrics.snapshot();
+            if (snap.mustDrainPending() == 0L
+                    && pipeline.chunkWorkerQueue().isEmpty()
+                    && snap.inFlightIoPending() == 0L) {
+                long elapsed = System.currentTimeMillis() - t0;
+                ctx.getSource().sendSuccess(() -> Component.literal(
+                        "BetterAutoSave drain-unload: drained " + initial
+                                + " mustDrain chunk(s) in " + elapsed + "ms"), true);
+                return 1;
+            }
+            try {
+                Thread.sleep(50L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                ctx.getSource().sendFailure(Component.literal(
+                        "BetterAutoSave drain-unload: interrupted"));
+                return 0;
+            }
+        }
+        SaveMetrics.Snapshot finalSnap = metrics.snapshot();
+        ctx.getSource().sendFailure(Component.literal(
+                "BetterAutoSave drain-unload: timed out after " + timeoutMs + "ms"
+                        + " (mustDrain=" + finalSnap.mustDrainPending()
+                        + ", queue=" + pipeline.chunkWorkerQueue().size()
+                        + ", ioPending=" + finalSnap.inFlightIoPending() + ")"));
+        return 0;
     }
 
     private BetterAutoSaveCommand() {
