@@ -54,6 +54,8 @@ public final class SaveMetrics {
     private final LongAdder entitiesSubmitted = new LongAdder();
     private final LongAdder entitiesCompleted = new LongAdder();
     private final LongAdder entitiesFailed = new LongAdder();
+    private final LongAdder entitiesRetried = new LongAdder();
+    private final LongAdder entitiesFallback = new LongAdder();
 
     private final Histogram mainThreadCaptureNs = new Histogram();
     private final Histogram workerNbtBuildNs = new Histogram();
@@ -117,6 +119,14 @@ public final class SaveMetrics {
         entitiesFailed.increment();
     }
 
+    public void recordEntityRetried() {
+        entitiesRetried.increment();
+    }
+
+    public void recordEntityFallback() {
+        entitiesFallback.increment();
+    }
+
     public void recordCaptureNs(long nanos) {
         mainThreadCaptureNs.add(nanos);
     }
@@ -171,6 +181,8 @@ public final class SaveMetrics {
                 entitiesSubmitted.sum(),
                 entitiesCompleted.sum(),
                 entitiesFailed.sum(),
+                entitiesRetried.sum(),
+                entitiesFallback.sum(),
                 mainThreadCaptureNs.snapshot(),
                 workerNbtBuildNs.snapshot(),
                 ioStoreLatencyNs.snapshot(),
@@ -255,6 +267,8 @@ public final class SaveMetrics {
             long entitiesSubmitted,
             long entitiesCompleted,
             long entitiesFailed,
+            long entitiesRetried,
+            long entitiesFallback,
             HistogramSnapshot mainThreadCapture,
             HistogramSnapshot workerNbtBuild,
             HistogramSnapshot ioStore,
