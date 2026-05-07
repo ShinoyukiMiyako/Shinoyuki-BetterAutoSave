@@ -98,6 +98,10 @@ public final class BetterAutoSaveMod {
             return;
         }
         LOGGER.info("[BetterAutoSave] server stopping, draining workers");
+        SaveScheduler scheduler = BetterAutoSaveCore.scheduler();
+        if (scheduler != null) {
+            scheduler.enterShutdownMode();
+        }
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
         long t0 = System.currentTimeMillis();
         pipeline.drainPending(BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L);
