@@ -12,7 +12,8 @@
     "accessor.ChunkMapAccessor",
     "accessor.ChunkMapInvoker",
     "accessor.ChunkSerializerInvoker",
-    "accessor.ChunkStorageAccessor"
+    "accessor.ChunkStorageAccessor",
+    "accessor.EntityStorageAccessor"
   ],
   "client": [],
   "server": [],
