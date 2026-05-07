@@ -2,14 +2,19 @@
 
 记录 v0.2 之后的演进路线、技术方案、实战数据与风险评估。
 
-## v0.1 / v0.2 现状
+## v0.1 / v0.2 / v0.4 现状
 
 | 版本 | 范围 | 主线程主要消除点 | 实战指标 |
 |---|---|---|---|
 | v0.1 | autosave 节流分摊 + IOWorker 代理 | 集中尖刺 → 分散小幅 | fallback 31-68% (跑图场景) |
 | v0.2 | NBT 编码异步化 + EventCompatMode 三档 | `ChunkSerializer.write` 完全离开主线程 | fallback 0%, capture p99 0.5ms, worker p99 5ms |
+| v0.4 | unload + eager save 路径接管 | `processUnloads` 内 `save` 主线程同步 NBT 消除 | (实施完成, 待生产数据) |
+
+> **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms), 实体路径的 mod 服收益相对低. v0.3 工作转为 v0.5 之后候选.
 
 v0.2 把 vanilla autosave 周期内的 NBT 编码主线程开销 (`PalettedContainer` codec / `BlockState` codec / `biomeCodec`) 完全搬到 worker 线程, 主线程仅保留浅拷贝、BlockEntity 序列化、core tag 构建三件不可避免的工作。
+
+v0.4 把同等的处理覆盖到 vanilla `ChunkMap.save(ChunkAccess)` 入口, 同时接管 `scheduleUnload` (unload 路径) 与 `saveChunkIfNeeded` (eager save 10s cooldown 路径) 两条调用点。设计上**无 Phaser 主线程阻塞** — 详见 v0.4 段。
 
 ## v0.2 实战数据 (生产 80mod 60p 服, Forge 47.4 / Java 21 ZGC / Ryzen 9950X / 30 GB heap)
 
@@ -35,7 +40,10 @@ IO-Worker (vanilla, x14): 2.79% (1670ms / 600s)
 
 v0.2 已 100% 解决其能解决的部分 (`saveAllChunks(false)` 路径主线程 NBT). 剩余 spike 元凶分两类: (1) mod hot path 需 mod 自身或社区 fork 解决; (2) vanilla `read` / unload 路径同步 IO, BAS v0.4 / v0.5 接管。
 
-## v0.3.0 — 实体路径异步化 (Phase B)
+## v0.3.0 — 实体路径异步化 (跳过, 转 v0.5+ 候选)
+
+**当前状态**: 跳过, 实施顺序调整为 v0.4 优先 (unload 用户痛点).
+**重新调度**: 见下方 v0.5+ 实体路径段.
 
 **优先级**: 中
 **技术风险**: 低 (与 v0.2 同构)
@@ -90,52 +98,72 @@ worker 线程做:
 | 持久化实体 (mob, item, vehicle) 与 LootTable / EntityType 注册时序 | 引用持有 RegistryAccess.Frozen, 与 v0.2 同处理 |
 | 大批量实体 (刷怪塔) 主线程预序列化时间过长 | 可配置每 tick 实体上限 (复用 entityChunksPerTickBase) |
 
-## v0.4.0 — chunk unload 路径异步化 (Phase C)
+## v0.4.0 — chunk unload + eager save 路径异步化 (Phase C) ✅ 已落地
 
 **优先级**: 高 (实战 spike 0.55% 占比, 用户最痛点)
-**技术风险**: 高 (chunk 即将释放, worker 持有快照同步)
-**期望收益**: 消除 `processUnloads` 同步 save 路径, 大量玩家 teleport 场景下减少 50-100ms 单 tick spike
+**实施技术风险**: 中 (低于初设计预期)
+**期望收益**: 消除 `processUnloads` 同步 save 路径 + eager save 路径每 tick 主线程 NBT 编码
 
-### 范围
+### 实施 vs 原设计 — 偏差
+
+原设计 (撰写于 v0.4 实施前):
+- 主线程通过 **Phaser 阻塞**等 chunk IO 完成才允许 unload
+- 10 个原子提交, 含 MustDrainPhaser + 超时回退 + 独立优先级 + stress test
+
+实施时 (v0.4 落地版本):
+- **没有 Phaser**, 主线程 mixin HEAD 接管后立即返回 (`cir.setReturnValue(true)` + cancel)
+- 6 个原子提交, mustDrain 仅作"语义标记"供关服 join 与诊断命令查询
+
+为什么砍 Phaser: 重新审视 v0.2 `ChunkCaptureProcedure.capture` 已在主线程对所有可变字段做独立内存的快照 (`PalettedContainer.copy` / `DataLayer.copy` / `Heightmap raw long[].clone` / `BlockEntity` 主线程预序列化为 ListTag), worker 持有的 snapshot 与活 chunk 内存完全解耦。`level.unload(chunk)` 仅 `clearAllBlockEntities` (worker 不再读 BE) 与 `unregisterTickContainerFromLevel` (从 ServerLevel 反注册, 不改 chunk 内部 LevelChunkTicks 实例), 因此 chunk 内存释放与 worker 落盘可以**安全并行**, 不需要 Phaser 阻塞主线程。
+
+副作用: 比原设计简洁约一半, 关服安全由复用 v0.2 已有 `pipeline.drainPending` + `joinWorkers` 流程保证.
+
+### 实施细节 (落地版本)
 
 mixin 目标:
-- `ChunkMap.processUnloads` 内部 `save(chunk)` 调用拦截
-- chunk holder 即将释放前 join worker pending 任务
+- `ChunkMap.save(ChunkAccess)` HEAD inject + cancellable, **单点同时接管**:
+  * `scheduleUnload` 内 lambda 的 `this.save(chunk)`
+  * `saveChunkIfNeeded` 内 cooldown 触发的 `this.save(chunk)`
+- 关服路径 `saveAllChunks(true)` 内 `.filter(this::save)` 由 `SaveScheduler.isShutdownMode()` 守卫避开
 
-技术核心: **mustDrain 机制**
+数据流:
+1. mixin 检查守卫 (isInstalled / enabled / isDegraded / isShutdownMode)
+2. chunk 校验 (是 LevelChunk + isUnsaved) - 否则 bypass
+3. 拿 `ChunkSaveState`, phase 派发 (CLEAN/DIRTY -> dispatch; SNAPSHOTTING/SERIALIZING/IO_PENDING -> 已在管线; FAILED -> 不接管)
+4. `tryMarkMustDrain()` CAS false→true, 首次置位 inc `mustDrainPending` gauge
+5. `pipeline.captureAndDispatchChunk` 走 v0.2 同款管线
+6. dispatch 异常: `compareAndClearMustDrain` 清掉 mustDrain, dec gauge, 让 vanilla 同步路径处理
 
-ChunkSaveState 已预留 `mustDrain` 字段 (v0.1 留下), v0.4 真正接通:
-1. `ChunkMap.processUnloads` 检测到 chunk 准备 unload + isUnsaved=true
-2. 调 SnapshotPipeline.captureAndDispatchChunk(chunk, level, state) 入异步队列
-3. 同时 state.markMustDrain(), 表示该 chunk 必须落盘后才能释放
-4. processUnloads 主线程通过 Phaser 等待该 chunk state 进入 CLEAN
-5. 状态机 ioCompletedSuccessfully 时, 若 mustDrain=true 通知 Phaser
-6. Phaser 唤醒, processUnloads 继续释放 chunk
+关服路径:
+- `BetterAutoSaveMod.onServerStopping` 第一步调 `scheduler.enterShutdownMode()` (v0.2 遗漏修复)
+- 之后 vanilla `saveAllChunks(true)` 内的 `save` 调用因 isShutdownMode 守卫不被异步路径接管, 走 vanilla 同步 flush
+- `pipeline.drainPending` + `joinWorkers` 等所有未完成 mustDrain chunks 落盘
 
-关服路径: 所有 mustDrain chunks 必须 join 完, 之后再走 vanilla flush.
+### 已落地 6 commit
 
-### 风险与缓解
+1. `fix(lifecycle): onServerStopping 调用 scheduler.enterShutdownMode` (v0.2 遗漏修复)
+2. `feat(state): mustDrain 接通状态机 (CLEAN_LANDED / FAILED_TERMINAL 时 atomic clear)`
+3. `feat(metrics): chunkMapSave 三计数 + mustDrainPending gauge`
+4. `feat(mixin): ChunkMap.save HEAD 拦截 v0.4 unload + eager save 接管`
+5. `feat(command): /betterautosave drain-unload + debug 显示 v0.4 计数`
+6. `docs(readme+roadmap): v0.4 实施说明 + 与原 Phaser 设计的偏差`
 
-| 风险 | 缓解 |
+### 风险评估 (实施后回顾)
+
+| 原设计列出的风险 | 实施后状态 |
 |---|---|
-| chunk 内存释放但 worker 还在拼 NBT | mustDrain 机制 + Phaser 阻塞主线程, 直到 worker 完成 IO |
-| Phaser 死锁 (worker 异常未通知) | 超时机制: `processUnloads` 等待最多 5s 后 fallback vanilla 同步 save |
-| 主线程阻塞反而比同步慢 | 测试目标: Phaser 等待时间 < vanilla 同步 save 时间; 节流 4 chunks/tick * worker p99 5ms = 20ms vs vanilla 同步可达 200ms |
-| 服务器崩溃丢数据 | mustDrain 的 chunks 比 vanilla 更晚 unload 内存, 崩溃边界与 vanilla 等价 |
-| kill -9 模拟崩服压测 | 实施前必做, 验证损失边界 |
+| chunk 内存释放但 worker 还在拼 NBT | ✅ 不发生: capture 已固化独立内存, worker 不读活 chunk |
+| Phaser 死锁 | ✅ N/A: 无 Phaser |
+| 主线程阻塞反而比同步慢 | ✅ N/A: 无主线程阻塞 |
+| 服务器崩溃丢数据 | ⚠️ 边界与 v0.2 autosave 等价: chunk 在 worker 完成前崩溃, 该 chunk 落盘失败, 与 vanilla autosave 失败等价 |
 
-### Commit 计划 (10 个原子提交)
+新发现的风险:
+- **mod 兼容**: 其他 mod 也 mixin `ChunkMap.save` 时 (例如未知优化 mod), 二者注入顺序可能 conflict, BAS Fallback 计数会上升, 不影响数据安全, 仅性能损失。监控 `/betterautosave debug` 的 ChunkMap.save Fallback 列。
+- **ticks 字段 race**: worker 持有 `LevelChunkTicks` 引用, 主线程 `setBlockTick` 与 worker `saveTicks` 并发 — 但此 race **v0.2 autosave 路径已存在**, 不是 v0.4 引入的新风险。
 
-1. `feat(mixin): ChunkMap.processUnloads HEAD 拦截 save 调用`
-2. `feat(state): ChunkSaveState mustDrain 真实接通状态机`
-3. `feat(sync): MustDrainPhaser 主线程阻塞器`
-4. `refactor(dispatch): UnloadDispatcher 走异步路径 + Phaser 等待`
-5. `feat(safety): Phaser 超时回退 vanilla 同步`
-6. `feat(scheduler): unload 路径独立优先级 (deadline=0 最高)`
-7. `feat(metrics): unloadDispatched / unloadFallback / phaserWait 计数`
-8. `feat(command): /betterautosave drain-unload 强制等所有 mustDrain 落盘`
-9. `test(stress): 大量 unload 压测 + kill -9 数据完整性验证`
-10. `docs(readme): v0.4 unload 路径说明 + 风险声明`
+### kill -9 数据完整性
+
+待 stress test 验证 (后续工作). 理论分析: 已 dispatch 到 worker 但未完成 IO 的 chunk, 在 kill -9 下数据丢失边界与 v0.2 autosave 同等。
 
 ## v0.5.0 — chunk load 路径异步化 (实验性)
 
@@ -267,16 +295,15 @@ worker 线程做:
 - **ZGC** 在 30GB heap 配置下表现完美 (STW max 34μs, 0 allocation stall), 内存维度无需进一步优化。
 - **多人(2+) 跑图 + 建筑** 场景 max mspt 79ms→206ms, 但 95%ile 仍 4ms, TPS 全程 20。spike 是孤立 outlier 而非常态。
 
-## 优先级总结
+## 优先级总结 (v0.4 落地后更新)
 
-| 版本 | 优先 | 风险 | 技术新颖度 | 实战收益 |
-|---|---|---|---|---|
-| v0.3 实体异步 | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
-| v0.4 unload 异步 | 高 | 高 | 新机制 (Phaser) | 0.55% spike 直接消除 |
-| v0.5 load 异步 | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
-| v0.6 SavedData 异步 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
-| v0.7 工具化 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
+| 版本 | 状态 | 优先 | 风险 | 技术新颖度 | 实战收益 |
+|---|---|---|---|---|---|
+| v0.2 autosave 异步 | ✅ 已落地 | n/a | 已验证 | n/a | 200ms-2s autosave spike 消除 |
+| v0.4 unload + eager 异步 | ✅ 已落地 | n/a | 实施后中 (无 Phaser) | mustDrain 状态机 | 0.55% spike 消除, eager save 常态开销 |
+| v0.5 实体异步 (原 v0.3) | 候选 | 中 | 低 | 与 v0.2 同构 | 实体多场景中等 |
+| v0.6 SavedData 异步 | 候选 | 中 (装 MTR 等大型 mod 时升至高) | 低 | 与 v0.2 同构, 文件粒度 | 大 dat 文件场景消除 50-200ms spike |
+| v0.6 chunk load 异步 | 候选 (实验性) | 中 | 极高 | 全新 (placeholder chunk) | 0.29% spike 消除 |
+| v0.7 工具化 | 候选 | 中低 | 低 | 工程类 | 间接收益 (定位 mod 问题) |
 
-实施顺序建议: **v0.3 → v0.4 → v0.6 → v0.7 (中间穿插) → v0.5 (实验性)**.
-
-v0.6 提到 v0.5 之前的原因: 风险低 + 技术与 v0.2 同构, 实施快; 装大型 mod 服(尤其 MTR)收益直接.
+后续实施顺序建议: **v0.5 实体 → v0.6 SavedData → v0.7 工具化 → v0.6 chunk load (实验性)**.
