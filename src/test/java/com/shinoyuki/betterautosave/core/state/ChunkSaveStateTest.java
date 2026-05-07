@@ -189,6 +189,29 @@ class ChunkSaveStateTest {
     }
 
     @Test
+    void compare_and_clear_must_drain_returns_prev_state_atomically() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        assertFalse(s.compareAndClearMustDrain(),
+                "False on already-clear; caller must not dec gauge");
+        s.markMustDrain();
+        assertTrue(s.compareAndClearMustDrain(),
+                "True on first clear; caller may dec gauge once");
+        assertFalse(s.compareAndClearMustDrain(),
+                "Subsequent clear must not double-decrement");
+        assertFalse(s.mustDrain());
+    }
+
+    @Test
+    void try_mark_must_drain_returns_prev_state_atomically() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        assertTrue(s.tryMarkMustDrain(),
+                "True on first mark; caller may inc gauge once");
+        assertFalse(s.tryMarkMustDrain(),
+                "Subsequent mark must not double-increment");
+        assertTrue(s.mustDrain());
+    }
+
+    @Test
     void io_failed_retry_keeps_must_drain() {
         ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
         s.markDirty();

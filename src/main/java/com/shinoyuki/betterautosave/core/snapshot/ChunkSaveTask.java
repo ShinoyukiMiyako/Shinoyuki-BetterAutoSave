@@ -46,11 +46,16 @@ public final class ChunkSaveTask implements SaveTask {
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
-            boolean wasDraining = state.mustDrain();
+            // mustDrain 生命周期: mixin tryMarkMustDrain inc 一次,
+            // worker 完成一轮 (无论 outcome) compareAndClearMustDrain dec 一次,
+            // 保证 inc/dec 配对, 不依赖状态机内部清 mustDrain.
+            // REQUEUE_DIRTY 路径下 chunk 重新 dirty, 下次 mixin 接管时
+            // tryMarkMustDrain CAS false->true 再次成功 inc, 配对维持.
+            boolean wasDraining = state.compareAndClearMustDrain();
             if (error != null) {
                 LOGGER.error("[BetterAutoSave] IO store failed for chunk {} dim={}", snapshot.pos(), snapshot.dimension().location(), error);
                 ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
-                if (wasDraining && !state.mustDrain()) {
+                if (wasDraining) {
                     metrics.decMustDrainPending();
                 }
                 if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
@@ -61,7 +66,7 @@ public final class ChunkSaveTask implements SaveTask {
                 return;
             }
             ChunkSaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
-            if (wasDraining && !state.mustDrain()) {
+            if (wasDraining) {
                 metrics.decMustDrainPending();
             }
             if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
@@ -75,9 +80,9 @@ public final class ChunkSaveTask implements SaveTask {
     @Override
     public void onUnhandledError(Throwable cause) {
         ChunkSaveState state = snapshot.state();
-        boolean wasDraining = state.mustDrain();
+        boolean wasDraining = state.compareAndClearMustDrain();
         ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
-        if (wasDraining && !state.mustDrain()) {
+        if (wasDraining) {
             metrics.decMustDrainPending();
         }
         if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
