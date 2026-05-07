@@ -201,8 +201,9 @@ public final class BetterAutoSaveCommand {
      * 主用途: 关服前手动检查 unload + eager save 路径异步任务是否全部完成,
      * 或 stress test 后验证 mustDrainPending 收敛到 0。
      *
-     * 实现: 轮询 metrics.mustDrainPending() 直至 0 或 timeout (复用
-     * shutdownTimeoutSeconds), 不阻塞主线程超过 50ms 一段。
+     * 实现: 命令立即返回, 派后台 daemon 线程轮询, 完成时通过 server.execute
+     * 回主线程发消息。**绝对不能在主线程 sleep**, vanilla 命令处理跑在 server thread,
+     * 主线程 sleep 直接锁服几十秒 (v0.4.0 已知 bug)。
      */
     private static int drainUnload(CommandContext<CommandSourceStack> ctx) {
         if (!BetterAutoSaveCore.isInstalled()) {
@@ -211,44 +212,60 @@ public final class BetterAutoSaveCommand {
         }
         SaveMetrics metrics = BetterAutoSaveCore.metrics();
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
-        long initial = metrics.snapshot().mustDrainPending();
+        SaveMetrics.Snapshot snap0 = metrics.snapshot();
+        long initial = snap0.mustDrainPending();
         if (initial == 0L && pipeline.chunkWorkerQueue().isEmpty()
-                && metrics.snapshot().inFlightIoPending() == 0L) {
+                && snap0.inFlightIoPending() == 0L) {
             ctx.getSource().sendSuccess(() -> Component.literal(
                     "BetterAutoSave drain-unload: nothing pending"), false);
             return 1;
         }
 
         long timeoutMs = (long) BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L;
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        long t0 = System.currentTimeMillis();
-        while (System.currentTimeMillis() < deadline) {
-            SaveMetrics.Snapshot snap = metrics.snapshot();
-            if (snap.mustDrainPending() == 0L
-                    && pipeline.chunkWorkerQueue().isEmpty()
-                    && snap.inFlightIoPending() == 0L) {
-                long elapsed = System.currentTimeMillis() - t0;
-                ctx.getSource().sendSuccess(() -> Component.literal(
-                        "BetterAutoSave drain-unload: drained " + initial
-                                + " mustDrain chunk(s) in " + elapsed + "ms"), true);
-                return 1;
+        net.minecraft.server.MinecraftServer server = ctx.getSource().getServer();
+        CommandSourceStack source = ctx.getSource();
+
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "BetterAutoSave drain-unload: watching "
+                        + initial + " mustDrain chunk(s), queue="
+                        + pipeline.chunkWorkerQueue().size()
+                        + ", ioPending=" + snap0.inFlightIoPending()
+                        + " (timeout " + timeoutMs + "ms, async)"), false);
+
+        Thread watcher = new Thread(() -> {
+            long t0 = System.currentTimeMillis();
+            long deadline = t0 + timeoutMs;
+            while (System.currentTimeMillis() < deadline) {
+                SaveMetrics.Snapshot s = metrics.snapshot();
+                if (s.mustDrainPending() == 0L
+                        && pipeline.chunkWorkerQueue().isEmpty()
+                        && s.inFlightIoPending() == 0L) {
+                    long elapsed = System.currentTimeMillis() - t0;
+                    server.execute(() -> source.sendSuccess(() -> Component.literal(
+                            "BetterAutoSave drain-unload: drained " + initial
+                                    + " mustDrain chunk(s) in " + elapsed + "ms"), true));
+                    return;
+                }
+                try {
+                    Thread.sleep(100L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "BetterAutoSave drain-unload: interrupted")));
+                    return;
+                }
             }
-            try {
-                Thread.sleep(50L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                ctx.getSource().sendFailure(Component.literal(
-                        "BetterAutoSave drain-unload: interrupted"));
-                return 0;
-            }
-        }
-        SaveMetrics.Snapshot finalSnap = metrics.snapshot();
-        ctx.getSource().sendFailure(Component.literal(
-                "BetterAutoSave drain-unload: timed out after " + timeoutMs + "ms"
-                        + " (mustDrain=" + finalSnap.mustDrainPending()
-                        + ", queue=" + pipeline.chunkWorkerQueue().size()
-                        + ", ioPending=" + finalSnap.inFlightIoPending() + ")"));
-        return 0;
+            SaveMetrics.Snapshot finalSnap = metrics.snapshot();
+            int queueSize = pipeline.chunkWorkerQueue().size();
+            server.execute(() -> source.sendFailure(Component.literal(
+                    "BetterAutoSave drain-unload: timed out after " + timeoutMs + "ms"
+                            + " (mustDrain=" + finalSnap.mustDrainPending()
+                            + ", queue=" + queueSize
+                            + ", ioPending=" + finalSnap.inFlightIoPending() + ")")));
+        }, "BetterAutoSave-DrainUnload-Watch");
+        watcher.setDaemon(true);
+        watcher.start();
+        return 1;
     }
 
     private BetterAutoSaveCommand() {
