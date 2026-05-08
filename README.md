@@ -2,9 +2,27 @@
 
 Minecraft 1.20.1 Forge 服务端存档优化 mod。主线程做最少必要的快照, worker 线程构 NBT 与提交 IO, 消除 chunk 保存路径的主线程尖刺并降低累计 CPU 开销。
 
+> **Forge 1.20.1 生态位**: BAS 是当前 Forge 1.20.1 上**唯一活跃维护**的 chunk save 异步化方案 (Moonrise 仅 Fabric / NeoForge, C2MEF 已 archived, Starlight Forge 已 archived). 详见 [ROADMAP — 生态调研](ROADMAP.md#forge-1201-生态调研与-bas-定位-2026-05).
+
+## 目录
+
+- [工作原理](#工作原理)
+- [数据安全保证](#数据安全保证)
+- [安装](#安装)
+- [配置项](#配置项-configshinoyuki-optimizeshinoyuki_betterautosavecommontoml)
+- [运行时命令](#运行时命令-op-level-2)
+- [性能预期与实战参考](#性能预期)
+- [路线图](#路线图)
+- [已知限制 / 兼容性](#已知限制--兼容性)
+- [构建 / 开发](#构建--开发)
+- [快速回退](#快速回退)
+- [跑图观察清单](#跑图观察清单-生产首跑)
+
 ## 工作原理
 
-vanilla 的 chunk 保存有三条主线程同步路径都走 `ChunkSerializer.write` (内部跑 `PalettedContainer` 的 codec 编码), 大型 mod 包 80 mod / 60 人服上单次尖刺常达 200 ms 至数秒, 主线程完全停摆:
+### vanilla 的同步存档路径
+
+vanilla 的 chunk 保存有三条主线程同步路径, 全部走 `ChunkSerializer.write` (内部跑 `PalettedContainer` 的 codec 编码). 大型 mod 包 80 mod / 60 人服上单次尖刺常达 200 ms 至数秒, 主线程完全停摆:
 
 1. **Autosave**: 每 6000 tick (5 分钟) `saveAllChunks(false)` 遍历所有 dirty chunk
 2. **Unload**: `ChunkMap.scheduleUnload` 末尾的 `save(chunk)` (玩家 teleport / chunk 卸载集中爆发)
@@ -14,14 +32,23 @@ vanilla 的 entity 保存路径同样主线程同步:
 
 4. **Entity autoSave**: `PersistentEntitySectionManager.autoSave / saveAll` -> `EntityStorage.storeEntities`, 主线程遍历 chunk 内所有 entity 调 `Entity.save(CompoundTag)`. 大型农场 / 刷怪塔 / 长效实体场景该循环可达数十毫秒 spike
 
-BAS 接管全部四条路径, 走同一套异步管线:
+### BAS 的接管策略
 
+BAS 通过 mixin 把全部四条路径汇入同一套异步管线, 主线程仅做最少必要的快照, NBT 编码与 IO 全部移到 worker 线程。
+
+**chunk 路径 mixin (v0.2 + v0.4)**:
 - `ChunkMapMixin` 拦截 `saveAllChunks(false)` (autosave), 把 dirty chunk 入 `SaveScheduler` 优先级队列, `MinecraftServerMixin.tickServer` TAIL hook 每 tick 节流出队
 - `ChunkMapSaveMixin` 拦截 `ChunkMap.save(ChunkAccess)` HEAD, **同时覆盖 unload 与 eager save 两条路径** (vanilla 内 `scheduleUnload` 与 `saveChunkIfNeeded` 都走 `this.save`)
-- `EntityStorageMixin` (v0.6) 拦截 `EntityStorage.storeEntities(ChunkEntities)` HEAD, 主线程做 `Entity.save` 循环 (entity 内部读 AI / 库存 / 位置非线程安全, 必须主线程) 包装为 `ListTag`, worker 端做 outer tag 拼装 (Entities / Position / DataVersion) + 调 entity `IOWorker.store`. EntityStorage 是 per-level 单例, 用 `ConcurrentHashMap<Long, EntitySaveState>` 索引 per-chunk 状态机
+
+**entity 路径 mixin (v0.6)**:
+- `EntityStorageMixin` 拦截 `EntityStorage.storeEntities(ChunkEntities)` HEAD, 主线程做 `Entity.save` 循环 (entity 内部读 AI / 库存 / 位置非线程安全, 必须主线程) 包装为 `ListTag`, worker 端做 outer tag 拼装 (Entities / Position / DataVersion) + 调 entity `IOWorker.store`. EntityStorage 是 per-level 单例, 用 `ConcurrentHashMap<Long, EntitySaveState>` 索引 per-chunk 状态机
+
+**共用异步管线**:
 - 所有路径汇入 `SnapshotPipeline.captureAndDispatchChunk`, 主线程做 *最少必要* 的 capture: `PalettedContainer.copy` 浅拷贝 sections, `DataLayer.copy` 拷贝 light, `Heightmap` raw `long[]` clone, `BlockEntity` 主线程预序列化为 `ListTag`, `ticks / structures / postProcessing / upgradeData` 引用持有
 - worker 线程 (`SerializationWorker` -> `ChunkSaveTask` -> `ChunkNbtAssembler.assemble`) 调 mixin Invoker 暴露的 vanilla 私有 helper (`makeBiomeCodec` / `packStructureData` / `saveTicks`) 与 `BLOCK_STATE_CODEC` 字段, 拼装最终 sections `ListTag`, 与主线程构好的 core tag 合并, 调 `IOWorker.store(pos, tag)` 提交 IO
 - IO future 完成回调按 `ChunkSaveState.generation` 比对决定 CLEAN 还是 REQUEUE_DIRTY (chunk 在 worker 处理期间被再次修改, 下个周期重新走完整路径)
+
+### 节流与关服守卫
 
 `AdaptiveThrottle` 监控 `MinecraftServer.getAverageTickTime()`, TPS<19.5 时主线程 capture 半速, TPS<19 跳过本 tick, 离 deadline 不足 30s 时强制全速保证不溢出周期。
 
@@ -113,7 +140,10 @@ v0.6 entity 路径诊断指标 (`/betterautosave debug` 的 Entity 段):
 
 ## 路线图
 
-当前已实现 (v0.6.0):
+详细方案与风险评估见 [ROADMAP.md](ROADMAP.md)。
+
+### 已落地 (v0.6.0)
+
 - autosave 路径 NBT 编码异步化 + EventCompatMode 三档兼容
 - unload + eager save 路径 mixin 接管 (`ChunkMap.save` HEAD 拦截)
 - 实体路径接管 (`EntityStorage.storeEntities` HEAD 拦截, 主线程 entity.save 移出 vanilla 同步循环)
@@ -123,15 +153,20 @@ v0.6 entity 路径诊断指标 (`/betterautosave debug` 的 Entity 段):
 - Histogram bucket 扩展到 60s + ">60s" 溢出标签
 - adaptive TPS 节流 + deadline guard
 
-候选 (详细方案与风险评估见 [ROADMAP.md](ROADMAP.md)):
-- v0.7 SavedData / DimensionDataStorage 异步化 (装大型 mod 如 MTR / ANTE 时收益高, 下一个 minor)
-- v0.8 chunk load 路径异步化 (实验性, `ChunkSerializer.read`, 风险高)
-- v0.9 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace)
+### 候选 / 已废弃
+
+| 版本 | 范围 | 状态 |
+|---|---|---|
+| **v0.7** | SavedData / DimensionDataStorage 异步化 (装 MTR / ANTE 等大型 mod 时收益高) | **下一个 minor** |
+| v0.9 | 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace) | 候选 |
+| ~~v0.8~~ | ~~chunk load 路径异步化~~ | 已废弃 (2026-05 生态调研, [详见 ROADMAP](ROADMAP.md#v080--chunk-load-路径异步化-已废弃)) |
 
 ## 已知限制 / 兼容性
 
+完整兼容性矩阵 (Starlight / Modernfix / FerriteCore / Radium / worldgen mod / DimThread 等) 见 [ROADMAP — BAS 兼容性矩阵](ROADMAP.md#bas-兼容性矩阵-代码核对)。
+
 - 与 Smooth Chunk Save 不兼容: 后者 mixin 同样切入 `ChunkMap.processUnloads`, 二选一即可。BAS 与之相比的核心差异: 不延迟落盘 (无 300s 数据丢失窗口), 不取消 vanilla autosave 路径, 不吞异常
-- 与 Lithium / Starlight 等 chunk 优化 mod 未做兼容性测试, 谨慎共用
+- 与 Lithium 移植 (Radium / Canary) / Starlight Forge 兼容 (代码核对验证, 见 ROADMAP); 与 archived 的 C2MEF 直接冲突 (都拦 `ChunkMap.save`, 二选一)
 - v0.6 entity 路径单个 entity.save 抛异常时按 vanilla equivalence LOGGER.error 跳过 (该 entity 不持久化), 与 vanilla EntityStorage 行为一致 ("It will not persist")
 - PARTIAL 模式下 `ChunkDataEvent.Save` 监听器读 `tag.get("sections")` 会拿到 null。99% 的 mod 不读, 极少数读 sections 做统计的 mod 需要切 FULL 档
 - worker 线程通过 mixin Invoker 调 vanilla `ChunkSerializer` 私有 helper, Forge 升级后 helper 改名 / 改签名会编译期 ERROR, 不会运行时静默
@@ -160,16 +195,20 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)   # 或 Windows 等价
 
 ## 跑图观察清单 (生产首跑)
 
-服务端日志按时间顺序应出现:
-1. 启动: `[BetterAutoSave] pipeline starting for <ServerName>`
-2. 启动: `[BetterAutoSave]   |- workers: chunk=N entity=M` 与 throttle / event compat / config 路径行
-3. 启动: 每个 worker 一行 `[BetterAutoSave] worker started: BetterAutoSave-Chunk-Worker-K`
-4. 启动: `[BetterAutoSave] pipeline installed`
-5. 第一次 autosave 触发 (5 min 后): `[BetterAutoSave] autosave intercepted @ minecraft:overworld` 加 `mode: PARTIAL` 与 `enqueued N dirty chunks` 两行
+### 启动阶段 (按时间顺序)
+
+1. `[BetterAutoSave] pipeline starting for <ServerName>`
+2. `[BetterAutoSave]   |- workers: chunk=N entity=M` 与 throttle / event compat / config 路径行
+3. 每个 worker 一行 `[BetterAutoSave] worker started: BetterAutoSave-Chunk-Worker-K`
+4. `[BetterAutoSave] pipeline installed`
+
+### 第一次 autosave 触发后 (5 min 后)
+
+5. `[BetterAutoSave] autosave intercepted @ minecraft:overworld` 加 `mode: PARTIAL` 与 `enqueued N dirty chunks` 两行
 6. 几秒内: `[BetterAutoSave] async pipeline verified: first chunk dispatched [<x>, <z>] @ minecraft:overworld` (此行只打一次, 是异步路径生效的关键证据)
 7. 之后每隔 `diagnosticLogIntervalTicks` (默认 200=10s) 一段 metrics 树, 仅在有变化时输出。worker p99 应 > 0us
 
-unload + eager save 路径验证 (在 5/6 之后):
+### unload + eager save 验证 (在 5/6 之后)
 
 8. 玩家 teleport 跨维度或拉视距, 触发 unload + eager save 路径
 9. `/betterautosave debug` 查看 `ChunkMap.save (v0.4)` 段:
@@ -179,14 +218,16 @@ unload + eager save 路径验证 (在 5/6 之后):
     - `MustDrain pending`: 跑图过程中可短暂 > 0, 静止 30s 后应归零
 10. 关服前可运行 `/betterautosave drain-unload` 主动等所有 mustDrain 落盘, 输出 `drained N mustDrain chunk(s) in Xms`
 
-异常排查:
+### 异常排查
+
 - 未见 5/6 行: mixin 未注入或路径短路, 立刻 `/betterautosave debug` 看 `submitted` 是否 > 0
 - ChunkMap.save Fallback 持续增长: 检查日志 ERROR / mod 兼容冲突 (其他 mod 也 mixin `ChunkMap.save`)
 - 大量 `Throttled chunk save failed` ERROR: vanilla helper 调用某处异常, 切回退档 1
 - worker 异常 + 进入 degraded mode WARN: 自动 fallback vanilla, 但需排查根因
 - worker p99 长期为 0us: worker 没真正干活, 异步路径未接通, 检查 `eventCompatMode` 是否为 PARTIAL/DISABLED
 
-关服必须出现:
+### 关服必须出现
+
 - `[BetterAutoSave] server stopping, draining workers`
 - 每个 worker 一行 `[BetterAutoSave] worker stopped: ... (queue=0)`
 - `[BetterAutoSave] all workers joined cleanly in <ms>ms`
