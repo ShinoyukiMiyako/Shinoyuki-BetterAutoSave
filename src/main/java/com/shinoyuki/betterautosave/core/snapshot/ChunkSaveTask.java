@@ -1,6 +1,7 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
+import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
@@ -74,6 +75,10 @@ public final class ChunkSaveTask implements SaveTask {
             } else {
                 metrics.recordChunkRetried();
             }
+            // BAS 公开 API: chunk 已成功落盘 (CLEAN_LANDED 或 REQUEUE_DIRTY 都说明
+            // tag 字节已写入 region file). 触发外部 listener (例如 BetterBackup).
+            // listener 异常已在 Registry 层 catch + log, 此处不会抛出.
+            SaveListenerRegistry.fireChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
         });
     }
 

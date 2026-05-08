@@ -1,6 +1,7 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
+import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
@@ -76,6 +77,9 @@ public final class EntitySaveTask implements SaveTask {
             } else {
                 metrics.recordEntityRetried();
             }
+            // BAS 公开 API: entity chunk 已成功落盘. 触发外部 listener.
+            // 跟 ChunkSaveTask 同语义, listener 异常 Registry 层 catch + log.
+            SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
         });
     }
 
