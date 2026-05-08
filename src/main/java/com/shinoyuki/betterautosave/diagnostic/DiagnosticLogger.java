@@ -13,6 +13,7 @@ public final class DiagnosticLogger {
     private long lastSubmittedSeen;
     private long lastChunkMapSaveAsyncSeen;
     private long lastEntitiesSubmittedSeen;
+    private long lastSavedDataSubmittedSeen;
 
     public DiagnosticLogger(SaveMetrics metrics) {
         this.metrics = metrics;
@@ -36,6 +37,7 @@ public final class DiagnosticLogger {
         boolean idle = snap.chunksSubmitted() == lastSubmittedSeen
                 && snap.chunkMapSaveAsync() == lastChunkMapSaveAsyncSeen
                 && snap.entitiesSubmitted() == lastEntitiesSubmittedSeen
+                && snap.savedDataSubmitted() == lastSavedDataSubmittedSeen
                 && snap.workerQueueDepth() == 0L
                 && snap.entityQueueDepth() == 0L
                 && snap.inFlightSerializing() == 0L
@@ -47,6 +49,7 @@ public final class DiagnosticLogger {
         lastSubmittedSeen = snap.chunksSubmitted();
         lastChunkMapSaveAsyncSeen = snap.chunkMapSaveAsync();
         lastEntitiesSubmittedSeen = snap.entitiesSubmitted();
+        lastSavedDataSubmittedSeen = snap.savedDataSubmitted();
         LOGGER.info("[BetterAutoSave] metrics");
         LOGGER.info("[BetterAutoSave]   |- chunks: submitted={} completed={} failed={} retried={} fallback={}",
                 snap.chunksSubmitted(),
@@ -66,6 +69,13 @@ public final class DiagnosticLogger {
                     snap.entitiesFailed(),
                     snap.entitiesRetried(),
                     snap.entitiesFallback());
+        }
+        if (snap.savedDataSubmitted() > 0L) {
+            LOGGER.info("[BetterAutoSave]   |- savedData: submitted={} completed={} failed={} fallback={}",
+                    snap.savedDataSubmitted(),
+                    snap.savedDataCompleted(),
+                    snap.savedDataFailed(),
+                    snap.savedDataFallback());
         }
         LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} entityDepth={}",
                 snap.workerQueueDepth(),

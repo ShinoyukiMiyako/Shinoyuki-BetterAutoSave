@@ -69,6 +69,13 @@ public final class BetterAutoSaveCommand {
         out.append("Failed: ").append(s.entitiesFailed()).append('\n');
         out.append("Retried: ").append(s.entitiesRetried()).append('\n');
         out.append("Fallback: ").append(s.entitiesFallback()).append('\n');
+        out.append("\n-- SavedData (v0.7) --\n");
+        out.append("SavedDataWorkerThreads: ").append(BetterAutoSaveConfig.savedDataWorkerThreads()).append('\n');
+        out.append("SavedDataMaxFileSizeMB: ").append(BetterAutoSaveConfig.savedDataMaxFileSizeMB()).append('\n');
+        out.append("Submitted: ").append(s.savedDataSubmitted()).append('\n');
+        out.append("Completed: ").append(s.savedDataCompleted()).append('\n');
+        out.append("Failed: ").append(s.savedDataFailed()).append('\n');
+        out.append("Fallback: ").append(s.savedDataFallback()).append('\n');
         out.append("\n-- Queue --\n");
         out.append("Worker queue depth: ").append(s.workerQueueDepth()).append('\n');
         out.append("Entity queue depth: ").append(s.entityQueueDepth()).append('\n');
@@ -122,6 +129,7 @@ public final class BetterAutoSaveCommand {
         SaveMetrics.Snapshot snap0 = metrics.snapshot();
         if (pipeline.chunkWorkerQueue().isEmpty()
                 && pipeline.entityWorkerQueue().isEmpty()
+                && pipeline.savedDataWorkerQueue().isEmpty()
                 && snap0.inFlightIoPending() == 0L) {
             ctx.getSource().sendSuccess(() -> Component.literal(
                     "BetterAutoSave flush: nothing in-flight"
@@ -135,10 +143,12 @@ public final class BetterAutoSaveCommand {
         CommandSourceStack source = ctx.getSource();
         int initialChunkQ = pipeline.chunkWorkerQueue().size();
         int initialEntityQ = pipeline.entityWorkerQueue().size();
+        int initialSavedDataQ = pipeline.savedDataWorkerQueue().size();
         long initialIo = snap0.inFlightIoPending();
         ctx.getSource().sendSuccess(() -> Component.literal(
                 "BetterAutoSave flush: watching chunkQueue=" + initialChunkQ
                         + " entityQueue=" + initialEntityQ
+                        + " savedDataQueue=" + initialSavedDataQ
                         + " ioPending=" + initialIo
                         + " (timeout " + timeoutMs + "ms, async)"), false);
 
@@ -148,6 +158,7 @@ public final class BetterAutoSaveCommand {
             while (System.currentTimeMillis() < deadline) {
                 if (pipeline.chunkWorkerQueue().isEmpty()
                         && pipeline.entityWorkerQueue().isEmpty()
+                        && pipeline.savedDataWorkerQueue().isEmpty()
                         && metrics.snapshot().inFlightIoPending() == 0L) {
                     long elapsed = System.currentTimeMillis() - t0;
                     server.execute(() -> source.sendSuccess(() -> Component.literal(
@@ -166,9 +177,10 @@ public final class BetterAutoSaveCommand {
             SaveMetrics.Snapshot finalSnap = metrics.snapshot();
             int qC = pipeline.chunkWorkerQueue().size();
             int qE = pipeline.entityWorkerQueue().size();
+            int qS = pipeline.savedDataWorkerQueue().size();
             server.execute(() -> source.sendFailure(Component.literal(
                     "BetterAutoSave flush: timed out after " + timeoutMs + "ms"
-                            + " (chunkQueue=" + qC + " entityQueue=" + qE
+                            + " (chunkQueue=" + qC + " entityQueue=" + qE + " savedDataQueue=" + qS
                             + " ioPending=" + finalSnap.inFlightIoPending()
                             + "); vanilla flush will catch remainder")));
         }, "BetterAutoSave-Flush-Watch");
