@@ -8,6 +8,7 @@
     "ChunkAccessMixin",
     "ChunkMapMixin",
     "ChunkMapSaveMixin",
+    "DimensionDataStorageMixin",
     "EntityStorageMixin",
     "MinecraftServerMixin",
     "accessor.ChunkMapAccessor",
