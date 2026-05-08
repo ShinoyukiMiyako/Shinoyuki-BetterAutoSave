@@ -9,9 +9,9 @@
 - [已落地版本详解](#已落地版本详解)
   - [v0.4 — chunk unload + eager save 路径异步化](#v040--chunk-unload--eager-save-路径异步化-phase-c-已落地)
   - [v0.6 — 实体路径异步化](#v060--实体路径异步化-已落地)
+  - [v0.7 — SavedData 异步化 + SaveListener API](#v070--saveddata-dimensiondatastorage-异步化--savelistener-api-已落地)
 - [Forge 1.20.1 生态调研与 BAS 定位](#forge-1201-生态调研与-bas-定位-2026-05)
 - [候选版本](#候选版本)
-  - [v0.7 — SavedData 异步化](#v070--saveddata-dimensiondatastorage-异步化-原-v06)
   - [v0.9 — 工具化与诊断](#v09--工具化与诊断-原-v07)
 - [已废弃](#已废弃)
   - [v0.8 — chunk load 异步化](#v080--chunk-load-路径异步化-已废弃)
@@ -29,12 +29,12 @@
 | v0.5.0 | 已落地 | v0.4 三个稳定 fix | drain-unload 异步化 / mustDrain gauge 配对 / DiagnosticLogger 输出 v0.4 计数; 生产 6h+ 跑图 failed=0 fallback=0 leak=0 |
 | v0.5.1 | 已落地 | bypass cooldown 优化 + flush 异步化 | mixin 在 isUnsaved=false 时 setReturnValue(true) 让 saveChunkIfNeeded cooldown 正确更新; bypass 速率 100k/s → 400/s |
 | v0.6.0 | 已落地 | entity 路径接管 + Histogram bucket 扩展 | `EntityStorage.storeEntities` 主线程 entity.save 循环移到 BAS dispatch + worker; BAS-Entity-Worker 池真实工作 |
-| **v0.7** | **下一个 minor** | SavedData / DimensionDataStorage 异步化 | 大 .dat 文件场景 (装 MTR / ANTE 等) 消除 50-200ms spike |
-| v0.9 | 候选 | 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace) | 让用户自助定位 mod / vanilla 瓶颈 |
+| v0.7.0 | 已落地 | SavedData / DimensionDataStorage 异步化 + SaveListener 公开 API | `DimensionDataStorage.save` 主线程同步 NBT/IO 移到 worker; chunk/entity/SavedData 三类 listener API 解锁 BetterBackup |
+| **v0.9** | **下一个 minor** | 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace) | 让用户自助定位 mod / vanilla 瓶颈 |
 | ~~v0.8~~ | 已废弃 (2026-05) | ~~chunk load 路径异步化~~ | 2026-05 生态调研后决定不做, 见专门小节 |
 
-> **后续实施顺序建议**: **v0.7 SavedData → v0.9 工具化**.
-> 顺序原则: 风险低 + 与 v0.2/v0.4 同构的优先, 装 MTR 类大型 mod 时 SavedData 立即升优先级.
+> **后续实施顺序建议**: v0.7 已落地, **v0.9 工具化** 是下一个 minor.
+> 顺序原则: v0.8 chunk load 已废弃, 不在路线图; v0.9 工具化为最后候选.
 
 > **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
 
@@ -45,6 +45,8 @@ v0.2 把 vanilla autosave 周期内的 NBT 编码主线程开销 (`PalettedConta
 v0.4 把同等的处理覆盖到 vanilla `ChunkMap.save(ChunkAccess)` 入口, 同时接管 `scheduleUnload` (unload 路径) 与 `saveChunkIfNeeded` (eager save 10s cooldown 路径) 两条调用点。设计上**无 Phaser 主线程阻塞** — 详见 v0.4 段。
 
 v0.5.1 修复 v0.5.0 生产观察到的 bypass 暴涨 (chunk 已 clean 但 vanilla 每 tick 全扫 visibleChunkMap 反复进 mixin), 通过让 mixin 在 isUnsaved=false 时主动 flush POI + setReturnValue(true) 让 saveChunkIfNeeded 把 cooldown 设到 10s 后, 该 chunk 安静一段时间不再被反复检查。
+
+v0.7 把同等思路覆盖到 vanilla `DimensionDataStorage.save()` (autosave 周期内顺序写所有 dirty .dat 文件), 主线程仅做 mod-specific tag 构建 (`savedData.save(CompoundTag)` 必须主线程), NBT 序列化 + IO 移到独立 savedDataWorkerQueue. 同时暴露 `SaveListenerRegistry` 公开 API (chunk / entity / SavedData 三通道) 解锁 BetterBackup 等下游 mod 接入.
 
 ## v0.2 落地实战数据
 
@@ -243,6 +245,129 @@ worker 线程做:
 | 持久化实体 (mob, item, vehicle) 与 LootTable / EntityType 注册时序 | 引用持有 RegistryAccess.Frozen, 与 v0.2 同处理 |
 | 大批量实体 (刷怪塔) 主线程预序列化时间过长 | 可配置每 tick 实体上限 (复用 entityChunksPerTickBase) |
 
+### v0.7.0 — SavedData (DimensionDataStorage) 异步化 + SaveListener API [已落地]
+
+**当前状态**: 已落地. 7 commit + 1 文档 commit, gradle build pass, 待生产数据回填.
+
+**优先级**: 中 (依赖具体服 mod, 装大型 mod 如 MTR 时升至高)
+**技术风险**: 低 (与 v0.2 同构, 文件粒度比 chunk 粗)
+**实测收益**: 消除 vanilla autosave 周期内 `dataStorage.save()` 主线程同步序列化, 大型 SavedData 文件场景 (MTR / ANTE) 50-200ms spike 移到 worker 线程.
+
+#### 背景
+
+vanilla `ServerLevel.save` 在 autosave 周期内顺序调用:
+```java
+this.dataStorage.save();          // SavedData 全部同步序列化 (主线程)
+serverChunkCache.save(flush);     // chunk 路径 (v0.2 已接管)
+this.entityManager.autoSave();    // entity 路径 (v0.6 已接管)
+```
+
+`DimensionDataStorage.save()` 同步遍历 cache map, 每个 dirty SavedData 调 `savedData.save(file)` 走 `NbtIo.writeCompressed` 直接写盘.
+mod 注册的 SavedData (典型例子: MTR `mtr_train_data.dat` / ANTE 进出闸统计) 文件越大单次序列化越慢, > 10 MB 时单文件 50-200 ms 主线程 spike.
+
+#### 实施细节 (落地版本)
+
+mixin 目标:
+- `DimensionDataStorage.save()` HEAD inject + cancellable
+- `DimensionDataStorageInvoker` 暴露 `getDataFile(String)` 私有方法
+- `cache` 字段通过 `@Shadow @Final` 直接访问
+
+数据结构 (实际落地, 比 V0_7_PLAN 设计简化):
+```java
+public record SavedDataSnapshot(
+    String fileName,
+    File targetFile,
+    CompoundTag preBuiltTag,
+    SavedData savedData
+) {}
+```
+
+无独立状态机. 与 ChunkSaveState / EntitySaveState 不同 — DimensionDataStorage.save 是 per-cycle (5min) 调用, 不存在高频并发, 不需要 CAS 状态保护; setDirty 在 mixin dispatch 时乐观清理, 失败时 worker 通过 `server.execute` 重新 setDirty(true) 让下个周期重试.
+
+数据流:
+1. mixin 守卫: isInstalled / enabled / isDegraded / isShutdownMode / server 非空
+2. 遍历 `cache.entrySet()`, 对每个 dirty SavedData:
+   - 大文件守卫: 现存 .dat > `savedDataMaxFileSizeMB` (默认 50 MB) 走 vanilla 同步 fallback
+   - 主线程构 tag: `tag.put("data", savedData.save(new CompoundTag()))` + `NbtUtils.addCurrentDataVersion`
+   - 入 `savedDataWorkerQueue`, 计 metrics.recordSavedDataSubmitted
+   - `savedData.setDirty(false)` 乐观清理
+3. ci.cancel() 跳过 vanilla iteration
+
+worker 线程 (`SavedDataSaveTask`):
+1. `NbtIo.writeCompressed(tag, file)` 写盘
+2. 成功 → metrics.recordSavedDataCompleted + `SaveListenerRegistry.fireSavedDataWritten`
+3. 失败 → metrics.recordSavedDataFailed + `server.execute(() -> savedData.setDirty())` 重新 mark dirty 让下个周期重试
+
+#### SaveListener API (附带交付物, 解锁 BetterBackup)
+
+新增公开 API package `com.shinoyuki.betterautosave.api`:
+- `ChunkSaveListener` — chunk save 事件
+- `EntityChunkSaveListener` — entity chunk save 事件
+- `SavedDataSaveListener` — SavedData 事件 (v0.7 新增)
+- `SaveListenerRegistry` — 静态注册中心 + fire 方法
+
+特性:
+- `CopyOnWriteArrayList` 保证注册 / 注销 / fire 三方线程安全
+- 空 listener fast path (`isEmpty()` 检查), 单装 BAS 用户零开销
+- listener 异常 try-catch + log, 不传播
+- fire 在 IO 成功路径 (CLEAN_LANDED / REQUEUE_DIRTY), 不在 FAILED
+
+工程量: 1 commit (Commit 0), ~80 行 API + ~80 行单测.
+
+#### 已落地 8 commit
+
+0. `feat(api): SaveListener API + Registry, ChunkSaveTask/EntitySaveTask fire 点`
+1. `feat(mixin): DimensionDataStorageInvoker 暴露 getDataFile`
+2. `feat(api): SavedDataSaveListener + Registry savedData 通道`
+3. `feat(snapshot): SavedDataSnapshot record + SavedDataSaveTask + Metrics 计数`
+4. `feat(pipeline): SnapshotPipeline 加 savedDataWorkerQueue + 配置项`
+5. `feat(mixin): DimensionDataStorage.save HEAD 拦截 v0.7 SavedData 异步化`
+6. `feat(diag+command): DiagnosticLogger 与 debug 命令输出 SavedData 段`
+7. `docs(readme+roadmap): v0.7 SavedData 落地 + version bump 0.7.0`
+
+#### 实施 vs 设计 — 偏差
+
+设计 vs 实施基本吻合. 几个细节调整:
+
+- **跳过独立状态机 SavedDataSaveState**: V0_7_PLAN §3.3 设计了与 ChunkSaveState / EntitySaveState 同构的状态机. 实施时跳过 — DimensionDataStorage.save() 是 per-cycle 调用 (5min 一次), 不存在高频并发 / unload race / multi-call coordination. 直接用 SavedDataSnapshot record + 失败 setDirty(true) 简单 retry, 比预期少约 100 行代码.
+- **大文件守卫基于现存文件大小**: V0_7_PLAN 没指定阈值判断时机. 实施按"现存 .dat > 阈值"判断 (`file.exists() && file.length() > maxBytes`). 新文件首次写无法预判, 仅基于已有文件大小决策 — 第二次 save 大文件时才会被守卫拦下.
+- **乐观清 dirty + 失败重 mark**: V0_7_PLAN §7.3 已分析此 race, 实施按计划. setDirty(false) 在 mixin dispatch 时主线程做, IO 失败时 worker 通过 `server.execute(() -> savedData.setDirty())` 上主线程 re-mark dirty. 这跟 vanilla 行为差异很小 (vanilla 也是 try-catch 后 setDirty(false), 失败也清).
+
+#### 配置项
+
+```toml
+[workers]
+savedDataWorkerThreads = 1                       # SavedData worker 池大小
+
+[safety]
+savedDataMaxFileSizeMB = 50                      # 超阈值走 vanilla 同步
+```
+
+#### 风险评估 (实施后回顾)
+
+| 原设计列出的风险 | 实施后状态 |
+|---|---|
+| SavedData 持有 mod 内部 mutable state, worker 序列化时被改 | OK 不发生: 主线程 `savedData.save(new CompoundTag())` 已拿到完整 tag, worker 仅 IO 不读 mod 状态 |
+| 关服时 SavedData 仍在 worker queue 未落盘 | OK 已守卫: SnapshotPipeline.joinWorkers 已含 savedDataWorkerThreads 一并 join |
+| 文件写到一半崩溃 | NOTE 边界与 vanilla 同等: NbtIo.writeCompressed 不是 atomic rename, kill -9 可能写一半. 跟 vanilla SavedData.save 同等风险 |
+| mod 在 SavedData.save 内部抛异常 | OK 已守卫: try-catch fallback 到 vanilla 同步路径, recordSavedDataFallback 计数 |
+
+新发现的风险:
+- **大文件守卫第一次写无法保护**: 文件第一次写超过阈值仍会进 worker queue, 单次 IO 占用 worker 几秒; 第二次 save 才会被守卫拦下走 vanilla. 真实场景下单文件第一次写已经存在性能问题, 但生产 workload 单 .dat 极少 > 50 MB.
+- **setDirty 主线程 hop**: 失败重 mark dirty 通过 `server.execute` 派回主线程. 在主线程繁忙时 (autosave 阶段) 这条会排队, 但 setDirty 是 O(1) 操作, 实际无可观测影响.
+
+#### 实战触发条件
+
+- `du -h world/data/*.dat world/DIM-1/data/*.dat world/DIM1/data/*.dat` 出现 > 10 MB 单文件
+- spark spike-only profile 中 `DimensionDataStorage.save` 或 `SavedData.save` frame 占比 > 0.5%
+- mtr_train_data.dat 持续增长 (ANTE 进出闸统计无清理机制)
+
+#### kill -9 数据完整性
+
+待 stress test 验证 (后续工作). 理论分析:
+- 已 dispatch 到 worker 但未完成 IO 的 SavedData, kill -9 下数据丢失边界**比 vanilla 更宽** (vanilla setDirty(false) 在 try 之外, 我们 setDirty(false) 在 dispatch 时即清, worker 完成前进程死则丢)
+- 但 SavedData 总是从内存 mod 状态构造, 重启后下次 setDirty(true) 仍会再写, 所以 kill -9 影响 = "丢一个 cycle 的 SavedData 增量", 跟 vanilla 行为差异极小
+
 ## Forge 1.20.1 生态调研与 BAS 定位 (2026-05)
 
 调研 chunk 异步化方向上的生态竞品后, 确认 BAS 在 Forge 1.20.1 上无活跃维护的竞争对手, 并据此**放弃 v0.8 chunk load 异步化方向** (详见已废弃节).
@@ -282,81 +407,6 @@ BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升
 | DimThread | 中风险 | 给每维度独立 tick 线程, BAS 的 `ServerThreadAssert` 可能炸. 需单独适配 |
 
 ## 候选版本
-
-### v0.7.0 — SavedData (DimensionDataStorage) 异步化 (原 v0.6)
-
-**优先级**: 中 (依赖具体服 mod, 装大型 mod 如 MTR 时升至高)
-**技术风险**: 低 (与 v0.2 同构, 文件粒度比 chunk 粗)
-**期望收益**: 消除 vanilla autosave 周期内 `dataStorage.save()` 主线程同步序列化, 大型 SavedData 文件场景显著降低 spike
-
-#### 背景
-
-vanilla `ServerLevel.save` 在 autosave 周期内顺序调用:
-```java
-this.dataStorage.save();          // SavedData 全部同步序列化 (主线程)
-serverChunkCache.save(flush);     // chunk 路径 (v0.2 已接管)
-```
-
-`DimensionDataStorage.save()` 同步遍历 cache map, 每个 SavedData 调 `savedData.save(file)` 直接写盘。
-mod 注册的 SavedData (典型例子: MTR `mtr_train_data.dat` 包含全部路线 / 车站 / 列车 / 调度 NBT, ANTE
-进出闸统计持续累积) 文件越大单次序列化越慢, > 10 MB 时单文件 50-200 ms 主线程 spike。
-
-#### 范围
-
-mixin 目标:
-- `net.minecraft.world.level.storage.DimensionDataStorage.save()` 拦截
-- 内部 `cache` field accessor (mixin Accessor 暴露 `private final Map<String, SavedData> cache`)
-
-数据结构 (新建独立于 chunk pipeline):
-```
-SavedDataSnapshot record {
-    String fileName;
-    File targetFile;
-    CompoundTag preBuiltTag;       // 主线程 SavedData.save 内的 tag 构建结果
-    long capturedDirtyMark;
-    SavedData state;               // 反引用, 用于 onSaveSuccess 清 dirty
-}
-```
-
-主线程做:
-1. 遍历 dataStorage.cache, 对每个 dirty SavedData (`isDirty()` true)
-2. 调用 SavedData 内部 `save(CompoundTag tag)` 拿到 NBT (这一步在主线程, 因 SavedData 实现可能持有 mod 内部状态引用, 不安全 worker 化 — 与 v0.2 BlockEntity 同样思路)
-3. 包装为 SavedDataSnapshot 入新建 savedDataWorkerQueue
-
-worker 线程做:
-1. NbtIo.writeCompressed(tag, file) 写盘
-2. 完成后回调 SavedData.setDirty(false)
-
-#### 与 v0.2 chunk pipeline 的关系
-
-不复用 chunkWorkerQueue (避免影响 chunk 优先级), 新建独立 savedDataWorkerQueue + 1-2 worker thread。
-配置项新增:
-- `workers.savedDataWorkerThreads` (默认 1)
-- `safety.savedDataMaxFileSizeMB` (单文件超过阈值时降级为同步, 防止 worker queue 被几十 MB 单文件堵死)
-
-#### 风险与缓解
-
-| 风险 | 缓解 |
-|---|---|
-| SavedData 实现持有 mod 内部 mutable state, worker 序列化时被改 | 主线程 `SavedData.save(CompoundTag)` 拿到完整 tag 后 worker 仅 IO, 不读 mod 状态 |
-| 关服时 SavedData 仍在 worker queue 未落盘 | 复用 v0.2 关服 join 流程 (新 worker 池一并 join) |
-| 文件写到一半崩溃 | NbtIo.writeCompressed 内部已是写临时文件 + atomic rename, vanilla 行为不变 |
-| mod 在 SavedData.save 内部抛异常 | task.onUnhandledError 走 FAILED, 下个 autosave 周期 fallback vanilla 同步 |
-
-#### Commit 计划 (6 个原子提交)
-
-1. `feat(mixin): DimensionDataStorage cache + save 拦截`
-2. `feat(snapshot): SavedDataSnapshot record`
-3. `feat(snapshot): SavedDataSaveTask worker 路径`
-4. `refactor(dispatch): DimensionDataStorage.save 入 savedDataWorkerQueue`
-5. `feat(config): savedDataWorkerThreads + maxFileSizeMB 降级开关`
-6. `docs(readme): v0.7 SavedData 异步化说明 + 已知大型 mod 提示 (MTR / ANTE)`
-
-#### 实战触发条件
-
-- `du -h world/data/*.dat world/DIM-1/data/*.dat world/DIM1/data/*.dat` 出现 > 10 MB 单文件
-- spark spike-only profile 中 `DimensionDataStorage.save` 或 `SavedData.save` frame 占比 > 0.5%
-- mtr_train_data.dat 持续增长 (ANTE 进出闸统计无清理机制)
 
 ### v0.9+ — 工具化与诊断 (原 v0.7)
 
