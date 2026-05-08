@@ -17,10 +17,12 @@ public final class ConfigSpec {
     public static final ForgeConfigSpec.IntValue ENTITY_CHUNKS_PER_TICK_BASE;
     public static final ForgeConfigSpec.IntValue WORKER_THREADS;
     public static final ForgeConfigSpec.IntValue ENTITY_WORKER_THREADS;
+    public static final ForgeConfigSpec.IntValue SAVED_DATA_WORKER_THREADS;
     public static final ForgeConfigSpec.BooleanValue ADAPTIVE_ENABLED;
     public static final ForgeConfigSpec.IntValue SHUTDOWN_TIMEOUT_SECONDS;
     public static final ForgeConfigSpec.IntValue DEADLINE_GUARD_SECONDS;
     public static final ForgeConfigSpec.IntValue MAX_RETRIES;
+    public static final ForgeConfigSpec.IntValue SAVED_DATA_MAX_FILE_SIZE_MB;
     public static final ForgeConfigSpec.EnumValue<EventCompatMode> EVENT_COMPAT_MODE;
     public static final ForgeConfigSpec.BooleanValue DIAGNOSTIC_LOGGING;
     public static final ForgeConfigSpec.IntValue DIAGNOSTIC_LOG_INTERVAL_TICKS;
@@ -70,6 +72,12 @@ public final class ConfigSpec {
                 .comment("Threads dedicated to building entity NBT off the main thread.")
                 .defineInRange("entityWorkerThreads", 2, 1, 8);
 
+        SAVED_DATA_WORKER_THREADS = BUILDER
+                .comment("v0.7: threads dedicated to writing SavedData (.dat) files off the main thread.",
+                         "1 is enough for typical loads (SavedData files are few and small).",
+                         "Bump to 2 if you run mods with many large SavedData files (e.g. MTR, ANTE).")
+                .defineInRange("savedDataWorkerThreads", 1, 1, 4);
+
         BUILDER.pop();
 
         BUILDER.comment("Failure handling and shutdown").push("safety");
@@ -83,6 +91,15 @@ public final class ConfigSpec {
                 .comment("Number of times a chunk that fails NBT build or IO submit will be re-queued",
                          "before its state is parked in FAILED and a synchronous fallback is used.")
                 .defineInRange("maxRetries", 3, 0, 10);
+
+        SAVED_DATA_MAX_FILE_SIZE_MB = BUILDER
+                .comment("v0.7: SavedData files larger than this threshold are written synchronously (vanilla path)",
+                         "instead of dispatched to the worker queue.",
+                         "Prevents a single oversized file (e.g. corrupted MTR train data) from blocking",
+                         "the savedData worker queue for many seconds.",
+                         "Default 50 MB covers typical mod-registered SavedData; raise if you have legitimate",
+                         "files larger than this and confirmed your worker IO can handle them.")
+                .defineInRange("savedDataMaxFileSizeMB", 50, 1, 1024);
 
         BUILDER.pop();
 

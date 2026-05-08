@@ -37,11 +37,14 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final SaveMetrics metrics;
     private final BlockingQueue<SaveTask> chunkWorkerQueue = new LinkedBlockingQueue<>();
     private final BlockingQueue<SaveTask> entityWorkerQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<SaveTask> savedDataWorkerQueue = new LinkedBlockingQueue<>();
 
     private final List<SerializationWorker> chunkWorkers = new ArrayList<>();
     private final List<Thread> chunkWorkerThreads = new ArrayList<>();
     private final List<SerializationWorker> entityWorkers = new ArrayList<>();
     private final List<Thread> entityWorkerThreads = new ArrayList<>();
+    private final List<SerializationWorker> savedDataWorkers = new ArrayList<>();
+    private final List<Thread> savedDataWorkerThreads = new ArrayList<>();
 
     private final AtomicBoolean degraded = new AtomicBoolean(false);
     private volatile MinecraftServer server;
@@ -89,8 +92,20 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             entityWorkerThreads.add(t);
             t.start();
         }
-        LOGGER.debug("[BetterAutoSave] worker pool ready: {} chunk + {} entity",
-                chunkWorkers.size(), entityWorkers.size());
+
+        WorkerThreadFactory savedDataFactory = new WorkerThreadFactory("BetterAutoSave-SavedData-Worker", this::triggerDegraded);
+        for (int i = 0; i < BetterAutoSaveConfig.savedDataWorkerThreads(); i++) {
+            SerializationWorker w = new SerializationWorker(
+                    "BetterAutoSave-SavedData-Worker-" + (i + 1),
+                    savedDataWorkerQueue,
+                    metrics);
+            Thread t = savedDataFactory.newThread(w);
+            savedDataWorkers.add(w);
+            savedDataWorkerThreads.add(t);
+            t.start();
+        }
+        LOGGER.debug("[BetterAutoSave] worker pool ready: {} chunk + {} entity + {} savedData",
+                chunkWorkers.size(), entityWorkers.size(), savedDataWorkers.size());
     }
 
     public boolean captureAndDispatchChunk(LevelChunk chunk, ServerLevel level, ChunkSaveState state) {
@@ -182,6 +197,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         for (SerializationWorker w : entityWorkers) {
             w.requestStop();
         }
+        for (SerializationWorker w : savedDataWorkers) {
+            w.requestStop();
+        }
         boolean ok = true;
         for (Thread t : chunkWorkerThreads) {
             long remaining = deadline - System.currentTimeMillis();
@@ -217,6 +235,23 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
                 break;
             }
         }
+        for (Thread t : savedDataWorkerThreads) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                ok = false;
+                break;
+            }
+            try {
+                t.join(remaining);
+                if (t.isAlive()) {
+                    ok = false;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                ok = false;
+                break;
+            }
+        }
         return ok;
     }
 
@@ -228,10 +263,17 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         return entityWorkerQueue;
     }
 
+    public BlockingQueue<SaveTask> savedDataWorkerQueue() {
+        return savedDataWorkerQueue;
+    }
+
     public boolean drainPending(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            if (chunkWorkerQueue.isEmpty() && entityWorkerQueue.isEmpty() && metrics.snapshot().inFlightIoPending() == 0L) {
+            if (chunkWorkerQueue.isEmpty()
+                    && entityWorkerQueue.isEmpty()
+                    && savedDataWorkerQueue.isEmpty()
+                    && metrics.snapshot().inFlightIoPending() == 0L) {
                 return true;
             }
             try {
@@ -247,7 +289,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     public boolean awaitWorkerIdle(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            if (chunkWorkerQueue.isEmpty() && entityWorkerQueue.isEmpty()) {
+            if (chunkWorkerQueue.isEmpty()
+                    && entityWorkerQueue.isEmpty()
+                    && savedDataWorkerQueue.isEmpty()) {
                 return true;
             }
             try {

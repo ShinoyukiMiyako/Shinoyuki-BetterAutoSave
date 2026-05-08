@@ -13,10 +13,12 @@ public final class BetterAutoSaveConfig {
     private static volatile int entityChunksPerTickBase;
     private static volatile int workerThreads;
     private static volatile int entityWorkerThreads;
+    private static volatile int savedDataWorkerThreads;
     private static volatile boolean adaptiveEnabled;
     private static volatile int shutdownTimeoutSeconds;
     private static volatile int deadlineGuardSeconds;
     private static volatile int maxRetries;
+    private static volatile int savedDataMaxFileSizeMB;
     private static volatile ConfigSpec.EventCompatMode eventCompatMode;
     private static volatile boolean diagnosticLogging;
     private static volatile int diagnosticLogIntervalTicks;
@@ -41,6 +43,10 @@ public final class BetterAutoSaveConfig {
         return entityWorkerThreads;
     }
 
+    public static int savedDataWorkerThreads() {
+        return savedDataWorkerThreads;
+    }
+
     public static boolean adaptiveEnabled() {
         return adaptiveEnabled;
     }
@@ -55,6 +61,10 @@ public final class BetterAutoSaveConfig {
 
     public static int maxRetries() {
         return maxRetries;
+    }
+
+    public static int savedDataMaxFileSizeMB() {
+        return savedDataMaxFileSizeMB;
     }
 
     public static ConfigSpec.EventCompatMode eventCompatMode() {
@@ -87,10 +97,12 @@ public final class BetterAutoSaveConfig {
         entityChunksPerTickBase = ConfigSpec.ENTITY_CHUNKS_PER_TICK_BASE.get();
         workerThreads = ConfigSpec.WORKER_THREADS.get();
         entityWorkerThreads = ConfigSpec.ENTITY_WORKER_THREADS.get();
+        savedDataWorkerThreads = ConfigSpec.SAVED_DATA_WORKER_THREADS.get();
         adaptiveEnabled = ConfigSpec.ADAPTIVE_ENABLED.get();
         shutdownTimeoutSeconds = ConfigSpec.SHUTDOWN_TIMEOUT_SECONDS.get();
         deadlineGuardSeconds = ConfigSpec.DEADLINE_GUARD_SECONDS.get();
         maxRetries = ConfigSpec.MAX_RETRIES.get();
+        savedDataMaxFileSizeMB = ConfigSpec.SAVED_DATA_MAX_FILE_SIZE_MB.get();
         eventCompatMode = ConfigSpec.EVENT_COMPAT_MODE.get();
         diagnosticLogging = ConfigSpec.DIAGNOSTIC_LOGGING.get();
         diagnosticLogIntervalTicks = ConfigSpec.DIAGNOSTIC_LOG_INTERVAL_TICKS.get();
