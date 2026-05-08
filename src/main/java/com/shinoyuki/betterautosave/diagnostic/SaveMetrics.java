@@ -57,6 +57,11 @@ public final class SaveMetrics {
     private final LongAdder entitiesRetried = new LongAdder();
     private final LongAdder entitiesFallback = new LongAdder();
 
+    private final LongAdder savedDataSubmitted = new LongAdder();
+    private final LongAdder savedDataCompleted = new LongAdder();
+    private final LongAdder savedDataFailed = new LongAdder();
+    private final LongAdder savedDataFallback = new LongAdder();
+
     private final Histogram mainThreadCaptureNs = new Histogram();
     private final Histogram workerNbtBuildNs = new Histogram();
     private final Histogram ioStoreLatencyNs = new Histogram();
@@ -127,6 +132,22 @@ public final class SaveMetrics {
         entitiesFallback.increment();
     }
 
+    public void recordSavedDataSubmitted() {
+        savedDataSubmitted.increment();
+    }
+
+    public void recordSavedDataCompleted() {
+        savedDataCompleted.increment();
+    }
+
+    public void recordSavedDataFailed() {
+        savedDataFailed.increment();
+    }
+
+    public void recordSavedDataFallback() {
+        savedDataFallback.increment();
+    }
+
     public void recordCaptureNs(long nanos) {
         mainThreadCaptureNs.add(nanos);
     }
@@ -183,6 +204,10 @@ public final class SaveMetrics {
                 entitiesFailed.sum(),
                 entitiesRetried.sum(),
                 entitiesFallback.sum(),
+                savedDataSubmitted.sum(),
+                savedDataCompleted.sum(),
+                savedDataFailed.sum(),
+                savedDataFallback.sum(),
                 mainThreadCaptureNs.snapshot(),
                 workerNbtBuildNs.snapshot(),
                 ioStoreLatencyNs.snapshot(),
@@ -269,6 +294,10 @@ public final class SaveMetrics {
             long entitiesFailed,
             long entitiesRetried,
             long entitiesFallback,
+            long savedDataSubmitted,
+            long savedDataCompleted,
+            long savedDataFailed,
+            long savedDataFallback,
             HistogramSnapshot mainThreadCapture,
             HistogramSnapshot workerNbtBuild,
             HistogramSnapshot ioStore,
