@@ -31,6 +31,7 @@ class SaveListenerRegistryTest {
 
     private final AtomicReference<ChunkSaveListener> chunkListener = new AtomicReference<>();
     private final AtomicReference<EntityChunkSaveListener> entityListener = new AtomicReference<>();
+    private final AtomicReference<SavedDataSaveListener> savedDataListener = new AtomicReference<>();
 
     @AfterEach
     void cleanup() {
@@ -38,6 +39,8 @@ class SaveListenerRegistryTest {
         if (c != null) SaveListenerRegistry.unregisterChunk(c);
         EntityChunkSaveListener e = entityListener.getAndSet(null);
         if (e != null) SaveListenerRegistry.unregisterEntityChunk(e);
+        SavedDataSaveListener s = savedDataListener.getAndSet(null);
+        if (s != null) SaveListenerRegistry.unregisterSavedData(s);
     }
 
     @Test
@@ -45,8 +48,10 @@ class SaveListenerRegistryTest {
         // 不注册任何 listener, 直接 fire — 不应抛
         SaveListenerRegistry.fireChunkSaved(POS, NULL_DIM, new CompoundTag());
         SaveListenerRegistry.fireEntityChunkSaved(POS, NULL_DIM, new CompoundTag());
+        SaveListenerRegistry.fireSavedDataWritten("test", new CompoundTag());
         assertEquals(0, SaveListenerRegistry.chunkListenerCount());
         assertEquals(0, SaveListenerRegistry.entityChunkListenerCount());
+        assertEquals(0, SaveListenerRegistry.savedDataListenerCount());
     }
 
     @Test
@@ -141,6 +146,48 @@ class SaveListenerRegistryTest {
 
         SaveListenerRegistry.unregisterChunk(cl);
         SaveListenerRegistry.unregisterEntityChunk(el);
+    }
+
+    @Test
+    void saved_data_listener_receives_fire() {
+        AtomicReference<String> capturedName = new AtomicReference<>();
+        AtomicReference<CompoundTag> capturedTag = new AtomicReference<>();
+
+        SavedDataSaveListener l = (name, tag) -> {
+            capturedName.set(name);
+            capturedTag.set(tag);
+        };
+        savedDataListener.set(l);
+        SaveListenerRegistry.registerSavedData(l);
+
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("data", 99);
+        SaveListenerRegistry.fireSavedDataWritten("raids", tag);
+
+        assertEquals("raids", capturedName.get());
+        assertSame(tag, capturedTag.get());
+        assertEquals(99, capturedTag.get().getInt("data"));
+    }
+
+    @Test
+    void saved_data_channel_independent_from_chunk_and_entity() {
+        AtomicInteger chunkCount = new AtomicInteger();
+        AtomicInteger savedDataCount = new AtomicInteger();
+        ChunkSaveListener cl = (pos, dim, tag) -> chunkCount.incrementAndGet();
+        SavedDataSaveListener sl = (name, tag) -> savedDataCount.incrementAndGet();
+        SaveListenerRegistry.registerChunk(cl);
+        SaveListenerRegistry.registerSavedData(sl);
+
+        SaveListenerRegistry.fireChunkSaved(POS, NULL_DIM, new CompoundTag());
+        assertEquals(1, chunkCount.get());
+        assertEquals(0, savedDataCount.get(), "fireChunk 不应触发 savedData listener");
+
+        SaveListenerRegistry.fireSavedDataWritten("test", new CompoundTag());
+        assertEquals(1, chunkCount.get(), "fireSavedData 不应触发 chunk listener");
+        assertEquals(1, savedDataCount.get());
+
+        SaveListenerRegistry.unregisterChunk(cl);
+        SaveListenerRegistry.unregisterSavedData(sl);
     }
 
     @Test

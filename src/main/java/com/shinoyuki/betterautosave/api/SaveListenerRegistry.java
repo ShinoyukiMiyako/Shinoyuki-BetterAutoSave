@@ -45,6 +45,7 @@ public final class SaveListenerRegistry {
 
     private static final List<ChunkSaveListener> CHUNK = new CopyOnWriteArrayList<>();
     private static final List<EntityChunkSaveListener> ENTITY = new CopyOnWriteArrayList<>();
+    private static final List<SavedDataSaveListener> SAVED_DATA = new CopyOnWriteArrayList<>();
 
     private SaveListenerRegistry() {
     }
@@ -63,6 +64,14 @@ public final class SaveListenerRegistry {
 
     public static void unregisterEntityChunk(EntityChunkSaveListener listener) {
         ENTITY.remove(listener);
+    }
+
+    public static void registerSavedData(SavedDataSaveListener listener) {
+        SAVED_DATA.add(listener);
+    }
+
+    public static void unregisterSavedData(SavedDataSaveListener listener) {
+        SAVED_DATA.remove(listener);
     }
 
     /**
@@ -100,6 +109,23 @@ public final class SaveListenerRegistry {
     }
 
     /**
+     * BAS 内部调用: SavedData (.dat 文件) 成功落盘后触发. 第三方 mod 不应调用.
+     */
+    public static void fireSavedDataWritten(String fileName, CompoundTag tag) {
+        if (SAVED_DATA.isEmpty()) {
+            return;
+        }
+        for (SavedDataSaveListener l : SAVED_DATA) {
+            try {
+                l.onSavedDataWritten(fileName, tag);
+            } catch (Throwable t) {
+                LOGGER.error("[BetterAutoSave] SavedDataSaveListener {} threw, suppressing",
+                        l.getClass().getName(), t);
+            }
+        }
+    }
+
+    /**
      * 测试 / 诊断用: 当前注册 listener 数. 不计入 API 稳定性承诺.
      */
     public static int chunkListenerCount() {
@@ -111,5 +137,12 @@ public final class SaveListenerRegistry {
      */
     public static int entityChunkListenerCount() {
         return ENTITY.size();
+    }
+
+    /**
+     * 测试 / 诊断用: 当前注册 savedData listener 数. 不计入 API 稳定性承诺.
+     */
+    public static int savedDataListenerCount() {
+        return SAVED_DATA.size();
     }
 }
