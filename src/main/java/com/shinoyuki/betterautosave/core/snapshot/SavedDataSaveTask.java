@@ -5,7 +5,6 @@ import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.nbt.NbtIo;
-import net.minecraft.server.MinecraftServer;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -15,11 +14,15 @@ import java.io.IOException;
  * {@link EntitySaveTask} 同结构, 但实现最简: 主线程已构好完整 tag, worker
  * 仅调 {@link NbtIo#writeCompressed} 写盘 + 触发 listener.
  *
- * <p><b>失败重试策略</b>: vanilla {@code SavedData.save(File)} 失败时只
- * {@code LOGGER.error} 不抛, 不重试. BAS 行为升级: 失败时通过
- * {@link MinecraftServer#execute} 在主线程调 {@link net.minecraft.world.level.saveddata.SavedData#setDirty()},
- * 让下个 autosave 周期重试. **一致重试 + 同步 fallback** 由上层 vanilla
- * autosave 周期天然提供, 不需要 BAS 自己计 retry.
+ * <p><b>失败重试策略 (v0.7.1 修复 M9)</b>: vanilla {@code SavedData.save(File)} 失败时只
+ * {@code LOGGER.error} 不抛, 不重试. BAS 行为升级: 失败时**worker 线程直接调**
+ * {@link net.minecraft.world.level.saveddata.SavedData#setDirty()}, 让下个 autosave
+ * 周期重试. 之前用 {@code server.execute} 异步派回主线程; 关服阶段如果 IO 失败发生在
+ * stopServer 主循环退出后, server task queue 不再消费 → setDirty 永远不执行 →
+ * vanilla 关服同步路径看 dirty=false 跳过 → 数据永久丢失. 直接 worker 线程 setDirty
+ * 没这个边界 — vanilla 的 SavedData.dirty 是普通 boolean 字段, 跨线程写入无 race
+ * 检查 (mod 主线程读端跟 worker 写端原本就有 happens-before 由 worker→主线程 join 序列
+ * 保证), 不引入新 race.
  *
  * <p><b>与 chunk / entity 路径的状态机差异</b>: SavedData 单次 IO 失败不进
  * "永久 FAILED" 状态 — 因为 SavedData 内存版本仍 dirty, 下次 autosave 自然
@@ -31,12 +34,10 @@ public final class SavedDataSaveTask implements SaveTask {
     private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
 
     private final SavedDataSnapshot snapshot;
-    private final MinecraftServer server;
     private final SaveMetrics metrics;
 
-    public SavedDataSaveTask(SavedDataSnapshot snapshot, MinecraftServer server, SaveMetrics metrics) {
+    public SavedDataSaveTask(SavedDataSnapshot snapshot, SaveMetrics metrics) {
         this.snapshot = snapshot;
-        this.server = server;
         this.metrics = metrics;
     }
 
@@ -68,7 +69,7 @@ public final class SavedDataSaveTask implements SaveTask {
             // 重新 mark dirty 让下个 autosave 周期重试. setDirty 必须主线程调,
             // 因 mod 实现可能假设 dirty bit 由主线程操作 (vanilla 的 setDirty
             // 不带同步).
-            server.execute(() -> snapshot.savedData().setDirty());
+            snapshot.savedData().setDirty();
             LOGGER.error("[BetterAutoSave] SavedData {} write failed, re-marked dirty for next cycle",
                     snapshot.fileName(), e);
         }
@@ -83,7 +84,7 @@ public final class SavedDataSaveTask implements SaveTask {
         // - ioPending 已 inc 但 try 内的 dec 路径全没跑到, 必须补 dec
         metrics.decInFlightIoPending();
         metrics.recordSavedDataFailed();
-        server.execute(() -> snapshot.savedData().setDirty());
+        snapshot.savedData().setDirty();
         LOGGER.error("[BetterAutoSave] SavedData worker uncaught for {}", taskName(), cause);
     }
 }

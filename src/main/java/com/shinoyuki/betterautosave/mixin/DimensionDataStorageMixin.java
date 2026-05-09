@@ -11,7 +11,6 @@ import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.DimensionDataStorageInvoker;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.storage.DimensionDataStorage;
 import org.slf4j.Logger;
@@ -102,11 +101,8 @@ public abstract class DimensionDataStorageMixin {
         if (metrics == null) {
             return;
         }
-        MinecraftServer server = pipeline.server();
-        if (server == null) {
-            return;
-        }
-
+        // v0.7.1 修复 (M9): 不再需要 server 引用 — SavedDataSaveTask 失败重试改为
+        // worker 直接 setDirty, 不走 server.execute 异步派回主线程.
         DimensionDataStorageInvoker invoker = (DimensionDataStorageInvoker) (Object) this;
         long maxBytes = (long) BetterAutoSaveConfig.savedDataMaxFileSizeMB() * 1024L * 1024L;
 
@@ -158,10 +154,11 @@ public abstract class DimensionDataStorageMixin {
                         betterautosave$lastWrittenSize);
                 metrics.incInFlightSerializing();
                 metrics.recordSavedDataSubmitted();
-                pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, server, metrics));
+                pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
                 // 乐观清 dirty: 跟 vanilla 行为差异 — vanilla 在 IO 完成后清,
-                // BAS 在 dispatch 时清. 失败时 worker 通过 server.execute 重新
-                // setDirty(true), 让下个 autosave 周期重试. 详见 V0_7_PLAN §7.3.
+                // BAS 在 dispatch 时清. 失败时 worker 直接 setDirty(true) (v0.7.1
+                // M9 修复: 不再走 server.execute, 避免关服阶段主线程 task queue 已
+                // 不消费导致 setDirty 永久丢失).
                 savedData.setDirty(false);
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
