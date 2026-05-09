@@ -121,6 +121,14 @@ public abstract class ChunkMapSaveMixin {
             metrics.incMustDrainPending();
         }
 
+        // v0.7.1 修复 (M1): 复制 vanilla ChunkMap.save 第一行 poiManager.flush 副作用.
+        // vanilla ChunkMap.java:825 无条件在 save 第一行调 flush(pos) 把该 chunk pos
+        // 上 dirty 的 PoiSection 推到 PoiManager IOWorker mailbox. v0.4 异步 dispatch
+        // 路径漏掉这步, 破坏 vanilla "POI 不晚于 chunk 进 IOWorker" 顺序保证.
+        // 实际不丢数据 (POI 可由 chunk 重建, vanilla PoiManager 是 lazy load), 但顺序
+        // 破坏导致崩溃后 POI region file 滞后一个 cycle, 短暂不一致.
+        poiManager.flush(chunk.getPos());
+
         try {
             boolean dispatched = pipeline.captureAndDispatchChunk(levelChunk, level, state);
             if (dispatched) {
