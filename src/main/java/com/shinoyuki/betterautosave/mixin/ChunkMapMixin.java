@@ -70,6 +70,13 @@ public abstract class ChunkMapMixin {
             if (!chunk.isUnsaved()) {
                 continue;
             }
+            // v0.7.1 修复 (M11): 复刻 vanilla saveChunkIfNeeded 的 wasAccessibleSinceLastSave
+            // 守卫 (vanilla ChunkMap.java:799). 不可访问的 chunk (unload 后还在 visibleChunkMap)
+            // 跳过 → 减少不必要的 capture + IO. vanilla 在 save 后调 refreshAccessibility 翻
+            // 标志位, BAS 入队成功后同步调一次保持行为对齐.
+            if (!holder.wasAccessibleSinceLastSave()) {
+                continue;
+            }
             ChunkPos pos = chunk.getPos();
             long packed = pos.toLong();
             long sequence = scheduler.nextEnqueueSequence();
@@ -81,6 +88,7 @@ public abstract class ChunkMapMixin {
             ChunkSavePriority priority = new ChunkSavePriority(packed, dimensionId, sequence, deadlineMillis, 0.0);
             if (scheduler.enqueueChunk(priority)) {
                 enqueued++;
+                holder.refreshAccessibility();
             }
         }
         if (enqueued > 0) {
