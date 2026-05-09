@@ -112,11 +112,29 @@ public abstract class DimensionDataStorageMixin {
                 continue;
             }
 
+            // v0.7.1 修复 (M8): 把 mod 序列化阶段 (savedData.save(CompoundTag)) 跟
+            // BAS dispatch 阶段分两个 try-catch. 之前合并 try 一旦 mod save(CompoundTag)
+            // 抛, fallback 走 savedData.save(file) 又调一次 save(CompoundTag) → mod
+            // 非幂等实现副作用双发, 同时 vanilla SavedData.save(File) 仅 catch IOException
+            // 不 catch RuntimeException, 异常透出导致 dataStorage.save forEach 中断.
+            //
+            // 拆分后:
+            // - mod 序列化抛 → 跳过该条 + log + fallback 计数, 不影响其他 entry
+            // - BAS dispatch 抛 → 用已构好的 tag 直接 NbtIo.writeCompressed 主线程同步
+            //   兜底, 不再调 vanilla savedData.save(file) (避免双重 save(CompoundTag))
+            CompoundTag tag;
             try {
-                CompoundTag tag = new CompoundTag();
+                tag = new CompoundTag();
                 tag.put("data", savedData.save(new CompoundTag()));
                 NbtUtils.addCurrentDataVersion(tag);
+            } catch (Throwable t) {
+                metrics.recordSavedDataFallback();
+                LOGGER.error("[BetterAutoSave] SavedData {} mod serialization threw, skipping this cycle (data still dirty for next cycle)",
+                        name, t);
+                continue;
+            }
 
+            try {
                 SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData);
                 metrics.incInFlightSerializing();
                 metrics.recordSavedDataSubmitted();
@@ -127,9 +145,17 @@ public abstract class DimensionDataStorageMixin {
                 savedData.setDirty(false);
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
-                LOGGER.error("[BetterAutoSave] SavedData {} dispatch failed, falling back to vanilla",
+                LOGGER.error("[BetterAutoSave] SavedData {} dispatch failed, falling back to direct sync write",
                         name, t);
-                savedData.save(file);
+                // 用已构好的 tag 直接写盘, 不调 savedData.save(file) 避免 mod
+                // save(CompoundTag) 被双重调用. 写失败 vanilla 等价 (vanilla 也只 log).
+                try {
+                    net.minecraft.nbt.NbtIo.writeCompressed(tag, file);
+                    savedData.setDirty(false);
+                } catch (java.io.IOException ioe) {
+                    LOGGER.error("[BetterAutoSave] SavedData {} sync fallback write failed, data stays dirty for next cycle",
+                            name, ioe);
+                }
             }
         }
         ci.cancel();
