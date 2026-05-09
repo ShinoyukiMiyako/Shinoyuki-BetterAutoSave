@@ -9,6 +9,7 @@ import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.diagnostic.DiagnosticLogger;
+import com.shinoyuki.betterautosave.diagnostic.PrometheusExporter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -84,6 +85,20 @@ public final class BetterAutoSaveMod {
             LOGGER.warn("[BetterAutoSave] eventCompatMode=DISABLED: ChunkDataEvent.Save listeners will NOT fire. "
                     + "Switch to PARTIAL or FULL if any mod depends on Save event.");
         }
+
+        if (BetterAutoSaveConfig.prometheusEnabled()) {
+            String bind = BetterAutoSaveConfig.prometheusBindAddress();
+            int port = BetterAutoSaveConfig.prometheusPort();
+            PrometheusExporter exporter = new PrometheusExporter(metrics, bind, port);
+            try {
+                exporter.start();
+                BetterAutoSaveCore.setExporter(exporter);
+            } catch (IOException e) {
+                LOGGER.error("[BetterAutoSave] Prometheus exporter failed to start at {}:{}; disabled this run",
+                        bind, port, e);
+            }
+        }
+
         LOGGER.info("[BetterAutoSave] pipeline installed");
     }
 
@@ -96,6 +111,12 @@ public final class BetterAutoSaveMod {
     public void onServerStopping(ServerStoppingEvent event) {
         if (!BetterAutoSaveCore.isInstalled()) {
             return;
+        }
+        // 先停 exporter 再 drain: 避免抓取请求在 worker join 期间读半 drain 状态.
+        // exporter.stop 会等已 in-flight 请求完成 (最多 1s).
+        PrometheusExporter exporter = BetterAutoSaveCore.exporter();
+        if (exporter != null) {
+            exporter.stop();
         }
         LOGGER.info("[BetterAutoSave] server stopping, draining workers");
         SaveScheduler scheduler = BetterAutoSaveCore.scheduler();

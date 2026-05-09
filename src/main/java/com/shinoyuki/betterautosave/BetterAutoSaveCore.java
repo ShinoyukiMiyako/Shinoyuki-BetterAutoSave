@@ -4,6 +4,7 @@ import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.diagnostic.DiagnosticLogger;
+import com.shinoyuki.betterautosave.diagnostic.PrometheusExporter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 
 public final class BetterAutoSaveCore {
@@ -13,6 +14,7 @@ public final class BetterAutoSaveCore {
     private static volatile SnapshotPipeline PIPELINE;
     private static volatile AsyncIoBridge IO_BRIDGE;
     private static volatile DiagnosticLogger DIAGNOSTIC_LOGGER;
+    private static volatile PrometheusExporter EXPORTER;
 
     public static void install(SaveMetrics metrics,
                                SaveScheduler scheduler,
@@ -32,6 +34,20 @@ public final class BetterAutoSaveCore {
         PIPELINE = null;
         IO_BRIDGE = null;
         DIAGNOSTIC_LOGGER = null;
+        EXPORTER = null;
+    }
+
+    /**
+     * v0.9: 单独 setter 跟 install 解耦. exporter 是可选组件
+     * (config.prometheusEnabled=false 时不实例化), 启动失败时也仅 setter
+     * 不调用. install 签名保持 5 参数稳定.
+     */
+    public static void setExporter(PrometheusExporter exporter) {
+        EXPORTER = exporter;
+    }
+
+    public static PrometheusExporter exporter() {
+        return EXPORTER;
     }
 
     public static SaveMetrics metrics() {
