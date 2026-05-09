@@ -10,9 +10,9 @@
   - [v0.4 — chunk unload + eager save 路径异步化](#v040--chunk-unload--eager-save-路径异步化-phase-c-已落地)
   - [v0.6 — 实体路径异步化](#v060--实体路径异步化-已落地)
   - [v0.7 — SavedData 异步化 + SaveListener API](#v070--saveddata-dimensiondatastorage-异步化--savelistener-api-已落地)
+- [v0.9 — 工具化与监控](#v090--工具化与监控-已落地)
 - [Forge 1.20.1 生态调研与 BAS 定位](#forge-1201-生态调研与-bas-定位-2026-05)
 - [候选版本](#候选版本)
-  - [v0.9 — 工具化与诊断](#v09--工具化与诊断-原-v07)
 - [已废弃](#已废弃)
   - [v0.8 — chunk load 异步化](#v080--chunk-load-路径异步化-已废弃)
 - [附录: 实战观察笔记](#附录-实战观察笔记)
@@ -31,11 +31,11 @@
 | v0.6.0 | 已落地 | entity 路径接管 + Histogram bucket 扩展 | `EntityStorage.storeEntities` 主线程 entity.save 循环移到 BAS dispatch + worker; BAS-Entity-Worker 池真实工作 |
 | v0.7.0 | 已落地 | SavedData / DimensionDataStorage 异步化 + SaveListener 公开 API | `DimensionDataStorage.save` 主线程同步 NBT/IO 移到 worker; chunk/entity/SavedData 三类 listener API 解锁 BetterBackup |
 | v0.7.1 | 已落地 | 4 agent 审查 + 1 验证 agent 后的 9 项修复 (4 Critical/Major + 5 Minor) | C1 entity emptyChunks 数据丢失 / C2 SaveTask gauge 配对 / C3 drainPending 加 inFlightSerializing / M3 capture 异常复位 phase / M1 POI flush / M7 大文件历史 size / M8 异常路径不双重 save / M9 worker 直接 setDirty / M11 wasAccessibleSinceLastSave |
-| **v0.9** | **下一个 minor** | 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace) | 让用户自助定位 mod / vanilla 瓶颈 |
+| **v0.9.0** | **已落地** | 工具化与监控: Prometheus exporter + hottest-chunks 命令 | 服主自助定位 mod / vanilla 瓶颈, 不再依赖外接 spark profiler |
 | ~~v0.8~~ | 已废弃 (2026-05) | ~~chunk load 路径异步化~~ | 2026-05 生态调研后决定不做, 见专门小节 |
 
-> **后续实施顺序建议**: v0.7 已落地, **v0.9 工具化** 是下一个 minor.
-> 顺序原则: v0.8 chunk load 已废弃, 不在路线图; v0.9 工具化为最后候选.
+> **当前**: v0.9 工具化已落地. 后续路线参考[候选版本](#候选版本)段.
+> 顺序原则: v0.8 chunk load 已废弃, 不在路线图; mod-tick-trace / WebUI 推迟, 等系列其他 mod (BetterBackup) 上线后做统一面板更划算.
 
 > **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
 
@@ -369,6 +369,77 @@ savedDataMaxFileSizeMB = 50                      # 超阈值走 vanilla 同步
 - 已 dispatch 到 worker 但未完成 IO 的 SavedData, kill -9 下数据丢失边界**比 vanilla 更宽** (vanilla setDirty(false) 在 try 之外, 我们 setDirty(false) 在 dispatch 时即清, worker 完成前进程死则丢)
 - 但 SavedData 总是从内存 mod 状态构造, 重启后下次 setDirty(true) 仍会再写, 所以 kill -9 影响 = "丢一个 cycle 的 SavedData 增量", 跟 vanilla 行为差异极小
 
+### v0.9.0 — 工具化与监控 [已落地]
+
+**当前状态**: 已落地. 7 commit 闭环, gradle build pass, 单元测试 30+ 全过.
+
+**优先级**: 中 (v0.8 废弃后升一档)
+**目的**: 让用户能自己定位 mod hot path / vanilla 瓶颈, 不依赖外部 spark profiler
+
+#### 落地范围
+
+- **Prometheus metrics HTTP exporter**: 用 JDK 内置 `HttpServer` (零外部依赖) 在 `bindAddress:port/metrics` 暴露 Prometheus exposition format text. 17 counter / 5 gauge / 4 histogram, 全用 `bas_` 前缀避免跟 Shinoyuki 系列其他 mod 命名冲突. 默认 `enabled=false` opt-in, 启用时绑 `0.0.0.0:9450` 开箱即用 (公网服需自己加防火墙)
+- **`/betterautosave hottest-chunks [count]`**: 列出 ChunkLatencyTracker 滑动窗口内 worker NBT build p99 最高的 top N chunk (默认 10, 最多 50). per-chunk ring buffer (windowSize=100) + LinkedHashMap (access-order) LRU eviction (trackLimit=10000), 内存 ~16 MB
+
+#### 推迟到后续版本
+
+- **`/betterautosave mod-tick-trace`**: 用 Forge `ServerTickEvent` 装饰器统计每个 mod 的 ServerTick listener 自身耗时. 跟 BAS save 路径无关, 更像独立的 mod 诊断工具, 推迟到独立 minor 或独立 mod
+- **图形化诊断面板 (Web UI)**: 推迟到 Shinoyuki 系列其他优化 mod (BetterBackup) 上线后做统一管理面板, 跨 mod 共享 dashboard 比单 mod 单独 web UI 价值高
+
+#### 实施细节
+
+新加文件:
+- `diagnostic/PrometheusFormatter.java` — Snapshot 转 exposition format string
+- `diagnostic/PrometheusExporter.java` — JDK HttpServer + lifecycle 管理
+- `diagnostic/ChunkLatencyRecord.java` — 单 chunk ring buffer + p99/max/last
+- `diagnostic/ChunkLatencyTracker.java` — synchronized LinkedHashMap (access-order) + LRU eviction
+
+改造点:
+- `SaveMetrics`: 加 `bucketUpperBoundsNs()` 公开 accessor + `HistogramSnapshot` 加 `sumNs` 字段 (formatter 算 histogram `_sum` 用)
+- `SnapshotPipeline`: 加 `setLatencyTracker()` setter, `captureAndDispatchChunk` 透传 tracker 给 `ChunkSaveTask`
+- `ChunkSaveTask`: 构造加 `ChunkLatencyTracker` 参数, `execute()` 内 `ChunkNbtAssembler.assemble` 前后 `nanoTime` 测耗时回写
+- `BetterAutoSaveCore`: 加 `EXPORTER` + `LATENCY_TRACKER` 字段, `setExporter / setLatencyTracker / exporter / latencyTracker` setter+getter, `uninstall` 清空
+- `BetterAutoSaveMod`: `onServerStarting` 实例化 tracker (永远启用) + 条件实例化 exporter (config.enabled=true 时); `onServerStopping` 先停 exporter 再 drain
+- `BetterAutoSaveCommand`: 加 `hottest-chunks [count]` 子命令 + `formatNs / formatMillisAgo / truncate` 输出 helper
+- `ConfigSpec`: 加 `[prometheus]` (enabled / bindAddress / port) + `[hottestChunks]` (windowSize / trackLimit) 段
+
+测试 (新增 19 个单元测试, 不依赖 Minecraft):
+- `PrometheusFormatterTest` 7 个: empty / counter / gauge / cumulative / overflow `+Inf` / 命名前缀 / TYPE-HELP-value 顺序
+- `ChunkLatencyTrackerTest` 12 个: 单样本 / ring 滑动 / p99 边界 (1 vs 10 outlier in 100) / LRU evict eldest / LRU access order 保护 / topByP99 排序 / 并发 record 不丢样本 / 构造校验 / clear
+
+#### 配置项
+
+```toml
+[prometheus]
+enabled = false                                  # 默认 opt-in
+bindAddress = "0.0.0.0"                          # 公网服请用防火墙限制或改 127.0.0.1
+port = 9450                                      # 避开 9090 / 9100 / 25565
+
+[hottestChunks]
+windowSize = 100                                 # per-chunk 滑动窗口
+trackLimit = 10000                               # LRU 上限
+```
+
+#### Prometheus scrape 示例
+
+```yaml
+scrape_configs:
+  - job_name: 'betterautosave'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['<server-ip>:9450']
+```
+
+#### 风险评估
+
+| 风险 | 缓解 |
+|---|---|
+| Prometheus 端口被占用 / 地址非法 | exporter.start 抛 IOException, BetterAutoSaveMod log error 不 crash 服, 跟 degraded mode 哲学一致 |
+| metrics 数据暴露公网 | 默认 0.0.0.0 是 onboarding 友好取舍, README + config 注释明确警告, 公网服自己负责防火墙 |
+| ChunkLatencyTracker 内存爆炸 | LRU eviction 强制 trackLimit 上限, 默认 10k chunk × ~1.6 KB record = ~16 MB |
+| record() 锁竞争 | synchronized LinkedHashMap, record 频率 ~100-500/s 全服分散到不同 chunk, 单 record 几乎无并发 |
+| HTTP server 阻塞 worker 线程 | 单独 daemon executor 跟 BAS chunk/entity worker 完全隔离 |
+
 ## Forge 1.20.1 生态调研与 BAS 定位 (2026-05)
 
 调研 chunk 异步化方向上的生态竞品后, 确认 BAS 在 Forge 1.20.1 上无活跃维护的竞争对手, 并据此**放弃 v0.8 chunk load 异步化方向** (详见已废弃节).
@@ -409,17 +480,7 @@ BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升
 
 ## 候选版本
 
-### v0.9+ — 工具化与诊断 (原 v0.7)
-
-**优先级**: 中 (v0.8 废弃后升一档)
-**目的**: 让用户能自己定位 mod hot path / vanilla 瓶颈, 不依赖外部 spark profiler
-
-#### 候选功能
-
-- **Prometheus exporter**: BAS metrics 暴露 HTTP `/metrics` 端点, 接入 Grafana 监控生产服
-- **`/betterautosave hottest-chunks`**: 列出最近 N 次 autosave 中 capture / worker p99 最高的 chunks (定位单点慢 chunk, 通常是 BlockEntity 多 / structure 复杂)
-- **`/betterautosave mod-tick-trace`**: 用 Forge `ServerTickEvent` 装饰器统计每个 mod 的 ServerTick listener 自身耗时, 一行表格列出 top 10 mod
-- **图形化诊断面板**: 替代纯 INFO 日志, embed web UI (类似 spark-viewer 风格)
+(本节暂无规划中的 minor 版本. v0.9 已落地, BAS chunk save / entity save / SavedData / 工具化 都已覆盖. 后续工作转向 BetterBackup 独立 mod, 见 [BetterBackup 仓库](https://github.com/xiaoxiao-cvs/Shinoyuki-BetterBackup).)
 
 ## 已废弃
 
