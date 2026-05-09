@@ -32,6 +32,14 @@ public final class SaveMetrics {
     /** 公开 bucket 上界供格式化层识别溢出 bucket (Long.MAX_VALUE -> ">60s"). */
     public static final long OVERFLOW_BUCKET_UPPER_NS = Long.MAX_VALUE;
 
+    /**
+     * v0.9: 暴露 bucket 上界给 PrometheusFormatter 等外部 formatter 用.
+     * 返回 clone 防外部修改内部数组.
+     */
+    public static long[] bucketUpperBoundsNs() {
+        return BUCKET_UPPER_BOUNDS_NS.clone();
+    }
+
     /** 格式化纳秒延迟为 us 字符串, 溢出 bucket (>60s) 显示 ">60s". */
     public static String formatLatencyUs(long ns) {
         if (ns >= OVERFLOW_BUCKET_UPPER_NS) {
@@ -251,12 +259,14 @@ public final class SaveMetrics {
 
         public HistogramSnapshot snapshot() {
             long total = count.sum();
+            long sum = sumNs.sum();
             long[] bucketCounts = new long[buckets.length];
             for (int i = 0; i < buckets.length; i++) {
                 bucketCounts[i] = buckets[i].sum();
             }
-            long avg = total > 0 ? sumNs.sum() / total : 0;
-            return new HistogramSnapshot(total, avg, maxNs.get(), bucketCounts, percentile(bucketCounts, total, 0.5),
+            long avg = total > 0 ? sum / total : 0;
+            return new HistogramSnapshot(total, avg, maxNs.get(), sum, bucketCounts,
+                    percentile(bucketCounts, total, 0.5),
                     percentile(bucketCounts, total, 0.99));
         }
 
@@ -276,7 +286,8 @@ public final class SaveMetrics {
         }
     }
 
-    public record HistogramSnapshot(long count, long avgNs, long maxNs, long[] bucketCounts, long p50Ns, long p99Ns) {
+    public record HistogramSnapshot(long count, long avgNs, long maxNs, long sumNs, long[] bucketCounts, long p50Ns,
+                                    long p99Ns) {
     }
 
     public record Snapshot(
