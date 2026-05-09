@@ -42,15 +42,22 @@ public final class EntitySaveTask implements SaveTask {
 
     @Override
     public void execute() {
-        CompoundTag tag = EntityNbtAssembler.assemble(snapshot);
-        metrics.decInFlightSerializing();
+        // v0.7.1 修复 (C2): 同 ChunkSaveTask, execute 同步异常路径必须复位 gauge.
+        boolean serializingDec = false;
+        boolean ioPendingIncWithoutFuture = false;
+        try {
+            CompoundTag tag = EntityNbtAssembler.assemble(snapshot);
+            metrics.decInFlightSerializing();
+            serializingDec = true;
 
-        EntitySaveState state = snapshot.state();
-        state.enterIoPending();
-        metrics.incInFlightIoPending();
-        long submitNs = System.nanoTime();
-        CompletableFuture<Void> future = entityIoWorker.store(snapshot.pos(), tag);
-        future.whenComplete((ignored, error) -> {
+            EntitySaveState state = snapshot.state();
+            state.enterIoPending();
+            metrics.incInFlightIoPending();
+            ioPendingIncWithoutFuture = true;
+            long submitNs = System.nanoTime();
+            CompletableFuture<Void> future = entityIoWorker.store(snapshot.pos(), tag);
+            ioPendingIncWithoutFuture = false;
+            future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             boolean wasDraining = state.compareAndClearMustDrain();
@@ -81,6 +88,16 @@ public final class EntitySaveTask implements SaveTask {
             // 跟 ChunkSaveTask 同语义, listener 异常 Registry 层 catch + log.
             SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
         });
+        } catch (Throwable t) {
+            // v0.7.1 修复 (C2): 同 ChunkSaveTask 同步异常 gauge 复位.
+            if (!serializingDec) {
+                metrics.decInFlightSerializing();
+            }
+            if (ioPendingIncWithoutFuture) {
+                metrics.decInFlightIoPending();
+            }
+            throw t;
+        }
     }
 
     @Override

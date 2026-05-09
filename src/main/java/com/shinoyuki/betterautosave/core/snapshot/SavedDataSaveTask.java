@@ -72,7 +72,12 @@ public final class SavedDataSaveTask implements SaveTask {
 
     @Override
     public void onUnhandledError(Throwable cause) {
-        metrics.decInFlightSerializing();
+        // v0.7.1 修复 (C2): execute 第一行已 dec serializing + inc ioPending,
+        // 然后 NbtIo.writeCompressed 抛**非 IOException** (例如 OOM / NPE) 时 try-catch
+        // 不接, 异常逃到 worker 走 onUnhandledError. 此时:
+        // - serializing 已 dec, 不能再 dec (会变负)
+        // - ioPending 已 inc 但 try 内的 dec 路径全没跑到, 必须补 dec
+        metrics.decInFlightIoPending();
         metrics.recordSavedDataFailed();
         server.execute(() -> snapshot.savedData().setDirty());
         LOGGER.error("[BetterAutoSave] SavedData worker uncaught for {}", taskName(), cause);

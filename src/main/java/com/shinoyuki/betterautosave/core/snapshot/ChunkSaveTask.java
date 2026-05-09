@@ -36,15 +36,27 @@ public final class ChunkSaveTask implements SaveTask {
 
     @Override
     public void execute() {
-        CompoundTag tag = ChunkNbtAssembler.assemble(snapshot);
-        metrics.decInFlightSerializing();
+        // v0.7.1 修复 (C2): execute 内同步异常路径必须复位 gauge.
+        // assemble 抛 → mixin 已 inc serializing 但本函数未 dec → 永久 +1.
+        // 用 task-local 标志记录"已 dec serializing"和"已 inc ioPending 且 future 未注册",
+        // 同步异常时 catch 块按标志补偿 dec, 然后 throw 让 SerializationWorker 走 onUnhandledError 处理 state.
+        boolean serializingDec = false;
+        boolean ioPendingIncWithoutFuture = false;
+        try {
+            CompoundTag tag = ChunkNbtAssembler.assemble(snapshot);
+            metrics.decInFlightSerializing();
+            serializingDec = true;
 
-        ChunkSaveState state = snapshot.state();
-        state.enterIoPending();
-        metrics.incInFlightIoPending();
-        long submitNs = System.nanoTime();
-        CompletableFuture<Void> future = ioBridge.storeChunk(level, snapshot.pos(), tag);
-        future.whenComplete((ignored, error) -> {
+            ChunkSaveState state = snapshot.state();
+            state.enterIoPending();
+            metrics.incInFlightIoPending();
+            ioPendingIncWithoutFuture = true;
+            long submitNs = System.nanoTime();
+            CompletableFuture<Void> future = ioBridge.storeChunk(level, snapshot.pos(), tag);
+            // future 注册成功, whenComplete 必触发, 由 whenComplete 内 dec ioPending,
+            // 此处放弃 gauge 复位责任.
+            ioPendingIncWithoutFuture = false;
+            future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             // mustDrain 生命周期: mixin tryMarkMustDrain inc 一次,
@@ -80,6 +92,16 @@ public final class ChunkSaveTask implements SaveTask {
             // listener 异常已在 Registry 层 catch + log, 此处不会抛出.
             SaveListenerRegistry.fireChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
         });
+        } catch (Throwable t) {
+            // v0.7.1 修复 (C2): execute 同步异常路径 gauge 复位.
+            if (!serializingDec) {
+                metrics.decInFlightSerializing();
+            }
+            if (ioPendingIncWithoutFuture) {
+                metrics.decInFlightIoPending();
+            }
+            throw t;
+        }
     }
 
     @Override
