@@ -30,6 +30,7 @@
 | v0.5.1 | 已落地 | bypass cooldown 优化 + flush 异步化 | mixin 在 isUnsaved=false 时 setReturnValue(true) 让 saveChunkIfNeeded cooldown 正确更新; bypass 速率 100k/s → 400/s |
 | v0.6.0 | 已落地 | entity 路径接管 + Histogram bucket 扩展 | `EntityStorage.storeEntities` 主线程 entity.save 循环移到 BAS dispatch + worker; BAS-Entity-Worker 池真实工作 |
 | v0.7.0 | 已落地 | SavedData / DimensionDataStorage 异步化 + SaveListener 公开 API | `DimensionDataStorage.save` 主线程同步 NBT/IO 移到 worker; chunk/entity/SavedData 三类 listener API 解锁 BetterBackup |
+| v0.7.1 | 已落地 | 4 agent 审查 + 1 验证 agent 后的 9 项修复 (4 Critical/Major + 5 Minor) | C1 entity emptyChunks 数据丢失 / C2 SaveTask gauge 配对 / C3 drainPending 加 inFlightSerializing / M3 capture 异常复位 phase / M1 POI flush / M7 大文件历史 size / M8 异常路径不双重 save / M9 worker 直接 setDirty / M11 wasAccessibleSinceLastSave |
 | **v0.9** | **下一个 minor** | 工具化 (Prometheus exporter / hottest-chunks / mod-tick-trace) | 让用户自助定位 mod / vanilla 瓶颈 |
 | ~~v0.8~~ | 已废弃 (2026-05) | ~~chunk load 路径异步化~~ | 2026-05 生态调研后决定不做, 见专门小节 |
 
