@@ -11,6 +11,7 @@ import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.core.worker.SerializationWorker;
 import com.shinoyuki.betterautosave.core.worker.WorkerThreadFactory;
+import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyTracker;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.util.ServerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
@@ -50,6 +51,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private volatile MinecraftServer server;
     private volatile ChunkResolutionHook chunkResolution;
     private volatile EntityResolutionHook entityResolution;
+    private volatile ChunkLatencyTracker latencyTracker;
 
     public interface ChunkResolutionHook {
         void onPriorityDrained(ChunkSavePriority priority);
@@ -63,6 +65,15 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         this.scheduler = scheduler;
         this.ioBridge = ioBridge;
         this.metrics = metrics;
+    }
+
+    /**
+     * v0.9: 注入 ChunkLatencyTracker. 用 setter 而非构造参数避免破坏现有
+     * SnapshotPipeline(scheduler, ioBridge, metrics) 调用方契约.
+     * tracker 可为 null, ChunkSaveTask 会做 null 检查.
+     */
+    public void setLatencyTracker(ChunkLatencyTracker latencyTracker) {
+        this.latencyTracker = latencyTracker;
     }
 
     public void start(MinecraftServer server) {
@@ -143,7 +154,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             metrics.recordEventDispatchNs(System.nanoTime() - evT0);
         }
 
-        ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics);
+        ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker);
         metrics.incInFlightSerializing();
         chunkWorkerQueue.offer(task);
         return true;

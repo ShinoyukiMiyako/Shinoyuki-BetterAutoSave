@@ -3,6 +3,7 @@ package com.shinoyuki.betterautosave;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
+import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyTracker;
 import com.shinoyuki.betterautosave.diagnostic.DiagnosticLogger;
 import com.shinoyuki.betterautosave.diagnostic.PrometheusExporter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
@@ -15,6 +16,7 @@ public final class BetterAutoSaveCore {
     private static volatile AsyncIoBridge IO_BRIDGE;
     private static volatile DiagnosticLogger DIAGNOSTIC_LOGGER;
     private static volatile PrometheusExporter EXPORTER;
+    private static volatile ChunkLatencyTracker LATENCY_TRACKER;
 
     public static void install(SaveMetrics metrics,
                                SaveScheduler scheduler,
@@ -35,6 +37,7 @@ public final class BetterAutoSaveCore {
         IO_BRIDGE = null;
         DIAGNOSTIC_LOGGER = null;
         EXPORTER = null;
+        LATENCY_TRACKER = null;
     }
 
     /**
@@ -48,6 +51,18 @@ public final class BetterAutoSaveCore {
 
     public static PrometheusExporter exporter() {
         return EXPORTER;
+    }
+
+    /**
+     * v0.9: ChunkLatencyTracker 给 hottest-chunks 命令提供数据源.
+     * 永远启用 (内存可控 ~MB), 用 setter 注入跟 exporter 一致风格.
+     */
+    public static void setLatencyTracker(ChunkLatencyTracker tracker) {
+        LATENCY_TRACKER = tracker;
+    }
+
+    public static ChunkLatencyTracker latencyTracker() {
+        return LATENCY_TRACKER;
     }
 
     public static SaveMetrics metrics() {

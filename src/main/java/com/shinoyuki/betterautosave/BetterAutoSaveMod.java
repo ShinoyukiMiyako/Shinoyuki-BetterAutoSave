@@ -8,6 +8,7 @@ import com.shinoyuki.betterautosave.core.dispatch.SaveDispatcher;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
+import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyTracker;
 import com.shinoyuki.betterautosave.diagnostic.DiagnosticLogger;
 import com.shinoyuki.betterautosave.diagnostic.PrometheusExporter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
@@ -67,12 +68,17 @@ public final class BetterAutoSaveMod {
         SnapshotPipeline pipeline = new SnapshotPipeline(scheduler, ioBridge, metrics);
         DiagnosticLogger diagnosticLogger = new DiagnosticLogger(metrics);
         SaveDispatcher dispatcher = new SaveDispatcher(pipeline, metrics);
+        ChunkLatencyTracker latencyTracker = new ChunkLatencyTracker(
+                BetterAutoSaveConfig.hottestChunksWindowSize(),
+                BetterAutoSaveConfig.hottestChunksTrackLimit());
 
         pipeline.setChunkResolutionHook(dispatcher);
         pipeline.setEntityResolutionHook(dispatcher);
+        pipeline.setLatencyTracker(latencyTracker);
         pipeline.start(event.getServer());
 
         BetterAutoSaveCore.install(metrics, scheduler, pipeline, ioBridge, diagnosticLogger);
+        BetterAutoSaveCore.setLatencyTracker(latencyTracker);
         LOGGER.info("[BetterAutoSave]   |- workers: chunk={} entity={}",
                 BetterAutoSaveConfig.workerThreads(), BetterAutoSaveConfig.entityWorkerThreads());
         LOGGER.info("[BetterAutoSave]   |- throttle: base={}/tick adaptive={} guard={}s",

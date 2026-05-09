@@ -6,6 +6,7 @@ import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
+import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyTracker;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
@@ -21,12 +22,15 @@ public final class ChunkSaveTask implements SaveTask {
     private final ServerLevel level;
     private final AsyncIoBridge ioBridge;
     private final SaveMetrics metrics;
+    private final ChunkLatencyTracker latencyTracker;
 
-    public ChunkSaveTask(ChunkSnapshot snapshot, ServerLevel level, AsyncIoBridge ioBridge, SaveMetrics metrics) {
+    public ChunkSaveTask(ChunkSnapshot snapshot, ServerLevel level, AsyncIoBridge ioBridge, SaveMetrics metrics,
+                         ChunkLatencyTracker latencyTracker) {
         this.snapshot = snapshot;
         this.level = level;
         this.ioBridge = ioBridge;
         this.metrics = metrics;
+        this.latencyTracker = latencyTracker;
     }
 
     @Override
@@ -43,9 +47,20 @@ public final class ChunkSaveTask implements SaveTask {
         boolean serializingDec = false;
         boolean ioPendingIncWithoutFuture = false;
         try {
+            // v0.9: 测 ChunkNbtAssembler.assemble 耗时回写 ChunkLatencyTracker.
+            // 这部分耗时跟 SerializationWorker 整体测的 worker time 几乎相等 —
+            // 后续 ioBridge.storeChunk 仅提交 future 立即返回, 占比 < 0.1%.
+            // 单独测这段而非复用 worker time, 避免改 SaveTask 接口加 onComplete 回调.
+            long assembleT0 = System.nanoTime();
             CompoundTag tag = ChunkNbtAssembler.assemble(snapshot);
+            long assembleNs = System.nanoTime() - assembleT0;
             metrics.decInFlightSerializing();
             serializingDec = true;
+            if (latencyTracker != null) {
+                latencyTracker.record(snapshot.pos().toLong(),
+                        snapshot.dimension().location().toString(),
+                        assembleNs);
+            }
 
             ChunkSaveState state = snapshot.state();
             state.enterIoPending();
