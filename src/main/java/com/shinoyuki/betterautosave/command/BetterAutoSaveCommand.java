@@ -127,9 +127,11 @@ public final class BetterAutoSaveCommand {
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
         SaveMetrics metrics = BetterAutoSaveCore.metrics();
         SaveMetrics.Snapshot snap0 = metrics.snapshot();
+        // v0.7.1 修复 (C3): 加 inFlightSerializing 检查防 assemble 期间误判 idle.
         if (pipeline.chunkWorkerQueue().isEmpty()
                 && pipeline.entityWorkerQueue().isEmpty()
                 && pipeline.savedDataWorkerQueue().isEmpty()
+                && snap0.inFlightSerializing() == 0L
                 && snap0.inFlightIoPending() == 0L) {
             ctx.getSource().sendSuccess(() -> Component.literal(
                     "BetterAutoSave flush: nothing in-flight"
@@ -156,10 +158,12 @@ public final class BetterAutoSaveCommand {
             long t0 = System.currentTimeMillis();
             long deadline = t0 + timeoutMs;
             while (System.currentTimeMillis() < deadline) {
+                SaveMetrics.Snapshot s = metrics.snapshot();
                 if (pipeline.chunkWorkerQueue().isEmpty()
                         && pipeline.entityWorkerQueue().isEmpty()
                         && pipeline.savedDataWorkerQueue().isEmpty()
-                        && metrics.snapshot().inFlightIoPending() == 0L) {
+                        && s.inFlightSerializing() == 0L
+                        && s.inFlightIoPending() == 0L) {
                     long elapsed = System.currentTimeMillis() - t0;
                     server.execute(() -> source.sendSuccess(() -> Component.literal(
                             "BetterAutoSave flush: drained in " + elapsed + "ms"), true));
@@ -287,7 +291,9 @@ public final class BetterAutoSaveCommand {
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
         SaveMetrics.Snapshot snap0 = metrics.snapshot();
         long initial = snap0.mustDrainPending();
+        // v0.7.1 修复 (C3): 加 inFlightSerializing 检查防 assemble 期间误判 idle.
         if (initial == 0L && pipeline.chunkWorkerQueue().isEmpty()
+                && snap0.inFlightSerializing() == 0L
                 && snap0.inFlightIoPending() == 0L) {
             // 报告累计计数让用户确认 v0.4 mixin 在工作 (生产 100k+ 调用属正常),
             // 而不是误以为 mod 没生效.
@@ -316,8 +322,10 @@ public final class BetterAutoSaveCommand {
             long deadline = t0 + timeoutMs;
             while (System.currentTimeMillis() < deadline) {
                 SaveMetrics.Snapshot s = metrics.snapshot();
+                // v0.7.1 修复 (C3): 加 inFlightSerializing 检查.
                 if (s.mustDrainPending() == 0L
                         && pipeline.chunkWorkerQueue().isEmpty()
+                        && s.inFlightSerializing() == 0L
                         && s.inFlightIoPending() == 0L) {
                     long elapsed = System.currentTimeMillis() - t0;
                     server.execute(() -> source.sendSuccess(() -> Component.literal(

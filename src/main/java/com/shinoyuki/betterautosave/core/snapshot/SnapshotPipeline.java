@@ -270,10 +270,16 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     public boolean drainPending(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
+            // v0.7.1 修复 (C3): 加 inFlightSerializing 检查. 之前漏检导致
+            // worker poll 后 task.execute 内 assemble 期间 (queue 已 empty +
+            // ioPending 未 inc) 50ms 轮询窗口误返 true, 关服 drainPending 协议失真.
+            // assemble 在大 chunk 下耗几十-几百 ms, 是真实窗口本体而非 yield.
+            SaveMetrics.Snapshot snap = metrics.snapshot();
             if (chunkWorkerQueue.isEmpty()
                     && entityWorkerQueue.isEmpty()
                     && savedDataWorkerQueue.isEmpty()
-                    && metrics.snapshot().inFlightIoPending() == 0L) {
+                    && snap.inFlightSerializing() == 0L
+                    && snap.inFlightIoPending() == 0L) {
                 return true;
             }
             try {
