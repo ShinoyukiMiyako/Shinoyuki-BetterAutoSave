@@ -55,6 +55,10 @@ public final class SavedDataSaveTask implements SaveTask {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             metrics.recordSavedDataCompleted();
+            // v0.7.1 修复 (M7): 回写历史 size, 让 mixin 守卫下次有可靠数据.
+            if (snapshot.historySizeMap() != null) {
+                snapshot.historySizeMap().put(snapshot.fileName(), snapshot.targetFile().length());
+            }
             // BAS 公开 API: SavedData 已成功落盘. 触发外部 listener (BetterBackup 等).
             SaveListenerRegistry.fireSavedDataWritten(snapshot.fileName(), snapshot.preBuiltTag());
         } catch (IOException e) {

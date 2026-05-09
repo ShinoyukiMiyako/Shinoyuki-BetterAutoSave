@@ -18,12 +18,14 @@ import org.slf4j.Logger;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.io.File;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * v0.7: 拦 vanilla {@link DimensionDataStorage#save()} HEAD, 把 SavedData
@@ -66,6 +68,18 @@ public abstract class DimensionDataStorageMixin {
     @Final
     private Map<String, SavedData> cache;
 
+    /**
+     * v0.7.1 修复 (M7): 历史落盘 size 跟踪, 替代 file.length() 守卫.
+     * 之前守卫 file.exists() && file.length() > maxBytes:
+     * - 文件不存在时短路 false → 第一次写大文件无保护
+     * - NFS / SMB 远程 fs file.length() 缓存延迟可能误判
+     *
+     * 改为 worker 完成 IO 后回写 size 到此 map. 守卫优先用历史 size,
+     * 没历史记录退化为 file.length() (跟之前等价, 只覆盖第一次写场景).
+     */
+    @Unique
+    private final ConcurrentHashMap<String, Long> betterautosave$lastWrittenSize = new ConcurrentHashMap<>();
+
     @Inject(method = "save()V",
             at = @At("HEAD"),
             cancellable = true)
@@ -105,8 +119,13 @@ public abstract class DimensionDataStorageMixin {
             File file = invoker.betterautosave$getDataFile(name);
 
             // 大文件 fallback: 现存文件已超阈值, 走 vanilla 同步避免 worker queue
-            // 被几十 MB 单文件堵死. 新文件首次写无法预判, 仅基于已有文件大小决策.
-            if (file.exists() && file.length() > maxBytes) {
+            // 被几十 MB 单文件堵死.
+            // v0.7.1 修复 (M7): 优先用历史 size (worker 上次写完回写), 兜底再用
+            // file.length(). 历史 size 在 NFS / SMB 远程 fs 上比 file.length() 可靠.
+            // 首次写仍无保护 (没有历史也没有现存文件), 文档化为已知限制.
+            Long historySize = betterautosave$lastWrittenSize.get(name);
+            long sizeForGuard = historySize != null ? historySize : (file.exists() ? file.length() : 0L);
+            if (sizeForGuard > maxBytes) {
                 metrics.recordSavedDataFallback();
                 savedData.save(file);
                 continue;
@@ -135,7 +154,8 @@ public abstract class DimensionDataStorageMixin {
             }
 
             try {
-                SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData);
+                SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
+                        betterautosave$lastWrittenSize);
                 metrics.incInFlightSerializing();
                 metrics.recordSavedDataSubmitted();
                 pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, server, metrics));

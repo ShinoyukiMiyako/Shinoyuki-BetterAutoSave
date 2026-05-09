@@ -4,6 +4,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.saveddata.SavedData;
 
 import java.io.File;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * v0.7 SavedData 路径 snapshot. 主线程 capture 时已构好完整外层 tag
@@ -17,16 +18,21 @@ import java.io.File;
  * - 没有 capturedGeneration (没有 "tag 落盘期间 mod 又改了" 的 race 检测,
  *   因为默认 vanilla 也是乐观清 dirty 后写, 本就有同样 race; 见 V0_7_PLAN §7.3)
  *
- * @param fileName     SavedData 名 (无 .dat 后缀, 例 "raids" "Forced" "mtr_train_data")
- * @param targetFile   完整 .dat 文件路径
- * @param preBuiltTag  主线程构好的外层 tag, 含 {@code data} 子 tag + DataVersion
- * @param savedData    反引用, 失败时 worker 通过 server.execute 调
- *                     {@link SavedData#setDirty()} 重新 mark dirty 让下个周期重试
+ * @param fileName        SavedData 名 (无 .dat 后缀, 例 "raids" "Forced" "mtr_train_data")
+ * @param targetFile      完整 .dat 文件路径
+ * @param preBuiltTag     主线程构好的外层 tag, 含 {@code data} 子 tag + DataVersion
+ * @param savedData       反引用, 失败时 worker 通过 server.execute 调
+ *                        {@link SavedData#setDirty()} 重新 mark dirty 让下个周期重试
+ * @param historySizeMap  v0.7.1 修复 (M7): mixin 实例共享的 fileName -> 上次落盘 size map.
+ *                        worker 写盘成功后回写 size, 让 mixin 下次守卫优先用历史 size 而非
+ *                        file.length() (后者在 NFS / SMB 不可靠, 且首次写无值). null 表示
+ *                        未启用 (向后兼容).
  */
 public record SavedDataSnapshot(
         String fileName,
         File targetFile,
         CompoundTag preBuiltTag,
-        SavedData savedData
+        SavedData savedData,
+        ConcurrentHashMap<String, Long> historySizeMap
 ) {
 }
