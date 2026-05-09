@@ -1,5 +1,6 @@
 package com.shinoyuki.betterautosave.mixin.accessor;
 
+import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.world.level.chunk.storage.EntityStorage;
 import net.minecraft.world.level.chunk.storage.IOWorker;
 import org.spongepowered.asm.mixin.Mixin;
@@ -13,10 +14,19 @@ import org.spongepowered.asm.mixin.gen.Accessor;
  *
  * <p>注意 EntityStorage 不继承 ChunkStorage (实现 EntityPersistentStorage),
  * 因此独立 accessor 而非复用 ChunkStorageAccessor.
+ *
+ * <p>v0.7.1: 同时暴露 {@code emptyChunks} {@link LongSet}. v0.6 mixin
+ * 拦截 storeEntities 后跳过了 vanilla 在非空分支末尾的 emptyChunks.remove
+ * 副作用清理, 导致 chunk 从空→有 entity 后该位置仍在 emptyChunks 中,
+ * 后续 unload→reload 走 loadEntities 快速路径返空 chunk → entity 静默丢失.
+ * mixin 在异步 dispatch 成功后必须显式调 remove 复制 vanilla 副作用.
  */
 @Mixin(EntityStorage.class)
 public interface EntityStorageAccessor {
 
     @Accessor("worker")
     IOWorker betterautosave$getWorker();
+
+    @Accessor("emptyChunks")
+    LongSet betterautosave$getEmptyChunks();
 }

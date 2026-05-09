@@ -11,6 +11,7 @@ import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import com.shinoyuki.betterautosave.core.state.EntitySaveStateAccess;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import com.shinoyuki.betterautosave.mixin.accessor.EntityStorageAccessor;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.chunk.storage.EntityStorage;
@@ -135,6 +136,11 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             metrics.incInFlightSerializing();
             metrics.recordEntitySubmitted();
             pipeline.entityWorkerQueue().offer(task);
+            // v0.7.1 修复: 复制 vanilla 在 storeEntities 非空分支末尾的副作用
+            // (vanilla EntityStorage.java:108 emptyChunks.remove). 漏调会让该 chunk
+            // 后续 unload→reload 时 vanilla loadEntities 命中 emptyChunks 快速路径
+            // 直接返空 chunk, 实际已落盘的 entity 数据被忽略 → 静默丢失.
+            ((EntityStorageAccessor) (Object) this).betterautosave$getEmptyChunks().remove(packed);
             ci.cancel();
         } catch (Throwable t) {
             if (state.compareAndClearMustDrain()) {
