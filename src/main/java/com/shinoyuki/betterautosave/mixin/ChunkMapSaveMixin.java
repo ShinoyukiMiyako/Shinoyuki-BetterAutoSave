@@ -136,6 +136,12 @@ public abstract class ChunkMapSaveMixin {
             if (state.compareAndClearMustDrain()) {
                 metrics.decMustDrainPending();
             }
+            // v0.7.1 修复 (M3): capture 抛后 phase 已被 enterSerializing 推到 SERIALIZING,
+            // 或 trySnapshot 已推到 SNAPSHOTTING. catch 不复位 phase 会让该 chunk 后续永远走
+            // mixin line 104-115 早 return 路径 (phase 非 DIRTY/FAILED), 既不入 BAS worker 也不
+            // 走 vanilla 同步, 数据永久丢失而无 telemetry. resetAfterFallback 把 phase 归零到
+            // CLEAN + 清 retryCount, 配合 vanilla 同步路径接管把状态重置干净.
+            state.resetAfterFallback();
             metrics.recordChunkMapSaveFallback();
             LOGGER.error("[BetterAutoSave] ChunkMap.save async dispatch failed for {} dim={}, falling back to vanilla",
                     chunk.getPos(), dimensionId, t);

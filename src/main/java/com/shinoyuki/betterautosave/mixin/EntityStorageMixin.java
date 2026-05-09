@@ -146,6 +146,10 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             if (state.compareAndClearMustDrain()) {
                 metrics.decMustDrainPending();
             }
+            // v0.7.1 修复 (M3): 同 ChunkMapSaveMixin, capture 抛后 phase 已推到
+            // SNAPSHOTTING/SERIALIZING. 不复位会让该 chunk entity 后续永远走早 return
+            // 路径既不入 BAS 也不走 vanilla, 数据永久丢失. resetAfterFallback 归零状态机.
+            state.resetAfterFallback();
             metrics.recordEntityFallback();
             LOGGER.error("[BetterAutoSave] EntityStorage.storeEntities async dispatch failed for {} dim={}, falling back to vanilla",
                     chunkEntities.getPos(), dimensionId, t);
