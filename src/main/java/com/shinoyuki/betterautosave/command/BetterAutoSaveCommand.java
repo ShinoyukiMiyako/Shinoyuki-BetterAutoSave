@@ -1,6 +1,7 @@
 package com.shinoyuki.betterautosave.command;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
@@ -9,6 +10,8 @@ import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
+import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyRecord;
+import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyTracker;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor;
 import net.minecraft.commands.CommandSourceStack;
@@ -17,8 +20,12 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
+
+import java.util.List;
+import java.util.Locale;
 
 public final class BetterAutoSaveCommand {
 
@@ -34,6 +41,11 @@ public final class BetterAutoSaveCommand {
                         .then(Commands.literal("status").executes(BetterAutoSaveCommand::status))
                         .then(Commands.literal("force-async").executes(BetterAutoSaveCommand::forceAsync))
                         .then(Commands.literal("drain-unload").executes(BetterAutoSaveCommand::drainUnload))
+                        .then(Commands.literal("hottest-chunks")
+                                .executes(ctx -> hottestChunks(ctx, 10))
+                                .then(Commands.argument("count", IntegerArgumentType.integer(1, 50))
+                                        .executes(ctx -> hottestChunks(ctx,
+                                                IntegerArgumentType.getInteger(ctx, "count")))))
         );
     }
 
@@ -353,6 +365,95 @@ public final class BetterAutoSaveCommand {
         watcher.setDaemon(true);
         watcher.start();
         return 1;
+    }
+
+    /**
+     * v0.9: /betterautosave hottest-chunks [count]
+     *
+     * <p>列出 ChunkLatencyTracker 滑动窗口内 worker NBT build p99
+     * 最高的 chunk top N (默认 10, 最多 50). 用于定位单点慢 chunk
+     * (通常 BlockEntity 多 / structure 复杂), 替代外接 spark profiler
+     * 的轻量诊断手段.
+     */
+    private static int hottestChunks(CommandContext<CommandSourceStack> ctx, int n) {
+        if (!BetterAutoSaveCore.isInstalled()) {
+            ctx.getSource().sendFailure(Component.literal("BetterAutoSave is not installed"));
+            return 0;
+        }
+        ChunkLatencyTracker tracker = BetterAutoSaveCore.latencyTracker();
+        if (tracker == null) {
+            ctx.getSource().sendFailure(Component.literal("ChunkLatencyTracker not initialized"));
+            return 0;
+        }
+        List<ChunkLatencyRecord> top = tracker.topByP99(n);
+        int trackerSize = tracker.size();
+        int trackLimit = tracker.trackLimit();
+        int windowSize = tracker.windowSize();
+
+        if (top.isEmpty()) {
+            ctx.getSource().sendSuccess(() -> Component.literal(
+                    "hottest-chunks: tracker empty (no chunk worker latency recorded yet, window="
+                            + windowSize + " trackLimit=" + trackLimit + ")"), false);
+            return 1;
+        }
+
+        StringBuilder out = new StringBuilder();
+        out.append("hottest-chunks (top ").append(top.size())
+                .append(" by window p99, window=").append(windowSize)
+                .append(", tracking=").append(trackerSize).append('/').append(trackLimit).append("):\n");
+        out.append("rank  pos              dim                          count   p99        max        last\n");
+
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < top.size(); i++) {
+            ChunkLatencyRecord r = top.get(i);
+            ChunkPos pos = new ChunkPos(r.packedPos());
+            out.append(String.format(Locale.ROOT, "%-4d  ", i + 1));
+            out.append(String.format(Locale.ROOT, "[%5d,%5d]    ", pos.x, pos.z));
+            out.append(String.format(Locale.ROOT, "%-28s ", truncate(r.dimensionId(), 28)));
+            out.append(String.format(Locale.ROOT, "%-6d  ", r.sampleCount()));
+            out.append(String.format(Locale.ROOT, "%-9s  ", formatNs(r.p99Ns())));
+            out.append(String.format(Locale.ROOT, "%-9s  ", formatNs(r.maxNs())));
+            out.append(formatMillisAgo(now - r.lastSavedAtMillis())).append(" ago\n");
+        }
+
+        ctx.getSource().sendSuccess(() -> Component.literal(out.toString()), false);
+        return top.size();
+    }
+
+    private static String formatNs(long ns) {
+        if (ns >= 1_000_000_000L) {
+            return String.format(Locale.ROOT, "%.2fs", ns / 1_000_000_000.0);
+        }
+        if (ns >= 1_000_000L) {
+            return String.format(Locale.ROOT, "%.2fms", ns / 1_000_000.0);
+        }
+        if (ns >= 1_000L) {
+            return String.format(Locale.ROOT, "%.0fus", ns / 1_000.0);
+        }
+        return ns + "ns";
+    }
+
+    private static String formatMillisAgo(long ms) {
+        if (ms < 0L) {
+            return "?";
+        }
+        if (ms < 1_000L) {
+            return ms + "ms";
+        }
+        if (ms < 60_000L) {
+            return (ms / 1_000L) + "s";
+        }
+        if (ms < 3_600_000L) {
+            return (ms / 60_000L) + "m";
+        }
+        return (ms / 3_600_000L) + "h";
+    }
+
+    private static String truncate(String s, int max) {
+        if (s.length() <= max) {
+            return s;
+        }
+        return s.substring(0, max - 1) + "~";
     }
 
     private BetterAutoSaveCommand() {
