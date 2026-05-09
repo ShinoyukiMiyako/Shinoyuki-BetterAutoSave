@@ -26,6 +26,11 @@ public final class ConfigSpec {
     public static final ForgeConfigSpec.EnumValue<EventCompatMode> EVENT_COMPAT_MODE;
     public static final ForgeConfigSpec.BooleanValue DIAGNOSTIC_LOGGING;
     public static final ForgeConfigSpec.IntValue DIAGNOSTIC_LOG_INTERVAL_TICKS;
+    public static final ForgeConfigSpec.BooleanValue PROMETHEUS_ENABLED;
+    public static final ForgeConfigSpec.ConfigValue<String> PROMETHEUS_BIND_ADDRESS;
+    public static final ForgeConfigSpec.IntValue PROMETHEUS_PORT;
+    public static final ForgeConfigSpec.IntValue HOTTEST_CHUNKS_WINDOW_SIZE;
+    public static final ForgeConfigSpec.IntValue HOTTEST_CHUNKS_TRACK_LIMIT;
 
     public static final ForgeConfigSpec SPEC;
 
@@ -130,6 +135,47 @@ public final class ConfigSpec {
         DIAGNOSTIC_LOG_INTERVAL_TICKS = BUILDER
                 .comment("How often diagnostic summaries are emitted, in server ticks (20 ticks = 1s).")
                 .defineInRange("diagnosticLogIntervalTicks", 200, 20, 6000);
+
+        BUILDER.pop();
+
+        BUILDER.comment("v0.9: Prometheus metrics HTTP exporter").push("prometheus");
+
+        PROMETHEUS_ENABLED = BUILDER
+                .comment("Enable Prometheus metrics HTTP exporter.",
+                         "Default false: opt-in. Toggle on if you want to scrape BAS metrics from Grafana / Prometheus.",
+                         "When enabled, the server starts an HTTP listener at bindAddress:port serving GET /metrics",
+                         "in Prometheus exposition format (text/plain).")
+                .define("enabled", false);
+
+        PROMETHEUS_BIND_ADDRESS = BUILDER
+                .comment("HTTP server bind address.",
+                         "Default 0.0.0.0: accept connections from any network interface (open by default for ease of setup).",
+                         "Security note: BAS metrics expose chunk save counters / queue depth / latency histograms.",
+                         "These are not directly sensitive but reveal world activity patterns.",
+                         "If your server has a public IP, restrict access via firewall (iptables / cloud Security Group)",
+                         "or set this to 127.0.0.1 so only local Prometheus can scrape.")
+                .define("bindAddress", "0.0.0.0");
+
+        PROMETHEUS_PORT = BUILDER
+                .comment("HTTP server port. Default 9450 (avoids 9090 Prometheus / 9100 node_exporter / 25565 MC).",
+                         "Pick any free port; Prometheus scrape config must point to this port.")
+                .defineInRange("port", 9450, 1024, 65535);
+
+        BUILDER.pop();
+
+        BUILDER.comment("v0.9: hottest-chunks command (per-chunk latency tracking)").push("hottestChunks");
+
+        HOTTEST_CHUNKS_WINDOW_SIZE = BUILDER
+                .comment("Sliding window size: per-chunk latency samples retained for p99 calculation.",
+                         "Larger window = more stable percentile, more memory. 100 samples per chunk = ~1.6 KB.")
+                .defineInRange("windowSize", 100, 10, 1000);
+
+        HOTTEST_CHUNKS_TRACK_LIMIT = BUILDER
+                .comment("LRU eviction limit: max number of chunks tracked simultaneously.",
+                         "When the limit is hit, the least-recently-saved chunk is evicted.",
+                         "10000 covers loaded chunks for typical 60-100 player servers (~ a few MB total memory).",
+                         "Raise if you run very large worlds with many active chunks.")
+                .defineInRange("trackLimit", 10_000, 100, 1_000_000);
 
         BUILDER.pop();
 

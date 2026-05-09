@@ -22,6 +22,11 @@ public final class BetterAutoSaveConfig {
     private static volatile ConfigSpec.EventCompatMode eventCompatMode;
     private static volatile boolean diagnosticLogging;
     private static volatile int diagnosticLogIntervalTicks;
+    private static volatile boolean prometheusEnabled;
+    private static volatile String prometheusBindAddress;
+    private static volatile int prometheusPort;
+    private static volatile int hottestChunksWindowSize;
+    private static volatile int hottestChunksTrackLimit;
 
     public static boolean enabled() {
         return enabled;
@@ -79,6 +84,26 @@ public final class BetterAutoSaveConfig {
         return diagnosticLogIntervalTicks;
     }
 
+    public static boolean prometheusEnabled() {
+        return prometheusEnabled;
+    }
+
+    public static String prometheusBindAddress() {
+        return prometheusBindAddress;
+    }
+
+    public static int prometheusPort() {
+        return prometheusPort;
+    }
+
+    public static int hottestChunksWindowSize() {
+        return hottestChunksWindowSize;
+    }
+
+    public static int hottestChunksTrackLimit() {
+        return hottestChunksTrackLimit;
+    }
+
     public static void onLoad(ModConfigEvent.Loading event) {
         refresh();
         LOGGER.info("[BetterAutoSave] config loaded enabled={} chunksPerTickBase={} workers={} eventCompat={}",
@@ -106,6 +131,11 @@ public final class BetterAutoSaveConfig {
         eventCompatMode = ConfigSpec.EVENT_COMPAT_MODE.get();
         diagnosticLogging = ConfigSpec.DIAGNOSTIC_LOGGING.get();
         diagnosticLogIntervalTicks = ConfigSpec.DIAGNOSTIC_LOG_INTERVAL_TICKS.get();
+        prometheusEnabled = ConfigSpec.PROMETHEUS_ENABLED.get();
+        prometheusBindAddress = ConfigSpec.PROMETHEUS_BIND_ADDRESS.get();
+        prometheusPort = ConfigSpec.PROMETHEUS_PORT.get();
+        hottestChunksWindowSize = ConfigSpec.HOTTEST_CHUNKS_WINDOW_SIZE.get();
+        hottestChunksTrackLimit = ConfigSpec.HOTTEST_CHUNKS_TRACK_LIMIT.get();
     }
 
     private BetterAutoSaveConfig() {
