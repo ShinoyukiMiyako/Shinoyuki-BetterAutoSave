@@ -4,6 +4,8 @@
 /bin/
 /tools/
 
+/mcmodsrepo/
+
 /.gradle/
 /gradle-app.setting
 
