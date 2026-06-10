@@ -129,12 +129,13 @@ public final class ConfigSpec {
 
         DIAGNOSTIC_LOGGING = BUILDER
                 .comment("Periodically log queue depth, throughput, and latency percentiles to the server log.",
-                         "Default true on v0.1 to surface anomalies in production. Set false once stability proven.")
+                         "For continuous monitoring prefer the Prometheus exporter below; set false to silence entirely.")
                 .define("diagnosticLogging", true);
 
         DIAGNOSTIC_LOG_INTERVAL_TICKS = BUILDER
-                .comment("How often diagnostic summaries are emitted, in server ticks (20 ticks = 1s).")
-                .defineInRange("diagnosticLogIntervalTicks", 200, 20, 6000);
+                .comment("How often diagnostic summaries are emitted, in server ticks (20 ticks = 1s).",
+                         "Default 6000 (5 min). The dev-era default was 200 (10s) - far too chatty for production.")
+                .defineInRange("diagnosticLogIntervalTicks", 6000, 20, 72000);
 
         BUILDER.pop();
 
