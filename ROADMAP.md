@@ -442,7 +442,7 @@ scrape_configs:
 
 ## Forge 1.20.1 生态调研与 BAS 定位 (2026-05)
 
-调研 chunk 异步化方向上的生态竞品后, 确认 BAS 在 Forge 1.20.1 上无活跃维护的竞争对手, 并据此**放弃 v0.8 chunk load 异步化方向** (详见已废弃节).
+调研了 Forge 1.20.1 上 chunk 异步化方向的现有 mod 后, 确认这块活跃维护的同类项目不多, 并据此**放弃 v0.8 chunk load 异步化方向** (详见已废弃节).
 
 ### 主流 chunk 异步化 mod 状态
 
@@ -452,9 +452,9 @@ scrape_configs:
 | C2ME (Fabric, ishland) | Fabric | n/a | 活跃维护 | chunk gen + IO + load 全套 |
 | C2MEF ([RelativityMC/C2ME-forge](https://github.com/RelativityMC/C2ME-forge)) | Forge | 是 (0.2.0+alpha.12) | 2025-07-12 已 archived | chunk gen + IO + load, 不碰 SavedData |
 | Starlight Forge | Forge | 是 (1.1.2) | 已 archived | LightEngine 重写 |
-| BAS | Forge | 是, 活跃维护 | 当前 v0.6 | chunk save + entity save (v0.7 加 SavedData) |
+| BAS | Forge | 是, 活跃维护 | 当前 v0.9 | chunk save + entity save + SavedData |
 
-**结论**: Forge 1.20.1 上 BAS 是**唯一活跃维护**的 chunk save 异步化方案, 无活跃竞品. v0.7 SavedData 异步化更是完全空白生态位 — Moonrise / C2MEF / 任何已知 mod 都不覆盖 `DimensionDataStorage.save()`.
+**结论**: 截至 2026-05 调研, Forge 1.20.1 上专做 chunk save 异步化且仍活跃维护的同类不多 (C2MEF / Starlight Forge 均已 archived, Moonrise 专注 Fabric / NeoForge). SavedData (`DimensionDataStorage.save()`) 异步化目前也少见同类覆盖, 是相对新的方向. BAS 的定位是把 Forge 1.20.1 这条 save 路径持续做下去 — 异步存档是整个社区共同的课题, 哪天出现更成熟的方案对用户都是好事.
 
 ### BAS 兼容性矩阵 (代码核对)
 
@@ -469,7 +469,7 @@ BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升
 | 优化 mod | 兼容性 | 理由 |
 |---|---|---|
 | Starlight (Forge 1.20.1) | 兼容 | BAS 只用公共 API `getDataLayerData()` 读 DataLayer, Starlight 必须保持该 API 契约 (vanilla save 也用), `DataLayer.copy()` 是 `byte[].clone` 与底层引擎实现解耦 |
-| C2MEF (Forge 1.20.1 alpha) | 直接冲突 | 都拦 `ChunkMap.save()`, 同装会双层 mixin. 但 C2MEF 已 archived, 不构成实际威胁 |
+| C2MEF (Forge 1.20.1 alpha) | 直接冲突 | 都拦 `ChunkMap.save()`, 同装会双层 mixin, 二选一. C2MEF 已 archived, 实际同装的情况应该很少 |
 | Modernfix | 兼容 | 内存 / 启动优化, 不碰 chunk save 路径 |
 | FerriteCore | 兼容 | 改 BlockState 内存表示, BAS 用 `PalettedContainer.copy()` 走标准路径 |
 | Radium / Canary (Lithium 移植) | 兼容 | 改 entity / block tick, 不碰 save 路径 |
