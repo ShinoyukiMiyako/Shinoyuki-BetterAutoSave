@@ -46,6 +46,7 @@ public final class SaveListenerRegistry {
     private static final List<ChunkSaveListener> CHUNK = new CopyOnWriteArrayList<>();
     private static final List<EntityChunkSaveListener> ENTITY = new CopyOnWriteArrayList<>();
     private static final List<SavedDataSaveListener> SAVED_DATA = new CopyOnWriteArrayList<>();
+    private static final List<PipelineStateListener> PIPELINE_STATE = new CopyOnWriteArrayList<>();
 
     private SaveListenerRegistry() {
     }
@@ -72,6 +73,14 @@ public final class SaveListenerRegistry {
 
     public static void unregisterSavedData(SavedDataSaveListener listener) {
         SAVED_DATA.remove(listener);
+    }
+
+    public static void registerPipelineState(PipelineStateListener listener) {
+        PIPELINE_STATE.add(listener);
+    }
+
+    public static void unregisterPipelineState(PipelineStateListener listener) {
+        PIPELINE_STATE.remove(listener);
     }
 
     /**
@@ -126,6 +135,23 @@ public final class SaveListenerRegistry {
     }
 
     /**
+     * BAS 内部调用: 管线首次进入 degraded mode 时触发. 第三方 mod 不应调用.
+     */
+    public static void firePipelineDegraded() {
+        if (PIPELINE_STATE.isEmpty()) {
+            return;
+        }
+        for (PipelineStateListener l : PIPELINE_STATE) {
+            try {
+                l.onDegraded();
+            } catch (Throwable t) {
+                LOGGER.error("[BetterAutoSave] PipelineStateListener {} threw, suppressing",
+                        l.getClass().getName(), t);
+            }
+        }
+    }
+
+    /**
      * 测试 / 诊断用: 当前注册 listener 数. 不计入 API 稳定性承诺.
      */
     public static int chunkListenerCount() {
@@ -144,5 +170,12 @@ public final class SaveListenerRegistry {
      */
     public static int savedDataListenerCount() {
         return SAVED_DATA.size();
+    }
+
+    /**
+     * 测试 / 诊断用: 当前注册 pipeline state listener 数. 不计入 API 稳定性承诺.
+     */
+    public static int pipelineStateListenerCount() {
+        return PIPELINE_STATE.size();
     }
 }

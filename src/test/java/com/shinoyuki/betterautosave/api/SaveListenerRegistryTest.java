@@ -32,6 +32,7 @@ class SaveListenerRegistryTest {
     private final AtomicReference<ChunkSaveListener> chunkListener = new AtomicReference<>();
     private final AtomicReference<EntityChunkSaveListener> entityListener = new AtomicReference<>();
     private final AtomicReference<SavedDataSaveListener> savedDataListener = new AtomicReference<>();
+    private final AtomicReference<PipelineStateListener> pipelineStateListener = new AtomicReference<>();
 
     @AfterEach
     void cleanup() {
@@ -41,6 +42,8 @@ class SaveListenerRegistryTest {
         if (e != null) SaveListenerRegistry.unregisterEntityChunk(e);
         SavedDataSaveListener s = savedDataListener.getAndSet(null);
         if (s != null) SaveListenerRegistry.unregisterSavedData(s);
+        PipelineStateListener p = pipelineStateListener.getAndSet(null);
+        if (p != null) SaveListenerRegistry.unregisterPipelineState(p);
     }
 
     @Test
@@ -188,6 +191,78 @@ class SaveListenerRegistryTest {
 
         SaveListenerRegistry.unregisterChunk(cl);
         SaveListenerRegistry.unregisterSavedData(sl);
+    }
+
+    @Test
+    void registered_pipeline_state_listener_receives_degraded_fire() {
+        AtomicInteger count = new AtomicInteger();
+        PipelineStateListener l = count::incrementAndGet;
+        pipelineStateListener.set(l);
+        SaveListenerRegistry.registerPipelineState(l);
+
+        SaveListenerRegistry.firePipelineDegraded();
+
+        assertEquals(1, count.get());
+        assertEquals(1, SaveListenerRegistry.pipelineStateListenerCount());
+    }
+
+    @Test
+    void unregister_stops_pipeline_state_callbacks() {
+        AtomicInteger count = new AtomicInteger();
+        PipelineStateListener l = count::incrementAndGet;
+        SaveListenerRegistry.registerPipelineState(l);
+
+        SaveListenerRegistry.firePipelineDegraded();
+        assertEquals(1, count.get());
+
+        SaveListenerRegistry.unregisterPipelineState(l);
+        SaveListenerRegistry.firePipelineDegraded();
+        assertEquals(1, count.get(), "unregister 后不应再触发降级回调");
+    }
+
+    @Test
+    void empty_pipeline_state_registry_fire_is_noop() {
+        SaveListenerRegistry.firePipelineDegraded();
+        assertEquals(0, SaveListenerRegistry.pipelineStateListenerCount());
+    }
+
+    @Test
+    void exception_in_pipeline_state_listener_does_not_affect_others() {
+        AtomicInteger sane = new AtomicInteger();
+        PipelineStateListener throwing = () -> {
+            throw new RuntimeException("intentional test failure");
+        };
+        PipelineStateListener sanityCheck = sane::incrementAndGet;
+        SaveListenerRegistry.registerPipelineState(throwing);
+        SaveListenerRegistry.registerPipelineState(sanityCheck);
+
+        SaveListenerRegistry.firePipelineDegraded();
+
+        assertEquals(1, sane.get(), "异常 listener 不应影响后续 pipeline state listener 触发");
+
+        SaveListenerRegistry.unregisterPipelineState(throwing);
+        SaveListenerRegistry.unregisterPipelineState(sanityCheck);
+    }
+
+    @Test
+    void pipeline_state_channel_independent_from_chunk() {
+        AtomicInteger chunkCount = new AtomicInteger();
+        AtomicInteger degradedCount = new AtomicInteger();
+        ChunkSaveListener cl = (pos, dim, tag) -> chunkCount.incrementAndGet();
+        PipelineStateListener pl = degradedCount::incrementAndGet;
+        SaveListenerRegistry.registerChunk(cl);
+        SaveListenerRegistry.registerPipelineState(pl);
+
+        SaveListenerRegistry.fireChunkSaved(POS, NULL_DIM, new CompoundTag());
+        assertEquals(1, chunkCount.get());
+        assertEquals(0, degradedCount.get(), "fireChunk 不应触发 pipeline state listener");
+
+        SaveListenerRegistry.firePipelineDegraded();
+        assertEquals(1, chunkCount.get(), "firePipelineDegraded 不应触发 chunk listener");
+        assertEquals(1, degradedCount.get());
+
+        SaveListenerRegistry.unregisterChunk(cl);
+        SaveListenerRegistry.unregisterPipelineState(pl);
     }
 
     @Test

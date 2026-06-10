@@ -1,6 +1,7 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
+import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
@@ -189,6 +190,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     public void triggerDegraded() {
         if (degraded.compareAndSet(false, true)) {
             LOGGER.error("[BetterAutoSave] entered DEGRADED mode; all saves fall back to vanilla synchronous path");
+            // 单向闩锁首次翻转才 fire, 保证下游 (BetterBackup) 每进程最多收一次降级信号.
+            SaveListenerRegistry.firePipelineDegraded();
         }
     }
 
