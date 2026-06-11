@@ -171,6 +171,15 @@ public abstract class DimensionDataStorageMixin {
                 SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
                         betterautosave$lastWrittenSize, pipeline.savedDataInFlight());
                 metrics.recordSavedDataSubmitted();
+                // v0.10.2 修复 (M-saveddata-dirty-ordering): 乐观清 dirty 必须发生在 enqueue 之前。
+                // 旧序 (offer 后才 setDirty(false)) 是 lost-update: worker 是独立线程, offer 把 task 交给
+                // worker 后主线程还要再跑两行才清 dirty; 持续性 IO 故障下 worker 的 writeCompressed 同步快速
+                // 抛 IOException 走 SavedDataSaveTask setDirty(true), 这次 true 可能先于主线程的 setDirty(false)
+                // 发生, last-writer-wins 主线程 false 胜出 -> 下周期 isDirty() gate 跳过 -> M9 宣称的 "worker
+                // re-mark -> 下周期重试" 增强在 fast-fail 窗口内被自己抵消。上移后主线程的 false 必然
+                // happens-before worker 任何 setDirty(true), worker 失败置 true 成为最后写, 下周期正确重试。
+                // (volatile 镜像解决可见性, 与本顺序修复正交, 二者都需要。)
+                savedData.setDirty(false);
                 // v0.10.2 修复 (M5): inc serializing + offer 的 gauge 配平不变式收口到 SavedDataDispatch。
                 // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask); inc 抵消
                 // 责任移交 worker execute 首行 dec。offer 阶段抛异常时 enqueue 内部已先补 dec 再上抛,
@@ -181,11 +190,6 @@ public abstract class DimensionDataStorageMixin {
                 // 不走 SaveScheduler 的 tick 节流队列 (无逐 tick drain 回写时机), 只能在 offer
                 // 后即时回写 queue.size() — worker 消费后的回落由下一周期 offer 重新采样.
                 metrics.setSavedDataQueueDepth(pipeline.savedDataWorkerQueue().size());
-                // 乐观清 dirty: 跟 vanilla 行为差异 — vanilla 在 IO 完成后清,
-                // BAS 在 dispatch 时清. 失败时 worker 直接 setDirty(true) (v0.7.1
-                // M9 修复: 不再走 server.execute, 避免关服阶段主线程 task queue 已
-                // 不消费导致 setDirty 永久丢失).
-                savedData.setDirty(false);
             } catch (Throwable t) {
                 // serializing gauge 已由 SavedDataDispatch.enqueue 在 offer 失败时配平, 此处不再碰。
                 metrics.recordSavedDataFallback();
@@ -197,9 +201,14 @@ public abstract class DimensionDataStorageMixin {
                 // save(CompoundTag) 被双重调用. 写失败 vanilla 等价 (vanilla 也只 log).
                 try {
                     net.minecraft.nbt.NbtIo.writeCompressed(tag, file);
+                    // 兜底写成功: dirty 已在 enqueue 前清 false, 此处幂等保持 false (与上移前同终值)。
                     savedData.setDirty(false);
                 } catch (java.io.IOException ioe) {
-                    LOGGER.error("[BetterAutoSave] SavedData {} sync fallback write failed, data stays dirty for next cycle",
+                    // v0.10.2 修复 (M-saveddata-dirty-ordering, 补偿): 上移后进入本 catch 时 dirty 已是 false,
+                    // 而 "offer 失败 + 兜底写也失败" 这条路径在上移前会留 dirty=true 下周期重试。必须显式 re-mark
+                    // 才与上移前终值等价, 否则丢这次重试 (回归)。
+                    savedData.setDirty();
+                    LOGGER.error("[BetterAutoSave] SavedData {} sync fallback write failed, re-marked dirty for next cycle",
                             name, ioe);
                 }
             }
