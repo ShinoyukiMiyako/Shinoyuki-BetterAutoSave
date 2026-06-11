@@ -144,6 +144,13 @@ public abstract class ChunkMapSaveMixin {
                             chunk.getPos(), dimensionId, t);
                 }
             }
+            // v0.10.2 修复 (m-pending-skips-poi-flush): in-flight 碰撞分支也必须复刻 vanilla ChunkMap.save
+            // 首行 poiManager.flush(pos) 副作用。该分支 setReturnValue(true) 短路返回前完全跳过 flush, 而
+            // generation 已前进 (gen2 含可能新增的 POI dirty section): 在飞那代 IO 落地与接力链重投都只写
+            // chunk tag, 无任何路径把 gen2 的 POI 推进 IOWorker -> 崩溃窗口内 POI region 与 chunk region
+            // 短暂不一致 (滞后一 cycle)。flush 幂等且廉价 (SectionStorage.flush 首行 hasWork 早退, 无 dirty
+            // 即 no-op), 故无条件补一次零额外代价。与常规 dispatch 路径 (line 153 附近) 的 flush 同源。
+            poiManager.flush(chunk.getPos());
             metrics.recordChunkMapSaveAsync();
             cir.setReturnValue(true);
             return;

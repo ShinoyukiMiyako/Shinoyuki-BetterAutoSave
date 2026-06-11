@@ -137,6 +137,12 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                                 + "trusting in-flight snapshot (latest entity increment may be lost)",
                         chunkEntities.getPos(), dimensionId, t);
             }
+            // v0.10.2 修复 (m-pending-skips-poi-flush siblingGap): in-flight 碰撞分支也必须复刻 vanilla
+            // storeEntities 非空分支末尾的 emptyChunks.remove 副作用 (与常规 dispatch 路径 line ~174 同源)。
+            // 该分支 ci.cancel() 短路前若漏 remove: 若该坐标在飞期间曾走过空 chunk 早返回路径 (vanilla 空分支
+            // emptyChunks.add), 残留的 stale 条目使后续 unload->reload 时 vanilla loadEntities 命中 emptyChunks
+            // 快速路径直接返空 chunk, 已落盘 entity 被忽略 -> 静默丢失 (entity 不可重建, 比 POI 更重)。
+            ((EntityStorageAccessor) (Object) this).betterautosave$getEmptyChunks().remove(packed);
             metrics.recordEntitySubmitted();
             ci.cancel();
             return;
