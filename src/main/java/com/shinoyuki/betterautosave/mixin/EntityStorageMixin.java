@@ -10,6 +10,7 @@ import com.shinoyuki.betterautosave.core.snapshot.EntitySnapshot;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import com.shinoyuki.betterautosave.core.state.EntitySaveStateAccess;
+import com.shinoyuki.betterautosave.core.state.EntityStateMap;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.EntityStorageAccessor;
 import net.minecraft.server.level.ServerLevel;
@@ -25,8 +26,6 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * v0.6: 拦 vanilla {@code EntityStorage.storeEntities(ChunkEntities)} HEAD,
@@ -55,18 +54,24 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
     @Final
     private IOWorker worker;
 
+    // v0.10.2 修复 (M4): per-level 状态表收口到 EntityStateMap, 支持 CLEAN_LANDED 终态安全剔除,
+    // 防 EntityStorage 单例的状态表随进程运行无界增长.
     @Unique
-    private final ConcurrentHashMap<Long, EntitySaveState> betterautosave$entityStates = new ConcurrentHashMap<>();
+    private final EntityStateMap betterautosave$entityStates = new EntityStateMap();
 
     @Override
     public EntitySaveState betterautosave$getOrCreateEntityState(long packedPos, String dimensionId, long enqueueSequence) {
-        return betterautosave$entityStates.computeIfAbsent(packedPos,
-                k -> new EntitySaveState(k, dimensionId, enqueueSequence));
+        return betterautosave$entityStates.getOrCreate(packedPos, dimensionId, enqueueSequence);
     }
 
     @Override
     public EntitySaveState betterautosave$getEntityState(long packedPos) {
         return betterautosave$entityStates.get(packedPos);
+    }
+
+    @Override
+    public void betterautosave$evictEntityStateIfClean(long packedPos, EntitySaveState expected) {
+        betterautosave$entityStates.evictIfClean(packedPos, expected);
     }
 
     @Inject(method = "storeEntities(Lnet/minecraft/world/level/entity/ChunkEntities;)V",
@@ -132,7 +137,9 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                 return;
             }
             EntitySnapshot snapshot = EntityCaptureProcedure.capture(chunkEntities, level, state);
-            EntitySaveTask task = new EntitySaveTask(snapshot, worker, metrics);
+            // v0.10.2 修复 (M4): 传 this (EntitySaveStateAccess) 让 task 在 CLEAN_LANDED 终态剔除
+            // per-level 状态 map 条目, 防无界增长.
+            EntitySaveTask task = new EntitySaveTask(snapshot, worker, metrics, this);
             metrics.incInFlightSerializing();
             metrics.recordEntitySubmitted();
             pipeline.entityWorkerQueue().offer(task);

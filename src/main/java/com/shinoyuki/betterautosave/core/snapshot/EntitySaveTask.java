@@ -4,6 +4,7 @@ import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
+import com.shinoyuki.betterautosave.core.state.EntitySaveStateAccess;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.nbt.CompoundTag;
@@ -38,19 +39,27 @@ public final class EntitySaveTask implements SaveTask {
     private final EntitySnapshot snapshot;
     private final SaveMetrics metrics;
     private final IoSubmitter ioSubmitter;
+    private final EntitySaveStateAccess stateOwner;
 
-    public EntitySaveTask(EntitySnapshot snapshot, IOWorker entityIoWorker, SaveMetrics metrics) {
-        this(snapshot, metrics, tag -> entityIoWorker.store(snapshot.pos(), tag));
+    public EntitySaveTask(EntitySnapshot snapshot, IOWorker entityIoWorker, SaveMetrics metrics,
+                          EntitySaveStateAccess stateOwner) {
+        this(snapshot, metrics, tag -> entityIoWorker.store(snapshot.pos(), tag), stateOwner);
     }
 
     /**
      * 测试用构造: 直接注入 IoSubmitter, 绕开 IOWorker. 仅供单测验证 submitIo 重投循环,
-     * 生产代码一律走上面的公开构造.
+     * 生产代码一律走上面的公开构造. stateOwner 可为 null (单测不验证 map 剔除时).
      */
     EntitySaveTask(EntitySnapshot snapshot, SaveMetrics metrics, IoSubmitter ioSubmitter) {
+        this(snapshot, metrics, ioSubmitter, null);
+    }
+
+    EntitySaveTask(EntitySnapshot snapshot, SaveMetrics metrics, IoSubmitter ioSubmitter,
+                   EntitySaveStateAccess stateOwner) {
         this.snapshot = snapshot;
         this.metrics = metrics;
         this.ioSubmitter = ioSubmitter;
+        this.stateOwner = stateOwner;
     }
 
     @Override
@@ -143,6 +152,13 @@ public final class EntitySaveTask implements SaveTask {
                     metrics.decMustDrainPending();
                 }
                 metrics.recordEntityCompleted();
+                // v0.10.2 修复 (M4): CLEAN_LANDED 是确认安全的终态 (phase=CLEAN, 无在途 IO,
+                // generation 未变即无 pending 编辑). 尝试从 per-level 状态 map 剔除本条目, 防止
+                // EntityStorage 单例的状态 map 随进程运行无界增长. 剔除走 identity + phase==CLEAN
+                // 原子校验 (computeIfPresent), 主线程已开新一轮 save 则保留留待下次 CLEAN_LANDED.
+                if (stateOwner != null) {
+                    stateOwner.betterautosave$evictEntityStateIfClean(snapshot.pos().toLong(), state);
+                }
                 // BAS 公开 API: entity chunk 已成功落盘. 触发外部 listener.
                 // 跟 ChunkSaveTask 同语义, listener 异常 Registry 层 catch + log.
                 SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
