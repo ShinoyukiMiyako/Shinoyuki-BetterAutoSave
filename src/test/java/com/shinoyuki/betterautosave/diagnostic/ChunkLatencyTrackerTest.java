@@ -194,6 +194,35 @@ class ChunkLatencyTrackerTest {
     }
 
     @Test
+    void same_packed_pos_across_dimensions_tracked_separately() {
+        // Minor 修复 M8: 跨维度同坐标 chunk 必须独立统计, 不能因纯 packedPos key 碰撞而把
+        // nether/end 的样本叠加进 overworld 的 record (维度标签错 + 跨维度 p99/max/count 混算).
+        ChunkLatencyTracker t = new ChunkLatencyTracker(100, 1000);
+        long packed = 0L; // spawn 区 (0,0), 三维度都常驻且都被采样, 最易碰撞
+        t.record(packed, "minecraft:overworld", 10_000_000L);
+        t.record(packed, "minecraft:the_nether", 50_000_000L);
+        t.record(packed, "minecraft:the_end", 90_000_000L);
+
+        List<ChunkLatencyRecord> all = t.topByP99(10);
+        assertEquals(3, all.size(),
+                "同 packedPos 不同维度必须各占独立 record, 而非碰撞合并成 1 条");
+
+        // 每条 record 必须只含自己维度的单一样本 (没有跨维度串样本).
+        long overworld = all.stream().filter(r -> r.dimensionId().equals("minecraft:overworld"))
+                .mapToLong(ChunkLatencyRecord::p99Ns).findFirst().orElse(-1L);
+        long nether = all.stream().filter(r -> r.dimensionId().equals("minecraft:the_nether"))
+                .mapToLong(ChunkLatencyRecord::p99Ns).findFirst().orElse(-1L);
+        long end = all.stream().filter(r -> r.dimensionId().equals("minecraft:the_end"))
+                .mapToLong(ChunkLatencyRecord::p99Ns).findFirst().orElse(-1L);
+        assertEquals(10_000_000L, overworld, "overworld record 只含自己的 10ms 样本");
+        assertEquals(50_000_000L, nether, "nether record 只含自己的 50ms 样本");
+        assertEquals(90_000_000L, end, "end record 只含自己的 90ms 样本");
+
+        all.forEach(r -> assertEquals(1, r.sampleCount(),
+                r.dimensionId() + " 应只采到 1 个自己维度的样本, 无跨维度串样本"));
+    }
+
+    @Test
     void clear_removes_all_records() {
         ChunkLatencyTracker t = new ChunkLatencyTracker(10, 100);
         t.record(1L, "dim", 100L);

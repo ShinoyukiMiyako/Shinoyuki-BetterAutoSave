@@ -30,7 +30,11 @@ public final class ChunkLatencyTracker {
 
     private final int windowSize;
     private final int trackLimit;
-    private final Map<Long, ChunkLatencyRecord> records;
+    // v0.10.2 修复 (M8): key 纳入 dimension. 之前以纯 packedPos (ChunkPos.toLong, 零维度位) 为 key,
+    // overworld/nether/end 同坐标 chunk (尤其 spawn 区 (0,0)) 落入同一 key, 后到维度的样本被叠加进
+    // 先到维度的 record (dimensionId 构造时冻结), hottest-chunks 输出维度标签错 + 跨维度 p99/max/count
+    // 混算. 复合 String key (dimensionId + ":" + packedPos) 与 ChunkSavePriority 既有约定一致.
+    private final Map<String, ChunkLatencyRecord> records;
 
     public ChunkLatencyTracker(int windowSize, int trackLimit) {
         if (windowSize <= 0) {
@@ -41,21 +45,23 @@ public final class ChunkLatencyTracker {
         }
         this.windowSize = windowSize;
         this.trackLimit = trackLimit;
-        this.records = Collections.synchronizedMap(new LinkedHashMap<Long, ChunkLatencyRecord>(16, 0.75f, true) {
+        this.records = Collections.synchronizedMap(new LinkedHashMap<String, ChunkLatencyRecord>(16, 0.75f, true) {
             @Override
-            protected boolean removeEldestEntry(Map.Entry<Long, ChunkLatencyRecord> eldest) {
+            protected boolean removeEldestEntry(Map.Entry<String, ChunkLatencyRecord> eldest) {
                 return size() > trackLimit;
             }
         });
     }
 
     public void record(long packedPos, String dimensionId, long workerNs) {
+        // record 内部仍存原始 long packedPos + String dimensionId (供命令格式化坐标), 仅 map key 复合.
+        String key = dimensionId + ":" + packedPos;
         ChunkLatencyRecord r;
         synchronized (records) {
-            r = records.get(packedPos);
+            r = records.get(key);
             if (r == null) {
                 r = new ChunkLatencyRecord(packedPos, dimensionId, windowSize);
-                records.put(packedPos, r);
+                records.put(key, r);
             }
         }
         // record 内部 synchronized, 跟 tracker 锁不重叠. 此时新 record 已经
