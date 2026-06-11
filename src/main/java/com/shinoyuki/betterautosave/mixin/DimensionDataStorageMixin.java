@@ -6,6 +6,7 @@ import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataSaveTask;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataSnapshot;
+import com.shinoyuki.betterautosave.core.snapshot.SavedDataSyncFallback;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.DimensionDataStorageInvoker;
@@ -131,9 +132,13 @@ public abstract class DimensionDataStorageMixin {
             long sizeForGuard = historySize != null ? historySize : (file.exists() ? file.length() : 0L);
             if (sizeForGuard > maxBytes) {
                 metrics.recordSavedDataFallback();
-                savedData.save(file);
-                // 同步 fallback 不入 worker, 立即释放在途占位 (否则该文件名永久占位永不再 dispatch).
-                pipeline.savedDataInFlight().remove(name);
+                // v0.10.2 修复 (M3): 同步 fallback 不入 worker, 占位释放责任在本地. 之前
+                // save(file) 无 finally, 抛 Throwable (vanilla SavedData.save(File) 仅 catch
+                // IOException, mod 的 save(CompoundTag) 抛 RuntimeException 会透出) 则 remove(name)
+                // 被跳过 → 该名称永久占位, 后续每周期 add 失败被跳过, 该 SavedData 失去 BAS 增量
+                // 保护仅剩关服兜底. 抽到 SavedDataSyncFallback.syncWrite 用 try-finally 释放占位 +
+                // 集中单测异常安全契约. 异常仍按 vanilla 等价语义透出.
+                SavedDataSyncFallback.syncWrite(savedData, file, pipeline.savedDataInFlight(), name);
                 continue;
             }
 
