@@ -73,7 +73,6 @@ public final class BetterAutoSaveMod {
                 BetterAutoSaveConfig.hottestChunksTrackLimit());
 
         pipeline.setChunkResolutionHook(dispatcher);
-        pipeline.setEntityResolutionHook(dispatcher);
         pipeline.setLatencyTracker(latencyTracker);
         pipeline.start(event.getServer());
 

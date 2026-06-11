@@ -78,8 +78,6 @@ public final class PrometheusFormatter {
                 "Number of chunks pending mustDrain (v0.4 unload/eager save)", snap.mustDrainPending());
         gauge(sb, "bas_worker_queue_depth",
                 "Chunk worker queue depth", snap.workerQueueDepth());
-        gauge(sb, "bas_entity_queue_depth",
-                "Entity worker queue depth", snap.entityQueueDepth());
         gauge(sb, "bas_saved_data_queue_depth",
                 "SavedData worker queue depth", snap.savedDataQueueDepth());
         gauge(sb, "bas_in_flight_serializing",

@@ -76,7 +76,6 @@ public final class SaveMetrics {
     private final Histogram eventDispatchNs = new Histogram();
 
     private final AtomicLong workerQueueDepth = new AtomicLong();
-    private final AtomicLong entityQueueDepth = new AtomicLong();
     private final AtomicLong savedDataQueueDepth = new AtomicLong();
     private final AtomicLong inFlightSerializing = new AtomicLong();
     private final AtomicLong inFlightIoPending = new AtomicLong();
@@ -177,10 +176,6 @@ public final class SaveMetrics {
         workerQueueDepth.set(depth);
     }
 
-    public void setEntityQueueDepth(long depth) {
-        entityQueueDepth.set(depth);
-    }
-
     public void setSavedDataQueueDepth(long depth) {
         savedDataQueueDepth.set(depth);
     }
@@ -226,7 +221,6 @@ public final class SaveMetrics {
                 ioStoreLatencyNs.snapshot(),
                 eventDispatchNs.snapshot(),
                 workerQueueDepth.get(),
-                entityQueueDepth.get(),
                 savedDataQueueDepth.get(),
                 inFlightSerializing.get(),
                 inFlightIoPending.get()
@@ -320,7 +314,6 @@ public final class SaveMetrics {
             HistogramSnapshot ioStore,
             HistogramSnapshot eventDispatch,
             long workerQueueDepth,
-            long entityQueueDepth,
             long savedDataQueueDepth,
             long inFlightSerializing,
             long inFlightIoPending

@@ -19,7 +19,7 @@ import org.slf4j.Logger;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHook, SnapshotPipeline.EntityResolutionHook {
+public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHook {
 
     private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
 

@@ -59,14 +59,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final Set<String> savedDataInFlight = ConcurrentHashMap.newKeySet();
     private volatile MinecraftServer server;
     private volatile ChunkResolutionHook chunkResolution;
-    private volatile EntityResolutionHook entityResolution;
     private volatile ChunkLatencyTracker latencyTracker;
 
     public interface ChunkResolutionHook {
-        void onPriorityDrained(ChunkSavePriority priority);
-    }
-
-    public interface EntityResolutionHook {
         void onPriorityDrained(ChunkSavePriority priority);
     }
 
@@ -178,21 +173,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         hook.onPriorityDrained(priority);
     }
 
-    @Override
-    public void submitEntity(ChunkSavePriority priority) {
-        EntityResolutionHook hook = entityResolution;
-        if (hook == null) {
-            return;
-        }
-        hook.onPriorityDrained(priority);
-    }
-
     public void setChunkResolutionHook(ChunkResolutionHook hook) {
         this.chunkResolution = hook;
-    }
-
-    public void setEntityResolutionHook(EntityResolutionHook hook) {
-        this.entityResolution = hook;
     }
 
     public void triggerDegraded() {

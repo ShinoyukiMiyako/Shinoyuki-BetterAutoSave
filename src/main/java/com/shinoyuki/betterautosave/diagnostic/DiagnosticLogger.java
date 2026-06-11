@@ -39,7 +39,6 @@ public final class DiagnosticLogger {
                 && snap.entitiesSubmitted() == lastEntitiesSubmittedSeen
                 && snap.savedDataSubmitted() == lastSavedDataSubmittedSeen
                 && snap.workerQueueDepth() == 0L
-                && snap.entityQueueDepth() == 0L
                 && snap.inFlightSerializing() == 0L
                 && snap.inFlightIoPending() == 0L
                 && snap.mustDrainPending() == 0L;
@@ -62,7 +61,7 @@ public final class DiagnosticLogger {
                 snap.chunkMapSaveFallback(),
                 snap.chunkMapSaveBypass(),
                 snap.mustDrainPending());
-        if (snap.entitiesSubmitted() > 0L || snap.entityQueueDepth() > 0L) {
+        if (snap.entitiesSubmitted() > 0L) {
             LOGGER.info("[BetterAutoSave]   |- entities: submitted={} completed={} failed={} retried={} fallback={}",
                     snap.entitiesSubmitted(),
                     snap.entitiesCompleted(),
@@ -77,9 +76,8 @@ public final class DiagnosticLogger {
                     snap.savedDataFailed(),
                     snap.savedDataFallback());
         }
-        LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} entityDepth={} savedDataDepth={}",
+        LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} savedDataDepth={}",
                 snap.workerQueueDepth(),
-                snap.entityQueueDepth(),
                 snap.savedDataQueueDepth());
         LOGGER.info("[BetterAutoSave]   |- inflight: serializing={} ioPending={}",
                 snap.inFlightSerializing(),

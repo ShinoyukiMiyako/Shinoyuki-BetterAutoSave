@@ -91,7 +91,6 @@ public final class BetterAutoSaveCommand {
         out.append("Fallback: ").append(s.savedDataFallback()).append('\n');
         out.append("\n-- Queue --\n");
         out.append("Worker queue depth: ").append(s.workerQueueDepth()).append('\n');
-        out.append("Entity queue depth: ").append(s.entityQueueDepth()).append('\n');
         out.append("In-flight serializing: ").append(s.inFlightSerializing()).append('\n');
         out.append("In-flight IO_PENDING: ").append(s.inFlightIoPending()).append('\n');
         out.append("\n-- Latency (us, '>60s' = overflow bucket) --\n");
