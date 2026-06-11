@@ -34,7 +34,7 @@
 | **v0.9.0** | **已落地** | 工具化与监控: Prometheus exporter + hottest-chunks 命令 | 服主自助定位 mod / vanilla 瓶颈, 不再依赖外接 spark profiler |
 | ~~v0.8~~ | 已废弃 (2026-05) | ~~chunk load 路径异步化~~ | 2026-05 生态调研后决定不做, 见专门小节 |
 
-> **当前**: v0.9 工具化已落地. 后续路线参考[候选版本](#候选版本)段.
+> **当前**: v0.10 已落地. 后续路线参考[候选版本](#候选版本)段.
 > 顺序原则: v0.8 chunk load 已废弃, 不在路线图; mod-tick-trace / WebUI 推迟, 等系列其他 mod (BetterBackup) 上线后做统一面板更划算.
 
 > **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
@@ -452,7 +452,7 @@ scrape_configs:
 | C2ME (Fabric, ishland) | Fabric | n/a | 活跃维护 | chunk gen + IO + load 全套 |
 | C2MEF ([RelativityMC/C2ME-forge](https://github.com/RelativityMC/C2ME-forge)) | Forge | 是 (0.2.0+alpha.12) | 2025-07-12 已 archived | chunk gen + IO + load, 不碰 SavedData |
 | Starlight Forge | Forge | 是 (1.1.2) | 已 archived | LightEngine 重写 |
-| BAS | Forge | 是, 活跃维护 | 当前 v0.9 | chunk save + entity save + SavedData |
+| BAS | Forge | 是, 活跃维护 | 当前 v0.10 | chunk save + entity save + SavedData |
 
 **结论**: 截至 2026-05 调研, Forge 1.20.1 上专做 chunk save 异步化且仍活跃维护的同类不多 (C2MEF / Starlight Forge 均已 archived, Moonrise 专注 Fabric / NeoForge). SavedData (`DimensionDataStorage.save()`) 异步化目前也少见同类覆盖, 是相对新的方向. BAS 的定位是把 Forge 1.20.1 这条 save 路径持续做下去 — 异步存档是整个社区共同的课题, 哪天出现更成熟的方案对用户都是好事.
 
