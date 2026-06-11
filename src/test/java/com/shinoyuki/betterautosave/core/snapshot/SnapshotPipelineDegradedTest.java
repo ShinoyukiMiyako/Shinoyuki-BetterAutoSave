@@ -108,4 +108,31 @@ class SnapshotPipelineDegradedTest {
         assertTrue(restoredUnsaved.get(), "drain 必须以 setUnsaved(true) 还原 vanilla 重入门");
         assertEquals(0, pipeline.chunkRecoveryQueue().size(), "drain 后队列清空");
     }
+
+    /**
+     * Minor 修复 M9: 全 chunk worker 死亡触发 degraded 后, 在队 task 已 incInFlightSerializing 但
+     * 永不 execute -> inFlightSerializing 永久 >0, drainPending 轮询条件永假, 旧实现必空耗满
+     * shutdownTimeoutSeconds (默认 60s) 才返 false, 平白拖慢关服。修复: degraded 下提前明示返回 false。
+     *
+     * <p>判定标准: 制造 inFlightSerializing>0 (模拟死 worker 的孤儿在队 task) + degraded, 给一个大
+     * timeout 调 drainPending, 断言立即返 false 且耗时远小于 timeout。删 degraded 提前返回则空耗满
+     * timeout, 耗时断言挂。
+     */
+    @Test
+    void degraded_drain_pending_returns_immediately_without_spinning_timeout() {
+        SaveMetrics metrics = new SaveMetrics();
+        SnapshotPipeline pipeline = new SnapshotPipeline(null, null, metrics);
+        // 模拟全 worker 死亡: 在队 task 已 inc serializing 但永不 execute (无人 dec), gauge 永久 >0.
+        metrics.incInFlightSerializing();
+        pipeline.triggerDegraded();
+
+        long timeoutMs = 5_000L;
+        long t0 = System.currentTimeMillis();
+        boolean drained = pipeline.drainPending(timeoutMs);
+        long elapsed = System.currentTimeMillis() - t0;
+
+        assertFalse(drained, "degraded + 卡住的 inFlightSerializing 下 drainPending 必返 false (未真正 drain)");
+        assertTrue(elapsed < 1_000L,
+                "degraded 下必须提前返回, 不空耗满 timeout, 实际耗时 " + elapsed + "ms (timeout " + timeoutMs + "ms)");
+    }
 }

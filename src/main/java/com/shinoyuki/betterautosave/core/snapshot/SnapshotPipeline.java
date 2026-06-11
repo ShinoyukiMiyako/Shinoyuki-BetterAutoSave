@@ -321,6 +321,17 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     }
 
     public boolean drainPending(long timeoutMs) {
+        // v0.10.2 修复 (M9): degraded 下提前明示返回, 不空耗满 timeout.
+        // worker 线程因 Error 死亡时 WorkerThreadFactory 的 uncaught handler 调 triggerDegraded.
+        // 全 chunk worker 死亡后 chunkWorkerQueue 无人消费, 在队 task 在 captureAndDispatchChunk
+        // 已 incInFlightSerializing 但永不 execute -> inFlightSerializing 永久 >0, 下面的轮询条件
+        // 永假, drainPending 必空耗满 shutdownTimeoutSeconds (默认 60s) 才返 false, 平白拖慢关服。
+        // degraded 态下所有 save 已走 vanilla 同步路径 (各 mixin degraded 闸门), 异步在途无法也无需
+        // 等其 drain — 直接返 false 让调用方走既有 warn + vanilla flush 兜底 (与 [2] 的 degraded 后
+        // 仍 drain 恢复队列协同: 失败 chunk 的 isUnsaved 还原 + vanilla flush 落盘)。
+        if (isDegraded()) {
+            return false;
+        }
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             // v0.7.1 修复 (C3): 加 inFlightSerializing 检查. 之前漏检导致
