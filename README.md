@@ -2,7 +2,8 @@
 
 ![BetterAutoSave](BetterAutoSave.png)
 
-> 让服务器自动存档时不再卡顿的服务端优化 mod。Minecraft 1.20.1 Forge。
+> 让服务器自动存档时不再卡顿 ~  
+> 此Mod部分代码由 Claude Opus 4.8 / Claude Fable 5 生成，若有任何问题请提交 issue
 
 ## 这个 mod 解决什么问题
 
