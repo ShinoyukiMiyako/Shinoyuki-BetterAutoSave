@@ -42,3 +42,6 @@ CLAUDE.md
 
 # 本地协作规范, 永不入库
 AGENTS.md
+
+# 平台封面图等美术素材, 走网站上传不进仓库
+branding/
