@@ -422,6 +422,149 @@ class ChunkPendingRelayTest {
         assertEquals(0L, metrics.snapshot().mustDrainPending(), "mustDrain gauge 配平归零");
     }
 
+    /**
+     * C-dispatch-register-toctou (反序交错 1, 填补 PendingSnapshotSlotTest 的反序盲区): 复刻 mixin 碰撞分支
+     * 修复后的序 register -> dispatch, 但 dispatch 抛 *之前* 在飞 IO 已落地 REQUEUE_DIRTY 并取走 pending 接力
+     * 重投 (成功在途)。此时 mixin catch 的 takePendingSnapshot 取回 null, 必须识别为"接力已被消费"——
+     * 不降级、不报错、不清 mustDrain (重投仍在途), 由接力链终态收口。
+     *
+     * <p>判定标准 (删修复必挂): 若 catch 把 null 也当失败去清 mustDrain, 则接力链落地后第二次 dec 把 gauge
+     * 打到负 / mustDrain 不变式破; 若 takePendingSnapshot 退回非原子 get+set, 则与在飞回调的 take 双取双投。
+     */
+    @Test
+    void dispatch_throw_after_relay_already_consumed_does_not_degrade() {
+        ChunkSaveState state = new ChunkSaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        ChunkSnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        CompletableFuture<Void> gen1Future = new CompletableFuture<>();
+        Deque<CompletableFuture<Void>> futures = new ArrayDeque<>();
+        futures.add(gen1Future);
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        ChunkSaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            CompletableFuture<Void> f = futures.poll();
+            return f != null ? f : CompletableFuture.completedFuture(null);
+        };
+        ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
+                    submitter, reofferHolder[0]);
+            relay.execute();
+        };
+
+        ChunkSaveTask task = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, submitter, reofferHolder[0]);
+        task.execute();             // gen=1 IO 在飞
+
+        // mixin 碰撞分支 (修复后序): markDirty -> tryMark -> register(gen=2) -> dispatch.
+        state.markDirty();          // gen=2
+        assertTrue(state.tryMarkMustDrain());
+        ChunkSnapshot gen2Pending = snapshotForGeneration(state, 2L);
+        state.registerPendingSnapshot(gen2Pending);
+
+        // 反序交错: dispatch 还没跑 (或正在跑) 时在飞 IO 先落地 -> REQUEUE_DIRTY -> 取走 gen=2 接力 -> CLEAN_LANDED.
+        gen1Future.complete(null);
+        assertEquals(2L, submittedTags.get(submittedTags.size() - 1).getLong("gen"),
+                "在飞回调已接力把 gen=2 落盘");
+        assertFalse(state.hasPendingSnapshot(), "接力已消费 pending, 槽空");
+
+        // mixin catch 撤销补偿: dispatch 此刻抛, 但 pending 已被接力取走 -> take 返 null -> 不降级不清 mustDrain.
+        ChunkSnapshot taken = state.takePendingSnapshot();
+        boolean wouldDegrade = taken != null;
+        if (wouldDegrade) {
+            if (state.compareAndClearMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+        }
+        assertFalse(wouldDegrade,
+                "dispatch 抛但接力已消费时 catch take 必须返 null (不降级): pending 已在途, 重复清 mustDrain 会打负 gauge");
+        assertFalse(state.mustDrain(), "接力链 CLEAN_LANDED 已清 mustDrain (终态 CAS), 非 catch 重复清");
+        assertEquals(ChunkSaveState.Phase.CLEAN, state.phase(), "接力链落地 phase 回 CLEAN");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+    }
+
+    /**
+     * C-dispatch-register-toctou (反序交错 2): dispatch 抛而在飞 IO *尚未* 落地 —— mixin catch 的
+     * takePendingSnapshot 取回非 null (自我撤销), 必须清 mustDrain + 配平 gauge。撤销后在飞旧代落地判
+     * REQUEUE_DIRTY (generation 已前进永不相等), 取 null 不重投, 此后无路径清 mustDrain —— 故撤销时
+     * 亲自清才不泄漏。
+     *
+     * <p>判定标准 (删修复必挂): 删 catch 的 compareAndClearMustDrain -> 在飞旧代落地后 mustDrain 永真,
+     * gauge 永久正偏移 (本断言 mustDrainPending()==0 挂)。
+     */
+    @Test
+    void dispatch_throw_before_relay_consumed_self_undo_balances_must_drain() {
+        ChunkSaveState state = new ChunkSaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        ChunkSnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        CompletableFuture<Void> gen1Future = new CompletableFuture<>();
+        Deque<CompletableFuture<Void>> futures = new ArrayDeque<>();
+        futures.add(gen1Future);
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        ChunkSaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            CompletableFuture<Void> f = futures.poll();
+            return f != null ? f : CompletableFuture.completedFuture(null);
+        };
+        ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
+                    submitter, reofferHolder[0]);
+            relay.execute();
+        };
+
+        ChunkSaveTask task = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, submitter, reofferHolder[0]);
+        task.execute();             // gen=1 IO 在飞 (gen1Future 未完成)
+
+        // mixin 碰撞分支 (修复后序): markDirty -> tryMark(inc gauge) -> register(gen=2) -> dispatch 抛.
+        state.markDirty();          // gen=2
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        assertEquals(1L, metrics.snapshot().mustDrainPending());
+        state.registerPendingSnapshot(snapshotForGeneration(state, 2L));
+
+        // dispatch 抛, 在飞 IO 尚未落地 -> catch take 取回非 null -> 自我撤销 + 清 mustDrain.
+        ChunkSnapshot taken = state.takePendingSnapshot();
+        boolean undid = taken != null;
+        if (undid) {
+            if (state.compareAndClearMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+        }
+        assertTrue(undid, "在飞未落地时 catch take 必须取回非 null (自我撤销)");
+        assertFalse(state.hasPendingSnapshot(), "撤销后槽空");
+        assertFalse(state.mustDrain(), "自我撤销必须清 mustDrain");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(), "撤销后 gauge 配平归零");
+
+        // 撤销后在飞旧代落地: generation(2) != inFlightGeneration(1) -> REQUEUE_DIRTY, 取 null 不重投.
+        gen1Future.complete(null);
+        assertEquals(1, submittedTags.size(), "撤销后无接力重投 (只提交过 gen=1 一次)");
+        assertEquals(1L, submittedTags.get(0).getLong("gen"), "在飞落地的是旧代 gen=1");
+        assertFalse(state.mustDrain(), "在飞旧代 REQUEUE_DIRTY 不清也不再置 mustDrain, 维持已撤销的 false");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(),
+                "撤销路径全程 gauge 配平归零, 不因 REQUEUE_DIRTY 永不清 mustDrain 而泄漏");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);

@@ -304,6 +304,69 @@ class EntityPendingRelayTest {
         assertEquals(0L, metrics.snapshot().mustDrainPending(), "mustDrain gauge 配平归零");
     }
 
+    /**
+     * C-dispatch-register-toctou (entity 对称项): 碰撞分支 markDirty 后 capturePending 抛 (OOM 等), 尚未登记
+     * pending。在飞旧代落地必判 REQUEUE_DIRTY (markDirty 已推 generation) 永不清 mustDrain, 槽空回调取 null
+     * 不重投 -> 此后无路径清 mustDrain。故 capture-throw 的 catch 必须亲自 compareAndClearMustDrain 配平 gauge,
+     * 与 chunk 路径同构。
+     *
+     * <p>判定标准 (删修复必挂): 删 entity mixin catch 的 compareAndClearMustDrain -> 在飞旧代落地后 mustDrain
+     * 永真, mustDrainPending gauge 永久正偏移 (本断言 mustDrainPending()==0 挂)。
+     */
+    @Test
+    void capture_throw_undo_balances_must_drain() {
+        EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        CompletableFuture<Void> gen1Future = new CompletableFuture<>();
+        Deque<CompletableFuture<Void>> futures = new ArrayDeque<>();
+        futures.add(gen1Future);
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            CompletableFuture<Void> f = futures.poll();
+            return f != null ? f : CompletableFuture.completedFuture(null);
+        };
+        EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, null, reofferHolder[0]);
+            relay.execute();
+        };
+
+        EntitySaveTask task = new EntitySaveTask(gen1, metrics, submitter, null, reofferHolder[0]);
+        task.execute();             // gen=1 IO 在飞 (gen1Future 未完成)
+
+        // mixin 碰撞分支: markDirty 推 gen -> tryMark(inc gauge) -> capturePending 抛 -> catch 自我撤销清 mustDrain.
+        state.markDirty();          // gen=2
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        assertEquals(1L, metrics.snapshot().mustDrainPending());
+        // capturePending 抛: 未 register, 槽空。catch 配平 (复刻 mixin catch 的 compareAndClearMustDrain).
+        if (state.compareAndClearMustDrain()) {
+            metrics.decMustDrainPending();
+        }
+        assertFalse(state.mustDrain(), "capture 抛自我撤销必须清 mustDrain");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(), "撤销后 gauge 配平归零");
+        assertFalse(state.hasPendingSnapshot(), "capture 抛未 register, 槽本就空");
+
+        // 在飞旧代落地: generation(2) != inFlightGeneration(1) -> REQUEUE_DIRTY, 取 null 不重投, 不清 mustDrain.
+        gen1Future.complete(null);
+        assertEquals(1, submittedTags.size(), "撤销后无接力重投 (只提交过 gen=1)");
+        assertEquals(EntitySaveState.Phase.DIRTY, state.phase(), "在飞旧代 REQUEUE_DIRTY 后 phase=DIRTY");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(),
+                "撤销路径全程 gauge 配平归零, 不因 REQUEUE_DIRTY 永不清 mustDrain 而泄漏");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);

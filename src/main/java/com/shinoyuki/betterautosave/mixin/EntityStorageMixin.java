@@ -131,8 +131,16 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                 EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
                 state.registerPendingSnapshot(pending);
             } catch (Throwable t) {
-                // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 不污染在飞 task,
-                // 退回信任在飞旧代 (本次最新实体增量丢失), 但记录可见。
+                // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 尚未登记 pending,
+                // 接力槽空。entity 路径无 dispatchSaveEvent, 故无 chunk 侧 register->dispatch 的 TOCTOU 窗口;
+                // 但 catch 的 gauge 配平与 chunk 同构: 上方 markDirty 已推 generation, 在飞旧代 IO 落地必判
+                // REQUEUE_DIRTY (EntitySaveState:118-129 恒不等) 永不清 mustDrain, 槽空回调取 null 不重投 ->
+                // 此后无路径清 mustDrain。故必须在此 compareAndClearMustDrain 亲自配平 (v0.11.0 修复
+                // C-dispatch-register-toctou 对称项: 撤销路径不留 mustDrain 正偏移)。退回信任在飞旧代
+                // (本次最新实体增量丢失), 记录可见。
+                if (state.compareAndClearMustDrain()) {
+                    metrics.decMustDrainPending();
+                }
                 LOGGER.error("[BetterAutoSave] pending relay capture failed for in-flight entity chunk {} dim={}; "
                                 + "trusting in-flight snapshot (latest entity increment may be lost)",
                         chunkEntities.getPos(), dimensionId, t);

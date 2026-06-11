@@ -120,28 +120,55 @@ public abstract class ChunkMapSaveMixin {
             // IO 落地判 REQUEUE_DIRTY 时回调取出重投, 把最新代落盘。隐角 A: 多代碰撞链每次命中都登记更新代
             // (隐角 B 最新者胜, 旧 pending 作废), inFlightGeneration 随接力 dispatch 推进。
             if (state.generation() != state.inFlightGeneration()) {
+                ConfigSpec.EventCompatMode mode = BetterAutoSaveConfig.eventCompatMode();
+                ChunkSnapshot pending;
                 try {
-                    ConfigSpec.EventCompatMode mode = BetterAutoSaveConfig.eventCompatMode();
-                    ChunkSnapshot pending = ChunkCaptureProcedure.capturePending(
-                            levelChunk, level, state, mode);
-                    // v0.10.2 修复 (C-relay-skips-save-event): 接力链落盘的"碰撞后最新代" tag 也必须经过
-                    // Forge ChunkDataEvent.Save listener —— 否则依赖该事件向 tag 写增量的第三方 mod (容量
-                    // 数据 ForgeCaps 之外的监听者) 在最新代 tag 上从未经过其 listener, 增量永久静默丢失。
-                    // 在主线程 (mixin save 拦截在主线程) 用 pending 当代 tag 派发, 满足 Forge listener 线程契约,
-                    // 与常规路径 capture 后即派发同序。必须在 registerPendingSnapshot 之前 —— 见下方 catch。
-                    ChunkCaptureProcedure.dispatchSaveEvent(levelChunk, level, pending, mode, metrics);
-                    state.registerPendingSnapshot(pending);
+                    pending = ChunkCaptureProcedure.capturePending(levelChunk, level, state, mode);
                 } catch (Throwable t) {
-                    // 纯 capture 或 事件派发 抛: 不污染在飞 task, 退回信任在飞旧代, 与修复前行为等价
-                    // (本次最新代增量按旧路径丢失或靠下轮接管), 但记录可见。
-                    //
-                    // 派发抛的 gauge 配平: dispatchSaveEvent 在 registerPendingSnapshot 之前, 此刻 mustDrain
-                    // 已由上方 tryMarkMustDrain 置位但 pending 尚未登记。不登记 pending 则在飞旧代正常落地清
-                    // mustDrain, 不变式 (pendingSnapshot 非空 -> mustDrain 恒真) 不破, 无需额外 compareAndClearMustDrain
-                    // (区别于常规路径 catch: 常规路径已 inc serializing 并 dispatch 了新 task, 此分支两者都未发生)。
-                    LOGGER.error("[BetterAutoSave] pending relay capture or event dispatch failed for in-flight chunk "
-                                    + "{} dim={}; trusting in-flight snapshot (latest-generation increment may be lost)",
+                    // 纯 capture 抛 (OOM 等): 尚未登记 pending, 接力槽空。在飞旧代 IO 仍会落地, 但 generation 已前进
+                    // 必判 REQUEUE_DIRTY (ChunkSaveState:122 恒不等), 而 REQUEUE_DIRTY 不清 mustDrain
+                    // (ChunkSaveState:125-127), 槽空回调取 null 也不重投 -> 此后无任何路径清 mustDrain。故必须在此
+                    // 亲自配平 gauge (第六轮"在飞旧代正常落地清 mustDrain"的论证已被证伪: 碰撞分支落地恒为 REQUEUE_DIRTY
+                    // 永不清 mustDrain)。退回信任在飞旧代 (本次最新代增量丢失), 记录可见。
+                    if (state.compareAndClearMustDrain()) {
+                        metrics.decMustDrainPending();
+                    }
+                    LOGGER.error("[BetterAutoSave] pending relay capture failed for in-flight chunk {} dim={}; "
+                                    + "trusting in-flight snapshot (latest-generation increment may be lost)",
                             chunk.getPos(), dimensionId, t);
+                    pending = null;
+                }
+                if (pending != null) {
+                    // v0.11.0 修复 (C-dispatch-register-toctou): 必须先 registerPendingSnapshot 再 dispatchSaveEvent。
+                    // dispatchSaveEvent 同步跑第三方 Forge ChunkDataEvent.Save listener (耗时无上界), 而在飞那代 IO 在
+                    // 并发的 IOWorker 线程落地、其 whenComplete 在该窗口内判 REQUEUE_DIRTY 并 takePendingSnapshot —— 若
+                    // 登记晚于派发, 该 take 取到空槽 (lost wakeup), 之后登记的 pending 成无人消费的孤儿, 最新代增量永久
+                    // 静默丢失 + mustDrain gauge 永久泄漏。登记在派发之前则 IO 回调任何时刻都能取到接力快照。
+                    state.registerPendingSnapshot(pending);
+                    try {
+                        // v0.10.2 修复 (C-relay-skips-save-event): 接力链落盘的"碰撞后最新代" tag 也必须经过 Forge
+                        // ChunkDataEvent.Save listener —— 否则依赖该事件向 tag 写增量的第三方 mod (容量数据 ForgeCaps
+                        // 之外的监听者) 在最新代 tag 上从未经过其 listener, 增量永久静默丢失。在主线程 (mixin save 拦截在
+                        // 主线程) 用 pending 当代 tag 派发, 满足 Forge listener 线程契约, 与常规路径 capture 后即派发同序。
+                        ChunkCaptureProcedure.dispatchSaveEvent(levelChunk, level, pending, mode, metrics);
+                    } catch (Throwable t) {
+                        // v0.11.0 修复 (C-dispatch-register-toctou) 的撤销补偿: 登记已先于派发完成, 故派发抛时接力槽里
+                        // 可能仍挂着这份 pending, 也可能已被在飞 IO 回调的 REQUEUE_DIRTY 分支取走并重投。takePendingSnapshot
+                        // 的 getAndSet 与那个回调的 take 天然去重, 据返回值分流:
+                        //   取回非 null = 接力尚未被消费, 由本次派发失败"自我撤销"。撤销后净效果等价于"从未登记 pending":
+                        //     在飞旧代落地必判 REQUEUE_DIRTY 永不清 mustDrain, 槽已空回调取 null 不重投 -> 此后无路径清
+                        //     mustDrain, 故必须在此 compareAndClearMustDrain 亲自配平 gauge。退回信任在飞旧代, 记录可见。
+                        //   取回 null = 接力已被在飞回调消费并重投, 成功在途。不得当作失败: 不降级、不报错、不碰 mustDrain
+                        //     (重投仍在途, 由接力链终态 CAS 清)。
+                        if (state.takePendingSnapshot() != null) {
+                            if (state.compareAndClearMustDrain()) {
+                                metrics.decMustDrainPending();
+                            }
+                            LOGGER.error("[BetterAutoSave] pending relay event dispatch failed for in-flight chunk "
+                                            + "{} dim={}; trusting in-flight snapshot (latest-generation increment may be lost)",
+                                    chunk.getPos(), dimensionId, t);
+                        }
+                    }
                 }
             }
             // v0.10.2 修复 (m-pending-skips-poi-flush): in-flight 碰撞分支也必须复刻 vanilla ChunkMap.save
