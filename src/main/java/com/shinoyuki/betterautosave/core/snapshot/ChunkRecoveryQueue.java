@@ -28,11 +28,12 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * unload 路径处理或确已丢失: 非终态 log WARN, 终态 (耗尽 + 卸载, 本次增量确定丢失)
  * 升级 ERROR 带 dim+坐标.
  *
- * <p><b>不覆盖 entity 路径</b>: entity 重入由 PersistentEntitySectionManager.autoSave()
- * 每周期无条件对非空 chunk 调 storeEntities 驱动, 唯一的重入门是 EntitySaveState.phase
- * (没有 isUnsaved 等价标志). ioFailed 把 phase 置回 DIRTY/FAILED 后, 下个 autoSave
- * 周期 EntityStorageMixin 自然命中 DIRTY -> trySnapshot 重新 dispatch (或 FAILED ->
- * vanilla 兜底). entity 路径本就自愈, 无需恢复队列.
+ * <p><b>不覆盖 entity 路径</b>: entity 没有 isUnsaved 等价标志, 坐标恢复对它无意义 --
+ * 卸载路径上 vanilla 在 storeEntities 返回后随即把实体驱逐出内存
+ * (PersistentEntitySectionManager.processChunkUnload), 之后任何 autoSave 都不会再
+ * 扫到该 chunk, "等下一周期重新 capture" 的自愈仅对仍加载的 chunk 成立。因此 entity
+ * 的 IO 失败兜底走 EntitySaveTask 内已序列化 tag 的原地重投 (与本队列互补, 见
+ * EntitySaveTask.submitIo), 重试耗尽即 ERROR 明示丢失, 不进本队列。
  */
 public final class ChunkRecoveryQueue {
 
