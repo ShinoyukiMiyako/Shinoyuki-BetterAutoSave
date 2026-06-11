@@ -9,6 +9,7 @@ import com.shinoyuki.betterautosave.core.snapshot.FlushHandler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
+import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
@@ -70,6 +71,11 @@ public abstract class ChunkMapMixin {
             return;
         }
 
+        SaveMetrics metrics = BetterAutoSaveCore.metrics();
+        if (metrics == null) {
+            return;
+        }
+
         long deadlineMillis = System.currentTimeMillis()
                 + (long) BetterAutoSaveConfig.deadlineGuardSeconds() * 1000L;
         String dimensionId = level.dimension().location().toString();
@@ -95,7 +101,21 @@ public abstract class ChunkMapMixin {
             long sequence = scheduler.nextEnqueueSequence();
             ChunkSaveState state = ((ChunkSaveStateAccess) chunk).betterautosave$getOrCreateState(
                     packed, dimensionId, sequence);
-            if (state.phase() == ChunkSaveState.Phase.CLEAN) {
+            ChunkSaveState.Phase phase = state.phase();
+            // v0.10.2 修复 (autosave 通道静默吞咽, gaps[1] Major): 在途 (SNAPSHOTTING/SERIALIZING/IO_PENDING)
+            // 的 chunk 已有某代 IO 在飞, 旧逻辑仍无条件 enqueue 一个 priority, drain 时 trySnapshot
+            // CAS(DIRTY->SNAPSHOTTING) 必失败 (phase 非 DIRTY) -> SaveDispatcher 静默 recordChunkFallback
+            // 丢弃, 既浪费 enqueue/drain/解析, 又虚高 fallback 计数掩盖真实 fallback 信号, 且连 mustDrain 都
+            // 不标 (关服 join 不为这种在途 chunk 多等)。改为与 eager 路径对齐: 在途短路跳过 enqueue, 只
+            // tryMarkMustDrain 让关服 join 知情。该 chunk 的最新代落盘由在飞 task 的 REQUEUE_DIRTY 接力
+            // (commit: 接力快照机制) + 卸载碰撞登记的 pending 共同保证, 不依赖本次 enqueue。
+            if (state.isInFlight()) {
+                if (state.tryMarkMustDrain()) {
+                    metrics.incMustDrainPending();
+                }
+                continue;
+            }
+            if (phase == ChunkSaveState.Phase.CLEAN) {
                 state.markDirty();
             }
             ChunkSavePriority priority = new ChunkSavePriority(packed, dimensionId, sequence, deadlineMillis, 0.0);

@@ -225,4 +225,65 @@ class ChunkSaveStateTest {
         assertTrue(s.mustDrain(),
                 "Non-terminal retry must keep mustDrain so the next attempt still drains");
     }
+
+    /**
+     * isInFlight 必须恰好对在飞三态 (SNAPSHOTTING/SERIALIZING/IO_PENDING) 返 true, 对 CLEAN/DIRTY/FAILED
+     * 返 false。autosave 通道 (ChunkMapMixin) 用它在途短路, 避免对在飞 chunk 入队注定 trySnapshot 失败的
+     * priority (gaps[1] Major)。删修复: 若 isInFlight 漏判 IO_PENDING, 在途 chunk 被错误 enqueue, 此测试挂。
+     */
+    @Test
+    void is_in_flight_true_exactly_for_pipeline_phases() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        assertFalse(s.isInFlight(), "CLEAN 非在飞");
+
+        s.markDirty();
+        assertFalse(s.isInFlight(), "DIRTY 非在飞 (尚未进管线)");
+
+        s.trySnapshot();
+        assertTrue(s.isInFlight(), "SNAPSHOTTING 在飞");
+
+        s.enterSerializing();
+        assertTrue(s.isInFlight(), "SERIALIZING 在飞");
+
+        s.enterIoPending();
+        assertTrue(s.isInFlight(), "IO_PENDING 在飞");
+
+        ChunkSaveState.IoOutcome outcome = s.ioFailed(0);
+        assertEquals(ChunkSaveState.IoOutcome.FAILED_TERMINAL, outcome);
+        assertFalse(s.isInFlight(), "FAILED 非在飞 (让 vanilla 兜底)");
+    }
+
+    /**
+     * autosave 通道在途短路决策回归 (gaps[1] Major): 复刻 ChunkMapMixin 在途分支 —— in-flight 时
+     * 只 tryMarkMustDrain (gauge inc 一次) 且**不**入队, 让关服 join 知情。断言 mustDrain 被标记且
+     * 重复进入不重复 inc。删 mixin 的 tryMarkMustDrain -> 在途 chunk 关服 join 不等, 此契约失守。
+     */
+    @Test
+    void autosave_in_flight_short_circuit_marks_must_drain_once_without_enqueue() {
+        ChunkSaveState s = new ChunkSaveState(0L, "overworld", 1L);
+        s.markDirty();
+        s.trySnapshot();
+        s.enterSerializing();
+        s.enterIoPending();          // 在飞
+
+        int[] enqueueCount = {0};
+        int[] mustDrainGauge = {0};
+
+        // 复刻 mixin 循环对单个在飞 chunk 的两次 autosave 扫描.
+        for (int cycle = 0; cycle < 2; cycle++) {
+            if (s.isInFlight()) {
+                if (s.tryMarkMustDrain()) {
+                    mustDrainGauge[0]++;
+                }
+                continue;            // 不入队
+            }
+            enqueueCount[0]++;        // 非在飞才入队 (本场景不该到这)
+        }
+
+        assertEquals(0, enqueueCount[0],
+                "在飞 chunk 不得被 autosave 通道入队 (避免注定 trySnapshot 失败的 priority)");
+        assertEquals(1, mustDrainGauge[0],
+                "在飞短路必须标记 mustDrain 恰一次 (重复扫描不重复 inc)");
+        assertTrue(s.mustDrain(), "关服 join 必须能从 mustDrain 知道还要等该在飞 chunk");
+    }
 }

@@ -66,6 +66,16 @@ public final class ChunkSaveState {
         return phase.get();
     }
 
+    /**
+     * 是否处于"某代 IO 已在管线在飞"的三态之一 (SNAPSHOTTING / SERIALIZING / IO_PENDING)。
+     * v0.10.2 修复 (autosave 通道静默吞咽, gaps[1]): autosave 通道用此判定在途短路, 避免对在飞 chunk
+     * 入队一个注定 trySnapshot 失败的 priority (静默 fallback + 虚高计数 + 关服 join 不知情)。
+     */
+    public boolean isInFlight() {
+        Phase p = phase.get();
+        return p == Phase.SNAPSHOTTING || p == Phase.SERIALIZING || p == Phase.IO_PENDING;
+    }
+
     public long generation() {
         return generation.get();
     }
