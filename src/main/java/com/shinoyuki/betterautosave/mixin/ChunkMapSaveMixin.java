@@ -5,6 +5,8 @@ import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.dispatch.SaveDispatcher;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
+import com.shinoyuki.betterautosave.core.snapshot.ChunkCaptureProcedure;
+import com.shinoyuki.betterautosave.core.snapshot.ChunkSnapshot;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
@@ -104,10 +106,30 @@ public abstract class ChunkMapSaveMixin {
             state.markDirty();
         } else if (currentPhase != ChunkSaveState.Phase.DIRTY
                 && currentPhase != ChunkSaveState.Phase.FAILED) {
-            // SNAPSHOTTING / SERIALIZING / IO_PENDING — async pipeline 已在跑,
-            // 不再重复 dispatch, 但确保 mustDrain 标记好让关服 join 知道还要等。
+            // SNAPSHOTTING / SERIALIZING / IO_PENDING — async pipeline 已在跑某代 IO。
+            // mustDrain 必须先于接力快照登记置位 (gauge 不变式: pendingSnapshot 非空 -> mustDrain 恒真),
+            // 关服 join 才会等接力链落地。
             if (state.tryMarkMustDrain()) {
                 metrics.incMustDrainPending();
+            }
+            // v0.10.2 修复 (C-chunk-unload-collision): 在飞期间该 chunk 又被编辑 (generation 前进)
+            // 又触发 save (典型: 卸载序列调 ChunkMap.save)。旧逻辑只 setReturnValue(true) 信任在飞的旧代
+            // 快照, 而卸载随即把 chunk 驱逐出内存 —— 编辑后那代增量永久静默丢失。现在对最新内存做一次纯
+            // capture (不碰在飞那代的 phase/inFlightGeneration, 见 capturePending) 登记进接力槽; 在飞那代
+            // IO 落地判 REQUEUE_DIRTY 时回调取出重投, 把最新代落盘。隐角 A: 多代碰撞链每次命中都登记更新代
+            // (隐角 B 最新者胜, 旧 pending 作废), inFlightGeneration 随接力 dispatch 推进。
+            if (state.generation() != state.inFlightGeneration()) {
+                try {
+                    ChunkSnapshot pending = ChunkCaptureProcedure.capturePending(
+                            levelChunk, level, state, BetterAutoSaveConfig.eventCompatMode());
+                    state.registerPendingSnapshot(pending);
+                } catch (Throwable t) {
+                    // 纯 capture 抛 (mod BE/section 序列化异常等): 不污染在飞 task, 退回信任在飞旧代,
+                    // 与修复前行为等价 (本次最新代增量按旧路径丢失或靠下轮接管), 但记录可见。
+                    LOGGER.error("[BetterAutoSave] pending relay capture failed for in-flight chunk {} dim={}; "
+                                    + "trusting in-flight snapshot (latest-generation increment may be lost)",
+                            chunk.getPos(), dimensionId, t);
+                }
             }
             metrics.recordChunkMapSaveAsync();
             cir.setReturnValue(true);

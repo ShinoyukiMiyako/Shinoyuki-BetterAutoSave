@@ -36,30 +36,47 @@ public final class EntitySaveTask implements SaveTask {
         CompletableFuture<Void> submit(CompoundTag tag);
     }
 
+    /**
+     * v0.10.2 修复 (C-entity-unload-collision): 接力快照重投 seam, 与 {@link ChunkSaveTask.PendingReoffer}
+     * 对称。给定 pending EntitySnapshot 包成新 EntitySaveTask offer 回 entityWorkerQueue (assemble 由序列化
+     * worker 做, 不在 IOWorker 邮箱线程内联)。生产环境绑到 {@link SnapshotPipeline}; 单测注入 fake。
+     */
+    @FunctionalInterface
+    public interface PendingReoffer {
+        void reoffer(EntitySnapshot pending);
+    }
+
     private final EntitySnapshot snapshot;
     private final SaveMetrics metrics;
     private final IoSubmitter ioSubmitter;
     private final EntitySaveStateAccess stateOwner;
+    private final PendingReoffer pendingReoffer;
 
     public EntitySaveTask(EntitySnapshot snapshot, IOWorker entityIoWorker, SaveMetrics metrics,
-                          EntitySaveStateAccess stateOwner) {
-        this(snapshot, metrics, tag -> entityIoWorker.store(snapshot.pos(), tag), stateOwner);
+                          EntitySaveStateAccess stateOwner, PendingReoffer pendingReoffer) {
+        this(snapshot, metrics, tag -> entityIoWorker.store(snapshot.pos(), tag), stateOwner, pendingReoffer);
     }
 
     /**
      * 测试用构造: 直接注入 IoSubmitter, 绕开 IOWorker. 仅供单测验证 submitIo 重投循环,
-     * 生产代码一律走上面的公开构造. stateOwner 可为 null (单测不验证 map 剔除时).
+     * 生产代码一律走上面的公开构造. stateOwner / pendingReoffer 可为 null (单测不验证 map 剔除 / 接力时).
      */
     EntitySaveTask(EntitySnapshot snapshot, SaveMetrics metrics, IoSubmitter ioSubmitter) {
-        this(snapshot, metrics, ioSubmitter, null);
+        this(snapshot, metrics, ioSubmitter, null, null);
     }
 
     EntitySaveTask(EntitySnapshot snapshot, SaveMetrics metrics, IoSubmitter ioSubmitter,
                    EntitySaveStateAccess stateOwner) {
+        this(snapshot, metrics, ioSubmitter, stateOwner, null);
+    }
+
+    EntitySaveTask(EntitySnapshot snapshot, SaveMetrics metrics, IoSubmitter ioSubmitter,
+                   EntitySaveStateAccess stateOwner, PendingReoffer pendingReoffer) {
         this.snapshot = snapshot;
         this.metrics = metrics;
         this.ioSubmitter = ioSubmitter;
         this.stateOwner = stateOwner;
+        this.pendingReoffer = pendingReoffer;
     }
 
     @Override
@@ -136,6 +153,15 @@ public final class EntitySaveTask implements SaveTask {
                     if (state.lastTransitionClearedMustDrain()) {
                         metrics.decMustDrainPending();
                     }
+                    // v0.10.2 修复 (C-entity-unload-collision, 隐角 C): 终态前若挂着接力快照, 在飞 task 已死
+                    // 无法接力, 该坐标实体已被 vanilla 驱逐出内存 (无 isUnsaved 等价门可让 vanilla 兜底), 这份
+                    // 最新实体增量永久丢失。entity 无坐标恢复队列, 取走清空防泄漏并明示 ERROR (带 dim+坐标)。
+                    if (state.takePendingSnapshot() != null) {
+                        LOGGER.error("[BetterAutoSave] entity chunk {} dim={} had a pending relay snapshot when IO hit "
+                                        + "terminal retry limit; its latest entity increment is lost (entities already "
+                                        + "evicted from memory, no vanilla fallback)",
+                                snapshot.pos(), snapshot.dimension().location());
+                    }
                     metrics.recordEntityFailed();
                     return;
                 }
@@ -152,6 +178,9 @@ public final class EntitySaveTask implements SaveTask {
                     metrics.decMustDrainPending();
                 }
                 metrics.recordEntityCompleted();
+                // CLEAN_LANDED 蕴含 generation==inFlightGeneration, 即在飞期间无碰撞 (碰撞会 markDirty
+                // 推 generation 使其判 REQUEUE_DIRTY)。故此分支不应有 pending; 不取槽, 也不会与下面的
+                // evict 冲突。
                 // v0.10.2 修复 (M4): CLEAN_LANDED 是确认安全的终态 (phase=CLEAN, 无在途 IO,
                 // generation 未变即无 pending 编辑). 尝试从 per-level 状态 map 剔除本条目, 防止
                 // EntityStorage 单例的状态 map 随进程运行无界增长. 剔除走 identity + phase==CLEAN
@@ -164,8 +193,16 @@ public final class EntitySaveTask implements SaveTask {
                 SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
                 return;
             }
-            // 落盘成功但 chunk 期间被重新接管 (generation 变化) → REQUEUE_DIRTY. tag 字节已写入,
-            // 不重投本 tag (已过期); mustDrain 维持 (下轮接管的新 tag 仍在途语义). 不清不 dec.
+            // 落盘成功但 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 (这代已落), 但更新代未落。
+            // v0.10.2 修复 (C-entity-unload-collision): 优先用接力快照接力 —— mixin 碰撞分支登记的最新
+            // entity 列表 (vanilla 即将驱逐的唯一副本) 取出重投, 把最新代落盘, 不依赖实体是否仍在内存。
+            // reenterSerializingForPending 锁 pending 自己的代 (隐角 A); mustDrain 维持 (REQUEUE_DIRTY 不清)。
+            EntitySnapshot pending = state.takePendingSnapshot();
+            if (pending != null && pendingReoffer != null) {
+                state.reenterSerializingForPending(pending.capturedGeneration());
+                metrics.incInFlightSerializing();
+                pendingReoffer.reoffer(pending);
+            }
             metrics.recordEntityRetried();
             SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
         });

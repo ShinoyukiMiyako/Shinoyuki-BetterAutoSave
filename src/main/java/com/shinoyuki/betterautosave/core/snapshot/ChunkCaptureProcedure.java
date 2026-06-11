@@ -66,9 +66,39 @@ public final class ChunkCaptureProcedure {
             ServerLevel level,
             ChunkSaveState state,
             ConfigSpec.EventCompatMode mode) {
-        ServerThreadAssert.assertOnServerThread(level.getServer());
+        // 常规 capture: enterSerializing 推进 phase 到 SERIALIZING 并把当前代锁进 inFlightGeneration,
+        // 锁到的代作为本快照的 capturedGeneration。
+        return captureWithGeneration(chunk, level, state, mode, state.enterSerializing());
+    }
 
-        long captured = state.enterSerializing();
+    /**
+     * v0.10.2 修复 (C-chunk-unload-collision): 纯 capture 入口 —— 只固化最新内存为快照, **不**碰
+     * phase 也**不**碰 inFlightGeneration (不调 enterSerializing), 不 offer。
+     *
+     * <p><b>为何不复用 {@link #capture}</b>: 在途碰撞发生时, 该 chunk 已有某代 IO 在飞
+     * (phase=IO_PENDING, inFlightGeneration=在飞代)。若纯 capture 也调 enterSerializing, 会把
+     * inFlightGeneration 改写成新代 —— 在飞那代 IO 落地时 generation==inFlightGeneration 误判
+     * CLEAN_LANDED, 接力链断裂。本入口只读 {@code state.generation()} 作为接力快照的 capturedGeneration,
+     * 在飞那代的 phase/inFlightGeneration 原样留给在飞 task, 落地时正确判 REQUEUE_DIRTY 触发重投接力。
+     *
+     * <p>capture 仍在主线程 (ServerThreadAssert), 与 capture 后的编辑天然串行, 故抓到的就是"截至本次
+     * 卸载的最新代"。
+     */
+    public static ChunkSnapshot capturePending(
+            LevelChunk chunk,
+            ServerLevel level,
+            ChunkSaveState state,
+            ConfigSpec.EventCompatMode mode) {
+        return captureWithGeneration(chunk, level, state, mode, state.generation());
+    }
+
+    private static ChunkSnapshot captureWithGeneration(
+            LevelChunk chunk,
+            ServerLevel level,
+            ChunkSaveState state,
+            ConfigSpec.EventCompatMode mode,
+            long captured) {
+        ServerThreadAssert.assertOnServerThread(level.getServer());
 
         ChunkPos pos = chunk.getPos();
         int dataVersion = SharedConstants.getCurrentVersion().getDataVersion().getVersion();

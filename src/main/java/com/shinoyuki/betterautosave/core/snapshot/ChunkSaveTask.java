@@ -28,29 +28,48 @@ public final class ChunkSaveTask implements SaveTask {
         CompletableFuture<Void> submit(CompoundTag tag);
     }
 
+    /**
+     * v0.10.2 修复 (C-chunk-unload-collision): 接力快照重投 seam。给定 pending 快照, 把它包成新的
+     * ChunkSaveTask 并 offer 回 chunkWorkerQueue (由序列化 worker 做 assemble, **不**在 IOWorker
+     * 邮箱线程内联拼装 —— 内联会堵全服写盘)。生产环境绑到 {@link SnapshotPipeline}; 单测注入
+     * 记录性 fake 以验证重投触发与代际接力。
+     */
+    @FunctionalInterface
+    public interface PendingReoffer {
+        void reoffer(ChunkSnapshot pending);
+    }
+
     private final ChunkSnapshot snapshot;
     private final SaveMetrics metrics;
     private final ChunkLatencyTracker latencyTracker;
     private final ChunkRecoveryQueue recoveryQueue;
     private final IoSubmitter ioSubmitter;
+    private final PendingReoffer pendingReoffer;
 
     public ChunkSaveTask(ChunkSnapshot snapshot, ServerLevel level, AsyncIoBridge ioBridge, SaveMetrics metrics,
-                         ChunkLatencyTracker latencyTracker, ChunkRecoveryQueue recoveryQueue) {
+                         ChunkLatencyTracker latencyTracker, ChunkRecoveryQueue recoveryQueue,
+                         PendingReoffer pendingReoffer) {
         this(snapshot, metrics, latencyTracker, recoveryQueue,
-                tag -> ioBridge.storeChunk(level, snapshot.pos(), tag));
+                tag -> ioBridge.storeChunk(level, snapshot.pos(), tag), pendingReoffer);
     }
 
     /**
      * 测试用构造: 直接注入 IoSubmitter, 绕开 ServerLevel / AsyncIoBridge. 仅供单测验证
-     * submitIo 重投循环, 生产代码一律走上面的公开构造.
+     * submitIo 重投循环, 生产代码一律走上面的公开构造. pendingReoffer 可为 null (单测不验证接力时).
      */
     ChunkSaveTask(ChunkSnapshot snapshot, SaveMetrics metrics, ChunkLatencyTracker latencyTracker,
                   ChunkRecoveryQueue recoveryQueue, IoSubmitter ioSubmitter) {
+        this(snapshot, metrics, latencyTracker, recoveryQueue, ioSubmitter, null);
+    }
+
+    ChunkSaveTask(ChunkSnapshot snapshot, SaveMetrics metrics, ChunkLatencyTracker latencyTracker,
+                  ChunkRecoveryQueue recoveryQueue, IoSubmitter ioSubmitter, PendingReoffer pendingReoffer) {
         this.snapshot = snapshot;
         this.metrics = metrics;
         this.latencyTracker = latencyTracker;
         this.recoveryQueue = recoveryQueue;
         this.ioSubmitter = ioSubmitter;
+        this.pendingReoffer = pendingReoffer;
     }
 
     @Override
@@ -139,6 +158,16 @@ public final class ChunkSaveTask implements SaveTask {
                     if (state.lastTransitionClearedMustDrain()) {
                         metrics.decMustDrainPending();
                     }
+                    // v0.10.2 修复 (C-chunk-unload-collision, 隐角 C): 终态前若挂着接力快照, 它的最新代
+                    // 增量随这次彻底失败一并丢失。在飞 task 已死, 无法再接力。取走清空防泄漏并明示 ERROR ——
+                    // 对仍加载的 chunk, 下面 enqueueRecovery 还原 isUnsaved 让 vanilla 同步重写最新内存救回;
+                    // 已卸载的, ChunkRecoveryQueue.drain 的 terminal+unloaded 分支再升级 ERROR (带 dim+坐标)。
+                    if (state.takePendingSnapshot() != null) {
+                        LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot when IO hit terminal "
+                                        + "retry limit; its latest-generation increment may be lost (vanilla sync fallback "
+                                        + "will recover it only if still loaded)",
+                                snapshot.pos(), snapshot.dimension().location());
+                    }
                     enqueueRecovery(outcome);
                     metrics.recordChunkFailed();
                     return;
@@ -159,8 +188,19 @@ public final class ChunkSaveTask implements SaveTask {
             if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
                 metrics.recordChunkCompleted();
             } else {
-                // 落盘成功但 chunk 期间被重新编辑 (generation 变化) → REQUEUE_DIRTY. tag 字节已写入
-                // region file, 不重投本 tag (已过期); chunk 编辑已 setUnsaved(true), 下轮 mixin 接管新 tag.
+                // 落盘成功但 chunk 期间 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 region file
+                // (这一代已落盘), 但更新代的增量尚未落。
+                // v0.10.2 修复 (C-chunk-unload-collision): 优先用接力快照接力 —— 若 mixin 碰撞分支登记过
+                // pending (该 chunk 在飞期间被编辑且卸载), 取出它重投, 把最新内存代落盘, 不依赖 chunk 是否
+                // 仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已 setUnsaved(true), 下轮 mixin 接管。
+                ChunkSnapshot pending = state.takePendingSnapshot();
+                if (pending != null && pendingReoffer != null) {
+                    // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
+                    // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。
+                    state.reenterSerializingForPending(pending.capturedGeneration());
+                    metrics.incInFlightSerializing();
+                    pendingReoffer.reoffer(pending);
+                }
                 metrics.recordChunkRetried();
             }
             // BAS 公开 API: chunk 已成功落盘 (CLEAN_LANDED 或 REQUEUE_DIRTY 都说明

@@ -1,5 +1,7 @@
 package com.shinoyuki.betterautosave.core.state;
 
+import com.shinoyuki.betterautosave.core.snapshot.EntitySnapshot;
+
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,6 +50,11 @@ public final class EntitySaveState {
     // 供 IO 完成回调线程在调完转换后读取以驱动 gauge dec. 仅被同一回调线程写后即读 (whenComplete
     // 是 per-task 单线程序列), 无跨线程可见性需求, 故普通字段即可.
     private boolean lastTransitionClearedMustDrain;
+    // v0.10.2 修复 (C-entity-unload-collision): 与 ChunkSaveState 对称的"接力快照"槽位。
+    // entity 路径碰撞更致命 —— vanilla processChunkUnload 在 storeEntities 后立即驱逐实体内存,
+    // 卸载后该坐标永不再被 storeEntities 调用, 被吞那次的最新实体列表是唯一副本。在途碰撞时 mixin
+    // 对最新 chunkEntities 做纯 capture 存进本槽, 在途那代 IO 落地 REQUEUE_DIRTY 时回调取出重投接力。
+    private final AtomicReference<EntitySnapshot> pendingSnapshot = new AtomicReference<>();
 
     public EntitySaveState(long packedPos, String dimensionId, long enqueueSequence) {
         this.packedPos = packedPos;
@@ -162,5 +169,35 @@ public final class EntitySaveState {
 
     public boolean compareAndClearMustDrain() {
         return mustDrain.compareAndSet(true, false);
+    }
+
+    /**
+     * v0.10.2 修复 (C-entity-unload-collision): 登记一份接力快照, 与
+     * {@link ChunkSaveState#registerPendingSnapshot} 同语义 —— 覆盖语义最新者胜 (隐角 B),
+     * 槽非空蕴含 mustDrain 须保持置位 (gauge 不变式)。
+     */
+    public void registerPendingSnapshot(EntitySnapshot snapshot) {
+        pendingSnapshot.set(snapshot);
+    }
+
+    /** 取出并清空接力快照槽 (getAndSet null); 与 {@link ChunkSaveState#takePendingSnapshot} 对称。 */
+    public EntitySnapshot takePendingSnapshot() {
+        return pendingSnapshot.getAndSet(null);
+    }
+
+    /** 槽是否非空; 供 gauge 不变式断言与诊断。 */
+    public boolean hasPendingSnapshot() {
+        return pendingSnapshot.get() != null;
+    }
+
+    /**
+     * v0.10.2 修复 (C-entity-unload-collision, 隐角 A): 重投接力快照前把 inFlightGeneration 锁到
+     * pending 快照 capture 时的代, phase 推回 SERIALIZING。与
+     * {@link ChunkSaveState#reenterSerializingForPending} 同理 —— 锁 pending 自己的代而非当前代,
+     * 让接力 IO 落地正确判定 CLEAN_LANDED / REQUEUE_DIRTY。
+     */
+    public void reenterSerializingForPending(long capturedGeneration) {
+        inFlightGeneration = capturedGeneration;
+        phase.set(Phase.SERIALIZING);
     }
 }

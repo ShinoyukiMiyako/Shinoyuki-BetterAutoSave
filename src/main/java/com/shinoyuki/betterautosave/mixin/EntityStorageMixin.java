@@ -112,9 +112,30 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             state.markDirty();
         } else if (currentPhase != EntitySaveState.Phase.DIRTY
                 && currentPhase != EntitySaveState.Phase.FAILED) {
-            // SNAPSHOTTING/SERIALIZING/IO_PENDING — 已在管线, 仅 mark mustDrain
+            // SNAPSHOTTING/SERIALIZING/IO_PENDING — 已有某代 IO 在飞。
+            // mustDrain 先于接力快照登记置位 (gauge 不变式: pendingSnapshot 非空 -> mustDrain 恒真)。
             if (state.tryMarkMustDrain()) {
                 metrics.incMustDrainPending();
+            }
+            // v0.10.2 修复 (C-entity-unload-collision): 这次 storeEntities 几乎必然来自 vanilla
+            // processChunkUnload —— 它 storeEntities 后立即把实体驱逐出内存且该坐标永不再 storeEntities,
+            // 故这份 chunkEntities 是最新实体列表的唯一副本。旧逻辑直接 ci.cancel 丢弃它, 信任在飞旧代快照,
+            // 实体增量 (新放的命名生物/盔甲架/展示框等) 永久静默丢失。
+            //
+            // 关键非对称 (与 chunk 路径): entity 没有 setUnsaved->markDirty 这样的独立 generation 驱动源,
+            // generation 只在 storeEntities 撞 CLEAN 时推进。故必须在此**显式 markDirty 推 generation**,
+            // 否则在飞那代落地 generation==inFlightGeneration 误判 CLEAN_LANDED (假成功 + 误 evict), 接力链断。
+            // markDirty 后对最新 chunkEntities 纯 capture (不碰在飞那代 phase/inFlightGeneration) 登记接力槽。
+            state.markDirty();
+            try {
+                EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
+                state.registerPendingSnapshot(pending);
+            } catch (Throwable t) {
+                // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 不污染在飞 task,
+                // 退回信任在飞旧代 (本次最新实体增量丢失), 但记录可见。
+                LOGGER.error("[BetterAutoSave] pending relay capture failed for in-flight entity chunk {} dim={}; "
+                                + "trusting in-flight snapshot (latest entity increment may be lost)",
+                        chunkEntities.getPos(), dimensionId, t);
             }
             metrics.recordEntitySubmitted();
             ci.cancel();
@@ -139,7 +160,10 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             EntitySnapshot snapshot = EntityCaptureProcedure.capture(chunkEntities, level, state);
             // v0.10.2 修复 (M4): 传 this (EntitySaveStateAccess) 让 task 在 CLEAN_LANDED 终态剔除
             // per-level 状态 map 条目, 防无界增长.
-            EntitySaveTask task = new EntitySaveTask(snapshot, worker, metrics, this);
+            // v0.10.2 修复 (C-entity-unload-collision): 传接力重投 sink, 让 REQUEUE_DIRTY 落地时取
+            // pending 快照重投 (sink 绑 worker + stateOwner, 由 pipeline 构造)。
+            EntitySaveTask task = new EntitySaveTask(snapshot, worker, metrics, this,
+                    pipeline.entityPendingReoffer(worker, this));
             metrics.incInFlightSerializing();
             metrics.recordEntitySubmitted();
             pipeline.entityWorkerQueue().offer(task);

@@ -33,9 +33,30 @@ public final class EntityCaptureProcedure {
             ChunkEntities<Entity> chunkEntities,
             ServerLevel level,
             EntitySaveState state) {
+        // 常规 capture: enterSerializing 推进 phase + 锁当前代进 inFlightGeneration。
+        return captureWithGeneration(chunkEntities, level, state, state.enterSerializing());
+    }
+
+    /**
+     * v0.10.2 修复 (C-entity-unload-collision): 纯 capture 入口, 与
+     * {@link ChunkCaptureProcedure#capturePending} 对称 —— 只把最新 chunkEntities 固化为快照,
+     * 不碰 phase/inFlightGeneration (不调 enterSerializing), 不 offer。在途碰撞 + 卸载时由 mixin 调,
+     * 抓到的是 vanilla 即将驱逐出内存的最新实体列表 (唯一副本), 存进 pendingSnapshot 槽待接力重投。
+     */
+    public static EntitySnapshot capturePending(
+            ChunkEntities<Entity> chunkEntities,
+            ServerLevel level,
+            EntitySaveState state) {
+        return captureWithGeneration(chunkEntities, level, state, state.generation());
+    }
+
+    private static EntitySnapshot captureWithGeneration(
+            ChunkEntities<Entity> chunkEntities,
+            ServerLevel level,
+            EntitySaveState state,
+            long captured) {
         ServerThreadAssert.assertOnServerThread(level.getServer());
 
-        long captured = state.enterSerializing();
         int dataVersion = SharedConstants.getCurrentVersion().getDataVersion().getVersion();
 
         ListTag entitiesNbt = new ListTag();

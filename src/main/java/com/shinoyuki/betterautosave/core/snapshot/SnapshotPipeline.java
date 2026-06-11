@@ -9,6 +9,7 @@ import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSubmissionSink;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
+import com.shinoyuki.betterautosave.core.state.EntitySaveStateAccess;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.core.worker.SerializationWorker;
 import com.shinoyuki.betterautosave.core.worker.WorkerThreadFactory;
@@ -20,6 +21,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.storage.IOWorker;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.level.ChunkDataEvent;
 import org.slf4j.Logger;
@@ -162,10 +164,25 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             metrics.recordEventDispatchNs(System.nanoTime() - evT0);
         }
 
-        ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker, chunkRecoveryQueue);
+        ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker, chunkRecoveryQueue,
+                chunkPendingReoffer(level));
         metrics.incInFlightSerializing();
         chunkWorkerQueue.offer(task);
         return true;
+    }
+
+    /**
+     * v0.10.2 修复 (C-chunk-unload-collision): 构造接力快照重投 sink。把 pending 快照包成新 ChunkSaveTask
+     * offer 回 chunkWorkerQueue —— assemble 由序列化 worker 做, **不**在调用本 sink 的 IOWorker 邮箱线程内联
+     * (内联会堵全服写盘, 这是已批复的备选案)。inFlightSerializing 的 inc 由调用方 (ChunkSaveTask 回调) 在
+     * reoffer 前做, 与新 task execute 首行的 dec 配平; 新 task 同样持有本 sink, 支持任意深度的接力链 (隐角 A)。
+     */
+    private ChunkSaveTask.PendingReoffer chunkPendingReoffer(ServerLevel level) {
+        return pending -> {
+            ChunkSaveTask relay = new ChunkSaveTask(pending, level, ioBridge, metrics, latencyTracker,
+                    chunkRecoveryQueue, chunkPendingReoffer(level));
+            chunkWorkerQueue.offer(relay);
+        };
     }
 
     @Override
@@ -314,6 +331,22 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
     public BlockingQueue<SaveTask> entityWorkerQueue() {
         return entityWorkerQueue;
+    }
+
+    /**
+     * v0.10.2 修复 (C-entity-unload-collision): 构造 entity 接力快照重投 sink, 与
+     * {@link #chunkPendingReoffer} 对称。把 pending EntitySnapshot 包成新 EntitySaveTask offer 回
+     * entityWorkerQueue (assemble 由序列化 worker 做)。entity task 在 mixin 构造 (持有 per-level
+     * EntityStorage 的 IOWorker 与 stateOwner), 故由 mixin 调本工厂传入这两者。新 task 同样持有本 sink,
+     * 支持任意深度接力链 (隐角 A)。inFlightSerializing 的 inc 由调用方在 reoffer 前做, 与新 task
+     * execute 首行 dec 配平。
+     */
+    public EntitySaveTask.PendingReoffer entityPendingReoffer(IOWorker entityIoWorker, EntitySaveStateAccess stateOwner) {
+        return pending -> {
+            EntitySaveTask relay = new EntitySaveTask(pending, entityIoWorker, metrics, stateOwner,
+                    entityPendingReoffer(entityIoWorker, stateOwner));
+            entityWorkerQueue.offer(relay);
+        };
     }
 
     public BlockingQueue<SaveTask> savedDataWorkerQueue() {
