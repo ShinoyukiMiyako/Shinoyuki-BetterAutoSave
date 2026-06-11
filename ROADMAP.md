@@ -28,7 +28,7 @@
 | v0.4 | 已落地 | unload + eager save 路径接管 | `processUnloads` 内 `save` 主线程同步 NBT 消除; mustDrain 接通 + 三计数 + drain-unload |
 | v0.5.0 | 已落地 | v0.4 三个稳定 fix | drain-unload 异步化 / mustDrain gauge 配对 / DiagnosticLogger 输出 v0.4 计数; 生产 6h+ 跑图 failed=0 fallback=0 leak=0 |
 | v0.5.1 | 已落地 | bypass cooldown 优化 + flush 异步化 | mixin 在 isUnsaved=false 时 setReturnValue(true) 让 saveChunkIfNeeded cooldown 正确更新; bypass 速率 100k/s → 400/s |
-| v0.6.0 | 已落地 | entity 路径接管 + Histogram bucket 扩展 | `EntityStorage.storeEntities` 主线程 entity.save 循环移到 BAS dispatch + worker; BAS-Entity-Worker 池真实工作 |
+| v0.6.0 | 已落地 | entity 路径接管 + Histogram bucket 扩展 | `EntityStorage.storeEntities` 主线程保留 entity.save 预序列化 (技术必然), worker 做 outer tag 构建 + IO 提交; BAS-Entity-Worker 池真实工作 |
 | v0.7.0 | 已落地 | SavedData / DimensionDataStorage 异步化 + SaveListener 公开 API | `DimensionDataStorage.save` 主线程同步 NBT/IO 移到 worker; chunk/entity/SavedData 三类 listener API 解锁 BetterBackup |
 | v0.7.1 | 已落地 | 4 agent 审查 + 1 验证 agent 后的 9 项修复 (4 Critical/Major + 5 Minor) | C1 entity emptyChunks 数据丢失 / C2 SaveTask gauge 配对 / C3 drainPending 加 inFlightSerializing / M3 capture 异常复位 phase / M1 POI flush / M7 大文件历史 size / M8 异常路径不双重 save / M9 worker 直接 setDirty / M11 wasAccessibleSinceLastSave |
 | **v0.9.0** | **已落地** | 工具化与监控: Prometheus exporter + hottest-chunks 命令 | 服主自助定位 mod / vanilla 瓶颈, 不再依赖外接 spark profiler |
@@ -155,7 +155,7 @@ mixin 目标:
 
 **优先级**: 中
 **技术风险**: 低 (与 v0.2 同构, 实测如此)
-**期望收益**: 实体多场景 (大型农场 / 怪物刷怪) 主线程消除 entity NBT 编码开销
+**期望收益**: 实体多场景 (大型农场 / 怪物刷怪) 主线程移除 outer tag 构建与 IO 提交开销 (entity.save 预序列化仍在主线程, 技术必然)
 
 #### 范围
 
