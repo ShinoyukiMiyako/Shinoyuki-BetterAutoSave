@@ -68,4 +68,29 @@ class SavedDataDispatchTest {
                 "offer 成功后 inc 必须保留待 worker dec");
         assertEquals(1, queue.size(), "task 必须已入队交给 worker");
     }
+
+    /**
+     * offer 返 false (有界队列已满, 不抛) 必须与抛异常同路: 把 false 转成 IllegalStateException,
+     * 由 finally 配平 gauge, 由调用方 catch 走兜底。判定标准 (删修复必挂): 把 enqueue 里
+     * {@code if (!offer) throw} 改回裸 {@code offer; enqueued=true} -> 本测试不再抛异常 + gauge 停在 1。
+     */
+    @Test
+    void offer_returning_false_throws_and_compensates_serializing_gauge() {
+        SaveMetrics metrics = new SaveMetrics();
+        // 队列桩: offer 永远返 false 模拟有界队列已满 (不抛异常).
+        LinkedBlockingQueue<SaveTask> fullQueue = new LinkedBlockingQueue<>() {
+            @Override
+            public boolean offer(SaveTask saveTask) {
+                return false;
+            }
+        };
+
+        assertThrows(IllegalStateException.class,
+                () -> SavedDataDispatch.enqueue(fullQueue, new DummyTask(), metrics));
+
+        // offer 返 false 同样要补 dec -> gauge 归零, 不毒化 drainPending; task 未入队.
+        assertEquals(0L, metrics.snapshot().inFlightSerializing(),
+                "offer 返 false 后 inFlightSerializing 必须配平归零");
+        assertEquals(0, fullQueue.size(), "offer 返 false 时 task 不得入队");
+    }
 }

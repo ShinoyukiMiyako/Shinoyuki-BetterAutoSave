@@ -32,13 +32,29 @@ public final class SavedDataDispatch {
      * inc serializing 后入队. offer 前任何环节抛异常 (含 offer 自身) 都先补 dec 抵消本次 inc, 再原样
      * 上抛供调用方兜底; offer 成功则 inc 保留, 抵消责任移交 worker task execute。
      *
-     * @throws RuntimeException / Error offer 阶段的原始异常 (gauge 已在抛出前配平)
+     * <p>v0.10.2 修复 (m-offer-false-contract): {@link BlockingQueue#offer} 有两种非入队信号 ——
+     * 抛异常 (容量分配 OOM 等) 与返 false (有界队列已满)。生产队列当前是无界 LinkedBlockingQueue,
+     * offer 永不返 false, 故无 live defect; 但本方法刻意写在抽象 BlockingQueue 接口上 (可注入桩供
+     * 单测), 一旦未来换成有界队列 (ArrayBlockingQueue / 带容量的 LinkedBlockingQueue) 而本方法把
+     * "offer 没抛" 等同于 "入队成功", 就会:
+     * (a) 本周期数据无写盘且不重试 (调用方乐观清了 dirty);
+     * (b) 永久泄漏 savedDataInFlight 占位 (该 .dat 此后每周期 add 失败被跳过, 进程内永不再保存);
+     * (c) serializing gauge 永久 +1 毒化 drainPending 收敛与 Prometheus 指标。
+     * 把 offer 返 false 当成与异常同路 —— 抛 IllegalStateException (JDK Queue.add 满队列的惯用信号),
+     * 由 finally 配平 gauge, 由调用方既有 catch 走 remove 占位 + 同步兜底写。两种非入队信号收口到同一
+     * 兜底路径, 杜绝有界队列换装时的静默回归。
+     *
+     * @throws RuntimeException / Error offer 阶段的原始异常, 或 offer 返 false 时的 IllegalStateException
+     *         (两种情形 gauge 都已在抛出前配平)
      */
     public static void enqueue(BlockingQueue<SaveTask> queue, SaveTask task, SaveMetrics metrics) {
         metrics.incInFlightSerializing();
         boolean enqueued = false;
         try {
-            queue.offer(task);
+            if (!queue.offer(task)) {
+                throw new IllegalStateException(
+                        "SavedData worker queue rejected task (bounded queue full): " + task.taskName());
+            }
             enqueued = true;
         } finally {
             if (!enqueued) {
