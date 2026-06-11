@@ -367,6 +367,93 @@ class EntityPendingRelayTest {
         assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
     }
 
+    /**
+     * C-callback-sync-throw-swallowed (entity): store 同步抛必须走 onIoFailure 补偿, 不静默落进被丢弃的
+     * dependent future。第一次 store 同步抛 -> REQUEUE_DIRTY 重投, 第二次成功。
+     *
+     * <p>判定标准 (删 submitIo 自包 try 必挂): ioPending gauge 永久 +1, phase 卡 IO_PENDING。
+     */
+    @Test
+    void store_synchronous_throw_is_compensated_and_retried() {
+        EntitySaveState state = new EntitySaveState(0L, "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        state.markDirty();
+        state.trySnapshot();
+        state.enterSerializing();
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        java.util.concurrent.atomic.AtomicInteger submitCount = new java.util.concurrent.atomic.AtomicInteger();
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            int n = submitCount.incrementAndGet();
+            if (n == 1) {
+                throw new RuntimeException("entity mailbox teardown surrogate");
+            }
+            return CompletableFuture.completedFuture(null);
+        };
+
+        EntitySaveTask task = new EntitySaveTask(gen1, metrics, submitter);
+        task.execute();
+
+        assertEquals(2, submitCount.get(), "store 同步抛走 onIoFailure REQUEUE_DIRTY 重投 (第 2 次成功)");
+        assertEquals(EntitySaveState.Phase.CLEAN, state.phase(), "补偿后重投成功 phase 回 CLEAN");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightIoPending(), "store 同步抛后 ioPending gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+    }
+
+    /**
+     * C-callback-sync-throw-swallowed (entity): REQUEUE_DIRTY 接力时 reoffer sink 同步抛, safeReoffer 必须清
+     * mustDrain + 配平 gauge (serializing 由 sink 自身 inc/offer 自包 try 配平)。entity 无坐标恢复, 漏防即静默丢失。
+     *
+     * <p>判定标准 (删 safeReoffer 必挂): mustDrain 永真 + mustDrainPending gauge 泄漏。
+     */
+    @Test
+    void reoffer_synchronous_throw_balances_must_drain_and_serializing() {
+        EntitySaveState state = new EntitySaveState(0L, "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        CompletableFuture<Void> gen1Future = new CompletableFuture<>();
+        Deque<CompletableFuture<Void>> futures = new ArrayDeque<>();
+        futures.add(gen1Future);
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            CompletableFuture<Void> f = futures.poll();
+            return f != null ? f : CompletableFuture.completedFuture(null);
+        };
+        // 复刻 SnapshotPipeline sink 自包 try: 先 inc, 抛前 dec 回, 再上抛交 safeReoffer 清 mustDrain.
+        EntitySaveTask.PendingReoffer throwingReoffer = pending -> {
+            metrics.incInFlightSerializing();
+            try {
+                throw new RuntimeException("entity relay sink teardown surrogate");
+            } catch (Throwable t) {
+                metrics.decInFlightSerializing();
+                throw t;
+            }
+        };
+
+        EntitySaveTask task = new EntitySaveTask(gen1, metrics, submitter, null, throwingReoffer);
+        task.execute();             // gen=1 IO 在飞
+
+        state.markDirty();          // gen=2 碰撞登记
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        state.registerPendingSnapshot(snapshotForGeneration(state, 2L));
+
+        gen1Future.complete(null);  // gen=1 落地 REQUEUE_DIRTY -> 取 pending -> safeReoffer -> sink 抛 -> 补偿
+
+        assertFalse(state.hasPendingSnapshot(), "reoffer 抛后 pending 已 take 走, 槽空");
+        assertFalse(state.mustDrain(), "safeReoffer 必须清 mustDrain");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.mustDrainPending(), "mustDrain gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零 (sink 自身 dec)");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);

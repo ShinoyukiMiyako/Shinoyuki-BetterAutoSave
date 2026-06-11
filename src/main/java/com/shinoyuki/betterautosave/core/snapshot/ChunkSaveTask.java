@@ -81,10 +81,12 @@ public final class ChunkSaveTask implements SaveTask {
     public void execute() {
         // v0.7.1 修复 (C2): execute 内同步异常路径必须复位 gauge.
         // assemble 抛 → mixin 已 inc serializing 但本函数未 dec → 永久 +1.
-        // 用 task-local 标志记录"已 dec serializing"和"已 inc ioPending 且 future 未注册",
-        // 同步异常时 catch 块按标志补偿 dec, 然后 throw 让 SerializationWorker 走 onUnhandledError 处理 state.
+        // serializingDec 标志记录"已 dec serializing", assemble 抛时 catch 补 dec, 然后 throw 让
+        // SerializationWorker 走 onUnhandledError 处理 state.
+        // v0.11.0 修复 (C-callback-sync-throw-swallowed): ioPending 的同步抛补偿已下沉到 submitIo 内部
+        // (submitIo 自包 try 抵消 inc 并走 onIoFailure, 不再向上抛), 故此处不再需要 ioPendingIncWithoutFuture
+        // 守卫 —— submitIo 在 future 注册前已不会抛。
         boolean serializingDec = false;
-        boolean ioPendingIncWithoutFuture = false;
         try {
             // v0.9: 测 ChunkNbtAssembler.assemble 耗时回写 ChunkLatencyTracker.
             // 这部分耗时跟 SerializationWorker 整体测的 worker time 几乎相等 —
@@ -101,20 +103,12 @@ public final class ChunkSaveTask implements SaveTask {
                         assembleNs);
             }
 
-            // ioPendingIncWithoutFuture 守 submitIo 内 incInFlightIoPending 与 future 注册之间的窗口:
-            // submitIo 内 storeChunk 抛同步异常时 inc 已发生但 whenComplete 没注册, 外层 catch 补 dec.
-            // submitIo 正常返回 (future 注册成功) 后置 false, gauge 复位责任移交 whenComplete.
-            ioPendingIncWithoutFuture = true;
             ChunkSaveState state = snapshot.state();
             submitIo(state, tag);
-            ioPendingIncWithoutFuture = false;
         } catch (Throwable t) {
-            // v0.7.1 修复 (C2): execute 同步异常路径 gauge 复位.
+            // v0.7.1 修复 (C2): execute 同步异常路径 gauge 复位 (assemble 抛, submitIo 已自包补偿不会抛到此).
             if (!serializingDec) {
                 metrics.decInFlightSerializing();
-            }
-            if (ioPendingIncWithoutFuture) {
-                metrics.decInFlightIoPending();
             }
             throw t;
         }
@@ -143,71 +137,130 @@ public final class ChunkSaveTask implements SaveTask {
         state.enterIoPending();
         metrics.incInFlightIoPending();
         long submitNs = System.nanoTime();
-        CompletableFuture<Void> future = ioSubmitter.submit(tag);
+        CompletableFuture<Void> future;
+        try {
+            future = ioSubmitter.submit(tag);
+        } catch (Throwable submitError) {
+            // v0.11.0 修复 (C-callback-sync-throw-swallowed): submit 同步抛 (生产几乎仅 teardown-NPE / OOM,
+            // 但回调线程内递归 submitIo 时若漏防则 inc 已发生而无 future 可 dec —— 永久泄漏 + phase 卡 IO_PENDING)。
+            // 此处自包补偿: dec 抵消本行 inc, 走与 IO 失败 (future.completeExceptionally) 等同的 onIoFailure
+            // 终态/重投补偿, 不向 dependent future 漏抛 (whenComplete 回调内的递归调用也因此安全)。
+            // 不 recordIoStoreNs: submit 同步抛根本没发生 store, 记一个近零样本会污染 IO 延迟直方图。
+            metrics.decInFlightIoPending();
+            onIoFailure(state, tag, submitError);
+            return;
+        }
+        // v0.11.0 修复 (C-callback-sync-throw-swallowed, 备选 A 兜底网): whenComplete 回调返回的 dependent
+        // future 若被丢弃, 回调内任何同步抛 (含 onIoFailure/safeReoffer 自身再抛的 Error) 会静默落进无人 join
+        // 的 future。挂 exceptionally 兜底网, 保证"永不静默": 即便 B 路径补偿再抛, 至少 ERROR 可见。
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             if (error != null) {
                 LOGGER.error("[BetterAutoSave] IO store failed for chunk {} dim={}",
                         snapshot.pos(), snapshot.dimension().location(), error);
-                ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
-                if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
-                    // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
-                    // 杜绝"先读快照 wasDraining 再内部静默 clear"拆分被并发 inc 抢跑漏 dec (v0.10.2 修复 M6).
-                    // 还原 isUnsaved 让 vanilla 同步兜底.
-                    if (state.lastTransitionClearedMustDrain()) {
-                        metrics.decMustDrainPending();
-                    }
-                    // v0.10.2 修复 (C-chunk-unload-collision, 隐角 C): 终态前若挂着接力快照, 它的最新代
-                    // 增量随这次彻底失败一并丢失。在飞 task 已死, 无法再接力。取走清空防泄漏并明示 ERROR ——
-                    // 对仍加载的 chunk, 下面 enqueueRecovery 还原 isUnsaved 让 vanilla 同步重写最新内存救回;
-                    // 已卸载的, ChunkRecoveryQueue.drain 的 terminal+unloaded 分支再升级 ERROR (带 dim+坐标)。
-                    if (state.takePendingSnapshot() != null) {
-                        LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot when IO hit terminal "
-                                        + "retry limit; its latest-generation increment may be lost (vanilla sync fallback "
-                                        + "will recover it only if still loaded)",
-                                snapshot.pos(), snapshot.dimension().location());
-                    }
-                    enqueueRecovery(outcome);
-                    metrics.recordChunkFailed();
-                    return;
-                }
-                // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
-                // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
-                metrics.recordChunkRetried();
-                submitIo(state, tag);
+                onIoFailure(state, tag, error);
                 return;
             }
-            // 成功回调: 终态 (CLEAN_LANDED 或 stale REQUEUE_DIRTY) 都终结本轮 in-flight.
-            // CLEAN_LANDED 时 ioCompletedSuccessfully 内部 CAS 清 mustDrain boolean, 用其返回值配平 gauge
-            // (v0.10.2 修复 M6: 单一 CAS 既清 boolean 又驱动 dec, 无读快照拆分缝隙).
-            ChunkSaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
+            onIoSuccess(state, tag);
+        }).exceptionally(callbackError -> {
+            // 回调体同步抛且未被 B 的精确补偿吸收 (多为 Error): 不静默, 明示 ERROR。
+            LOGGER.error("[BetterAutoSave] IO completion callback threw for chunk {} dim={}; in-flight gauges may be "
+                            + "left inconsistent for this task",
+                    snapshot.pos(), snapshot.dimension().location(), callbackError);
+            return null;
+        });
+    }
+
+    /**
+     * v0.11.0 修复 (C-callback-sync-throw-swallowed): IO 失败 (future 异常完成 *或* submit 同步抛) 的统一
+     * 补偿路径。从原 whenComplete error 分支抽出, 供回调线程与同步 submit 抛共用同一终态/重投逻辑, 杜绝两处漂移。
+     */
+    private void onIoFailure(ChunkSaveState state, CompoundTag tag, Throwable cause) {
+        ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
+        if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
+            // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
+            // 杜绝"先读快照 wasDraining 再内部静默 clear"拆分被并发 inc 抢跑漏 dec (v0.10.2 修复 M6).
+            // 还原 isUnsaved 让 vanilla 同步兜底.
             if (state.lastTransitionClearedMustDrain()) {
                 metrics.decMustDrainPending();
             }
-            if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
-                metrics.recordChunkCompleted();
-            } else {
-                // 落盘成功但 chunk 期间 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 region file
-                // (这一代已落盘), 但更新代的增量尚未落。
-                // v0.10.2 修复 (C-chunk-unload-collision): 优先用接力快照接力 —— 若 mixin 碰撞分支登记过
-                // pending (该 chunk 在飞期间被编辑且卸载), 取出它重投, 把最新内存代落盘, 不依赖 chunk 是否
-                // 仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已 setUnsaved(true), 下轮 mixin 接管。
-                ChunkSnapshot pending = state.takePendingSnapshot();
-                if (pending != null && pendingReoffer != null) {
-                    // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
-                    // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。
-                    // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
-                    state.reenterSerializingForPending(pending.capturedGeneration());
-                    pendingReoffer.reoffer(pending);
-                }
-                metrics.recordChunkRetried();
+            // v0.10.2 修复 (C-chunk-unload-collision, 隐角 C): 终态前若挂着接力快照, 它的最新代
+            // 增量随这次彻底失败一并丢失。在飞 task 已死, 无法再接力。取走清空防泄漏并明示 ERROR ——
+            // 对仍加载的 chunk, 下面 enqueueRecovery 还原 isUnsaved 让 vanilla 同步重写最新内存救回;
+            // 已卸载的, ChunkRecoveryQueue.drain 的 terminal+unloaded 分支再升级 ERROR (带 dim+坐标)。
+            if (state.takePendingSnapshot() != null) {
+                LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot when IO hit terminal "
+                                + "retry limit; its latest-generation increment may be lost (vanilla sync fallback "
+                                + "will recover it only if still loaded)",
+                        snapshot.pos(), snapshot.dimension().location());
             }
-            // BAS 公开 API: chunk 已成功落盘 (CLEAN_LANDED 或 REQUEUE_DIRTY 都说明
-            // tag 字节已写入 region file). 触发外部 listener (例如 BetterBackup).
-            // listener 异常已在 Registry 层 catch + log, 此处不会抛出.
-            SaveListenerRegistry.fireChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
-        });
+            enqueueRecovery(outcome);
+            metrics.recordChunkFailed();
+            return;
+        }
+        // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
+        // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
+        metrics.recordChunkRetried();
+        submitIo(state, tag);
+    }
+
+    /**
+     * v0.11.0 修复 (C-callback-sync-throw-swallowed): IO 成功落地的统一处置, 从原 whenComplete 成功分支抽出。
+     */
+    private void onIoSuccess(ChunkSaveState state, CompoundTag tag) {
+        // 终态 (CLEAN_LANDED 或 stale REQUEUE_DIRTY) 都终结本轮 in-flight.
+        // CLEAN_LANDED 时 ioCompletedSuccessfully 内部 CAS 清 mustDrain boolean, 用其返回值配平 gauge
+        // (v0.10.2 修复 M6: 单一 CAS 既清 boolean 又驱动 dec, 无读快照拆分缝隙).
+        ChunkSaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
+        if (state.lastTransitionClearedMustDrain()) {
+            metrics.decMustDrainPending();
+        }
+        if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
+            metrics.recordChunkCompleted();
+        } else {
+            // 落盘成功但 chunk 期间 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 region file
+            // (这一代已落盘), 但更新代的增量尚未落。
+            // v0.10.2 修复 (C-chunk-unload-collision): 优先用接力快照接力 —— 若 mixin 碰撞分支登记过
+            // pending (该 chunk 在飞期间被编辑且卸载), 取出它重投, 把最新内存代落盘, 不依赖 chunk 是否
+            // 仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已 setUnsaved(true), 下轮 mixin 接管。
+            ChunkSnapshot pending = state.takePendingSnapshot();
+            if (pending != null && pendingReoffer != null) {
+                // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
+                // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。
+                // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
+                state.reenterSerializingForPending(pending.capturedGeneration());
+                safeReoffer(state, pending);
+            }
+            metrics.recordChunkRetried();
+        }
+        // BAS 公开 API: chunk 已成功落盘 (CLEAN_LANDED 或 REQUEUE_DIRTY 都说明
+        // tag 字节已写入 region file). 触发外部 listener (例如 BetterBackup).
+        // listener 异常已在 Registry 层 catch + log, 此处不会抛出.
+        SaveListenerRegistry.fireChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
+    }
+
+    /**
+     * v0.11.0 修复 (C-callback-sync-throw-swallowed): 接力重投的安全包装。reoffer sink 同步抛 (生产几乎仅
+     * teardown-NPE / OOM) 时不得静默丢 pending —— 此刻 pending 已被 takePendingSnapshot 取走 (getAndSet),
+     * 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
+     *
+     * <p><b>补偿</b>: serializing gauge 由 sink 自身在 inc 与 offer 之间自包 try 配平 (见
+     * {@link SnapshotPipeline} 的 reoffer sink, 抛前 dec 回); 本层只负责 mustDrain 终态配平 + ERROR ——
+     * 该接力代彻底无法落盘 (无 vanilla 兜底门可还原, chunk 多已卸载), compareAndClearMustDrain 单 CAS 清
+     * boolean 并驱动 gauge dec, 明示该代增量丢失。不再向 dependent future 漏抛。
+     */
+    private void safeReoffer(ChunkSaveState state, ChunkSnapshot pending) {
+        try {
+            pendingReoffer.reoffer(pending);
+        } catch (Throwable reofferError) {
+            if (state.compareAndClearMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+            LOGGER.error("[BetterAutoSave] pending relay reoffer threw for chunk {} dim={}; its latest-generation "
+                            + "increment is lost (no in-flight task left to retry it)",
+                    pending.pos(), pending.dimension().location(), reofferError);
+        }
     }
 
     @Override
@@ -227,7 +280,9 @@ public final class ChunkSaveTask implements SaveTask {
             // 走 ERROR 安全网并在那里清 mustDrain+gauge。本路径不调 ioFailed/enqueueRecovery —— 该轮 in-flight
             // 由接力 task 接管, 不进 FAILED 也不投坐标恢复队列 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
             state.reenterSerializingForPending(pending.capturedGeneration());
-            pendingReoffer.reoffer(pending);
+            // v0.11.0 修复 (C-callback-sync-throw-swallowed): 与 whenComplete REQUEUE_DIRTY 路径共用 safeReoffer,
+            // reoffer sink 同步抛时不丢 pending —— 做 mustDrain 终态配平 + ERROR (serializing 由 sink 自身配平)。
+            safeReoffer(state, pending);
             return;
         }
 

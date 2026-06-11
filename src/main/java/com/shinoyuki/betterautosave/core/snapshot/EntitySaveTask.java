@@ -87,27 +87,20 @@ public final class EntitySaveTask implements SaveTask {
     @Override
     public void execute() {
         // v0.7.1 修复 (C2): 同 ChunkSaveTask, execute 同步异常路径必须复位 gauge.
+        // v0.11.0 修复 (C-callback-sync-throw-swallowed): ioPending 同步抛补偿下沉到 submitIo 内部
+        // (submitIo 自包 try, 不再向上抛), 故移除 ioPendingIncWithoutFuture 守卫, 与 ChunkSaveTask 对称.
         boolean serializingDec = false;
-        boolean ioPendingIncWithoutFuture = false;
         try {
             CompoundTag tag = EntityNbtAssembler.assemble(snapshot);
             metrics.decInFlightSerializing();
             serializingDec = true;
 
-            // ioPendingIncWithoutFuture 守 submitIo 内 incInFlightIoPending 与 future 注册之间的窗口:
-            // submitIo 内 store 抛同步异常时 inc 已发生但 whenComplete 没注册, 外层 catch 补 dec.
-            // submitIo 正常返回 (future 注册成功) 后置 false, gauge 复位责任移交 whenComplete.
-            ioPendingIncWithoutFuture = true;
             EntitySaveState state = snapshot.state();
             submitIo(state, tag);
-            ioPendingIncWithoutFuture = false;
         } catch (Throwable t) {
-            // v0.7.1 修复 (C2): 同 ChunkSaveTask 同步异常 gauge 复位.
+            // v0.7.1 修复 (C2): 同 ChunkSaveTask 同步异常 gauge 复位 (assemble 抛, submitIo 已自包补偿).
             if (!serializingDec) {
                 metrics.decInFlightSerializing();
-            }
-            if (ioPendingIncWithoutFuture) {
-                metrics.decInFlightIoPending();
             }
             throw t;
         }
@@ -139,73 +132,126 @@ public final class EntitySaveTask implements SaveTask {
         state.enterIoPending();
         metrics.incInFlightIoPending();
         long submitNs = System.nanoTime();
-        CompletableFuture<Void> future = ioSubmitter.submit(tag);
+        CompletableFuture<Void> future;
+        try {
+            future = ioSubmitter.submit(tag);
+        } catch (Throwable submitError) {
+            // v0.11.0 修复 (C-callback-sync-throw-swallowed): store 同步抛 (生产几乎仅 teardown-NPE / OOM)。
+            // 回调线程内递归 submitIo 时若漏防则 inc 已发生而无 future 可 dec —— 永久泄漏 + phase 卡 IO_PENDING。
+            // 自包补偿: dec 抵消本行 inc, 走与 IO 失败等同的 onIoFailure (entity 无坐标恢复队列, 终态仅 ERROR),
+            // 不向 dependent future 漏抛 (回调内递归也因此安全)。不 recordIoStoreNs: 同步抛根本没发生 store。
+            metrics.decInFlightIoPending();
+            onIoFailure(state, tag, submitError);
+            return;
+        }
+        // v0.11.0 修复 (C-callback-sync-throw-swallowed, 备选 A 兜底网): 与 ChunkSaveTask 对称, 挂
+        // exceptionally 兜底网保证回调体同步抛 (含补偿再抛的 Error) 永不静默落进无人 join 的 dependent future。
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             if (error != null) {
                 LOGGER.error("[BetterAutoSave] entity IO store failed for chunk {} dim={}",
                         snapshot.pos(), snapshot.dimension().location(), error);
-                EntitySaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
-                if (outcome == EntitySaveState.IoOutcome.FAILED_TERMINAL) {
-                    // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
-                    // 杜绝"读快照 + 内部静默 clear"拆分导致的孤儿 inc 漏 dec (v0.10.2 修复 M6).
-                    if (state.lastTransitionClearedMustDrain()) {
-                        metrics.decMustDrainPending();
-                    }
-                    // v0.10.2 修复 (C-entity-unload-collision, 隐角 C): 终态前若挂着接力快照, 在飞 task 已死
-                    // 无法接力, 该坐标实体已被 vanilla 驱逐出内存 (无 isUnsaved 等价门可让 vanilla 兜底), 这份
-                    // 最新实体增量永久丢失。entity 无坐标恢复队列, 取走清空防泄漏并明示 ERROR (带 dim+坐标)。
-                    if (state.takePendingSnapshot() != null) {
-                        LOGGER.error("[BetterAutoSave] entity chunk {} dim={} had a pending relay snapshot when IO hit "
-                                        + "terminal retry limit; its latest entity increment is lost (entities already "
-                                        + "evicted from memory, no vanilla fallback)",
-                                snapshot.pos(), snapshot.dimension().location());
-                    }
-                    metrics.recordEntityFailed();
-                    return;
-                }
-                // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
-                // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
-                metrics.recordEntityRetried();
-                submitIo(state, tag);
+                onIoFailure(state, tag, error);
                 return;
             }
-            EntitySaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
-            if (outcome == EntitySaveState.IoOutcome.CLEAN_LANDED) {
-                // CLEAN_LANDED 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge.
-                if (state.lastTransitionClearedMustDrain()) {
-                    metrics.decMustDrainPending();
-                }
-                metrics.recordEntityCompleted();
-                // CLEAN_LANDED 蕴含 generation==inFlightGeneration, 即在飞期间无碰撞 (碰撞会 markDirty
-                // 推 generation 使其判 REQUEUE_DIRTY)。故此分支不应有 pending; 不取槽, 也不会与下面的
-                // evict 冲突。
-                // v0.10.2 修复 (M4): CLEAN_LANDED 是确认安全的终态 (phase=CLEAN, 无在途 IO,
-                // generation 未变即无 pending 编辑). 尝试从 per-level 状态 map 剔除本条目, 防止
-                // EntityStorage 单例的状态 map 随进程运行无界增长. 剔除走 identity + phase==CLEAN
-                // 原子校验 (computeIfPresent), 主线程已开新一轮 save 则保留留待下次 CLEAN_LANDED.
-                if (stateOwner != null) {
-                    stateOwner.betterautosave$evictEntityStateIfClean(snapshot.pos().toLong(), state);
-                }
-                // BAS 公开 API: entity chunk 已成功落盘. 触发外部 listener.
-                // 跟 ChunkSaveTask 同语义, listener 异常 Registry 层 catch + log.
-                SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
-                return;
-            }
-            // 落盘成功但 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 (这代已落), 但更新代未落。
-            // v0.10.2 修复 (C-entity-unload-collision): 优先用接力快照接力 —— mixin 碰撞分支登记的最新
-            // entity 列表 (vanilla 即将驱逐的唯一副本) 取出重投, 把最新代落盘, 不依赖实体是否仍在内存。
-            // reenterSerializingForPending 锁 pending 自己的代 (隐角 A); mustDrain 维持 (REQUEUE_DIRTY 不清)。
-            EntitySnapshot pending = state.takePendingSnapshot();
-            if (pending != null && pendingReoffer != null) {
-                // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
-                state.reenterSerializingForPending(pending.capturedGeneration());
-                pendingReoffer.reoffer(pending);
-            }
-            metrics.recordEntityRetried();
-            SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
+            onIoSuccess(state, tag);
+        }).exceptionally(callbackError -> {
+            LOGGER.error("[BetterAutoSave] entity IO completion callback threw for chunk {} dim={}; in-flight gauges "
+                            + "may be left inconsistent for this task",
+                    snapshot.pos(), snapshot.dimension().location(), callbackError);
+            return null;
         });
+    }
+
+    /**
+     * v0.11.0 修复 (C-callback-sync-throw-swallowed): entity IO 失败 (future 异常完成 *或* store 同步抛) 的
+     * 统一补偿, 从原 whenComplete error 分支抽出, 与 {@link ChunkSaveTask#onIoFailure} 对称。
+     */
+    private void onIoFailure(EntitySaveState state, CompoundTag tag, Throwable cause) {
+        EntitySaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
+        if (outcome == EntitySaveState.IoOutcome.FAILED_TERMINAL) {
+            // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
+            // 杜绝"读快照 + 内部静默 clear"拆分导致的孤儿 inc 漏 dec (v0.10.2 修复 M6).
+            if (state.lastTransitionClearedMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+            // v0.10.2 修复 (C-entity-unload-collision, 隐角 C): 终态前若挂着接力快照, 在飞 task 已死
+            // 无法接力, 该坐标实体已被 vanilla 驱逐出内存 (无 isUnsaved 等价门可让 vanilla 兜底), 这份
+            // 最新实体增量永久丢失。entity 无坐标恢复队列, 取走清空防泄漏并明示 ERROR (带 dim+坐标)。
+            if (state.takePendingSnapshot() != null) {
+                LOGGER.error("[BetterAutoSave] entity chunk {} dim={} had a pending relay snapshot when IO hit "
+                                + "terminal retry limit; its latest entity increment is lost (entities already "
+                                + "evicted from memory, no vanilla fallback)",
+                        snapshot.pos(), snapshot.dimension().location());
+            }
+            metrics.recordEntityFailed();
+            return;
+        }
+        // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
+        // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
+        metrics.recordEntityRetried();
+        submitIo(state, tag);
+    }
+
+    /**
+     * v0.11.0 修复 (C-callback-sync-throw-swallowed): entity IO 成功落地的统一处置, 从原 whenComplete 成功
+     * 分支抽出, 与 {@link ChunkSaveTask#onIoSuccess} 对称。
+     */
+    private void onIoSuccess(EntitySaveState state, CompoundTag tag) {
+        EntitySaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
+        if (outcome == EntitySaveState.IoOutcome.CLEAN_LANDED) {
+            // CLEAN_LANDED 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge.
+            if (state.lastTransitionClearedMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+            metrics.recordEntityCompleted();
+            // CLEAN_LANDED 蕴含 generation==inFlightGeneration, 即在飞期间无碰撞 (碰撞会 markDirty
+            // 推 generation 使其判 REQUEUE_DIRTY)。故此分支不应有 pending; 不取槽, 也不会与下面的
+            // evict 冲突。
+            // v0.10.2 修复 (M4): CLEAN_LANDED 是确认安全的终态 (phase=CLEAN, 无在途 IO,
+            // generation 未变即无 pending 编辑). 尝试从 per-level 状态 map 剔除本条目, 防止
+            // EntityStorage 单例的状态 map 随进程运行无界增长. 剔除走 identity + phase==CLEAN
+            // 原子校验 (computeIfPresent), 主线程已开新一轮 save 则保留留待下次 CLEAN_LANDED.
+            if (stateOwner != null) {
+                stateOwner.betterautosave$evictEntityStateIfClean(snapshot.pos().toLong(), state);
+            }
+            // BAS 公开 API: entity chunk 已成功落盘. 触发外部 listener.
+            // 跟 ChunkSaveTask 同语义, listener 异常 Registry 层 catch + log.
+            SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
+            return;
+        }
+        // 落盘成功但 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 (这代已落), 但更新代未落。
+        // v0.10.2 修复 (C-entity-unload-collision): 优先用接力快照接力 —— mixin 碰撞分支登记的最新
+        // entity 列表 (vanilla 即将驱逐的唯一副本) 取出重投, 把最新代落盘, 不依赖实体是否仍在内存。
+        // reenterSerializingForPending 锁 pending 自己的代 (隐角 A); mustDrain 维持 (REQUEUE_DIRTY 不清)。
+        EntitySnapshot pending = state.takePendingSnapshot();
+        if (pending != null && pendingReoffer != null) {
+            // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
+            state.reenterSerializingForPending(pending.capturedGeneration());
+            safeReoffer(state, pending);
+        }
+        metrics.recordEntityRetried();
+        SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
+    }
+
+    /**
+     * v0.11.0 修复 (C-callback-sync-throw-swallowed): 接力重投安全包装, 与 {@link ChunkSaveTask#safeReoffer}
+     * 对称。reoffer sink 同步抛时 pending 已被 takePendingSnapshot 取走 (getAndSet) 只活在栈局部 —— sink 抛则
+     * 永久丢失。serializing gauge 由 sink 自身 inc/offer 间自包 try 配平; 本层负责 mustDrain 终态配平 + ERROR。
+     * entity 无 vanilla 兜底, 该坐标最新实体增量彻底丢失。不再向 dependent future 漏抛。
+     */
+    private void safeReoffer(EntitySaveState state, EntitySnapshot pending) {
+        try {
+            pendingReoffer.reoffer(pending);
+        } catch (Throwable reofferError) {
+            if (state.compareAndClearMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+            LOGGER.error("[BetterAutoSave] entity pending relay reoffer threw for chunk {} dim={}; its latest entity "
+                            + "increment is lost (entities already evicted, no vanilla fallback)",
+                    pending.pos(), pending.dimension().location(), reofferError);
+        }
     }
 
     @Override
@@ -222,7 +268,9 @@ public final class EntitySaveTask implements SaveTask {
             // 真正 offer 时 inc serializing, workersStopping 关服残窗走 ERROR 安全网并在那里清 mustDrain+gauge。
             // 本路径不调 ioFailed —— 该轮 in-flight 由接力 task 接管 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
             state.reenterSerializingForPending(pending.capturedGeneration());
-            pendingReoffer.reoffer(pending);
+            // v0.11.0 修复 (C-callback-sync-throw-swallowed): 与 whenComplete REQUEUE_DIRTY 路径共用 safeReoffer,
+            // 与 ChunkSaveTask 对称, reoffer sink 同步抛时不丢 pending —— mustDrain 终态配平 + ERROR。
+            safeReoffer(state, pending);
             return;
         }
 

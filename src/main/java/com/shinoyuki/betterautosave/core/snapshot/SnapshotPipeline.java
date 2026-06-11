@@ -188,9 +188,17 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             }
             // inc serializing 与新 task execute 首行 dec 配平; 在 offer 前 inc (与首次 dispatch 同序)。
             metrics.incInFlightSerializing();
-            ChunkSaveTask relay = new ChunkSaveTask(pending, level, ioBridge, metrics, latencyTracker,
-                    chunkRecoveryQueue, chunkPendingReoffer(level));
-            chunkWorkerQueue.offer(relay);
+            try {
+                ChunkSaveTask relay = new ChunkSaveTask(pending, level, ioBridge, metrics, latencyTracker,
+                        chunkRecoveryQueue, chunkPendingReoffer(level));
+                chunkWorkerQueue.offer(relay);
+            } catch (Throwable t) {
+                // v0.11.0 修复 (C-callback-sync-throw-swallowed): inc 与 offer 之间抛 (ctor / offer, 生产几乎仅
+                // OOM) 则无 task 会 execute 来 dec —— serializing 永久泄漏毒化 drainPending。本层自包补偿: dec 回
+                // 本次 inc, 再向上抛交由调用方 (ChunkSaveTask.safeReoffer) 做 mustDrain 终态配平 + ERROR。
+                metrics.decInFlightSerializing();
+                throw t;
+            }
         };
     }
 
@@ -364,9 +372,16 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
                 return;
             }
             metrics.incInFlightSerializing();
-            EntitySaveTask relay = new EntitySaveTask(pending, entityIoWorker, metrics, stateOwner,
-                    entityPendingReoffer(entityIoWorker, stateOwner));
-            entityWorkerQueue.offer(relay);
+            try {
+                EntitySaveTask relay = new EntitySaveTask(pending, entityIoWorker, metrics, stateOwner,
+                        entityPendingReoffer(entityIoWorker, stateOwner));
+                entityWorkerQueue.offer(relay);
+            } catch (Throwable t) {
+                // v0.11.0 修复 (C-callback-sync-throw-swallowed): 与 chunk sink 对称, inc 与 offer 之间抛则
+                // dec 回本次 inc 再上抛, 交 EntitySaveTask.safeReoffer 做 mustDrain 终态配平 + ERROR。
+                metrics.decInFlightSerializing();
+                throw t;
+            }
         };
     }
 

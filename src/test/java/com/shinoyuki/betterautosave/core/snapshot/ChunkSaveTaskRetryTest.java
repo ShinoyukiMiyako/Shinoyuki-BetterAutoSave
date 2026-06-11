@@ -19,7 +19,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * ChunkSaveTask IO 失败 tag 原地重投单测 (Major 修复 M2).
@@ -178,6 +180,142 @@ class ChunkSaveTaskRetryTest {
         assertEquals(new ChunkPos(3, -5).toLong(), capturedPacked[0],
                 "恢复条目坐标必须是失败 chunk 的 packedPos");
         assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 必须配平归零");
+    }
+
+    /**
+     * C-callback-sync-throw-swallowed: submit 同步抛 (而非 future 异常完成) 必须走与 IO 失败等同的补偿,
+     * 不静默落进被丢弃的 dependent future。第一次 submit 同步抛 -> onIoFailure REQUEUE_DIRTY 重投,
+     * 第二次 submit 成功落地。
+     *
+     * <p>判定标准 (删 submitIo 的 submit-throw 自包 try 必挂): 不补偿则 ioPending gauge 永久 +1
+     * (inc 已发生无 future 可 dec), phase 卡 IO_PENDING, 本断言 inFlightIoPending()==0 与 phase==CLEAN 挂。
+     */
+    @Test
+    void submit_synchronous_throw_is_compensated_and_retried() {
+        ChunkSaveState state = dirtyState();
+        ChunkSnapshot snapshot = prebuiltSnapshot(state);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+        metrics.incInFlightSerializing();
+
+        AtomicInteger submitCount = new AtomicInteger();
+        ChunkSaveTask.IoSubmitter submitter = tag -> {
+            int n = submitCount.incrementAndGet();
+            if (n == 1) {
+                throw new RuntimeException("mailbox teardown NPE surrogate");
+            }
+            return CompletableFuture.completedFuture(null);
+        };
+
+        ChunkSaveTask task = new ChunkSaveTask(snapshot, metrics, null, recoveryQueue, submitter);
+        task.execute();
+
+        assertEquals(2, submitCount.get(),
+                "submit 同步抛必须走 onIoFailure REQUEUE_DIRTY 重投 (第 2 次成功)");
+        assertEquals(ChunkSaveState.Phase.CLEAN, state.phase(),
+                "submit 同步抛补偿后重投成功, phase 回 CLEAN (非卡 IO_PENDING)");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightIoPending(),
+                "submit 同步抛后 ioPending gauge 必须配平归零 (inc 已被自包 catch dec)");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(1L, snap.chunksRetried(), "submit 同步抛计一次 retried");
+    }
+
+    /**
+     * C-callback-sync-throw-swallowed: submit 持续同步抛, 重试耗尽走 FAILED_TERMINAL + 投坐标恢复队列,
+     * 全程 gauge 配平 (回调线程内递归 submitIo 的同步抛也被自包补偿)。
+     *
+     * <p>判定标准: 删自包补偿 -> 每次递归 submitIo 的 inc 漏 dec, ioPending 累积泄漏, 本断言挂。
+     */
+    @Test
+    void persistent_submit_throw_goes_terminal_with_balanced_gauges() {
+        ChunkSaveState state = dirtyState();
+        ChunkSnapshot snapshot = prebuiltSnapshot(state);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+        metrics.incInFlightSerializing();
+
+        AtomicInteger submitCount = new AtomicInteger();
+        ChunkSaveTask.IoSubmitter submitter = tag -> {
+            submitCount.incrementAndGet();
+            throw new RuntimeException("persistent teardown surrogate");
+        };
+
+        ChunkSaveTask task = new ChunkSaveTask(snapshot, metrics, null, recoveryQueue, submitter);
+        task.execute();
+
+        // maxRetries=3 -> 1 首投 + 3 重投 = 4 次 submit 后 FAILED_TERMINAL.
+        assertEquals(4, submitCount.get(), "submit 持续同步抛应 1+3=4 次后走 terminal");
+        assertEquals(ChunkSaveState.Phase.FAILED, state.phase(), "重试耗尽 phase=FAILED");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(1L, snap.chunksFailed(), "terminal 计 chunksFailed 一次");
+        assertEquals(0L, snap.inFlightIoPending(),
+                "递归 submitIo 同步抛的 inc 全部被自包 catch 配平, ioPending 归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(1, recoveryQueue.size(), "terminal 投坐标恢复队列");
+    }
+
+    /**
+     * C-callback-sync-throw-swallowed: REQUEUE_DIRTY 落地接力时 reoffer sink 同步抛, 不得静默丢 pending ——
+     * safeReoffer 必须清 mustDrain + 配平 gauge (serializing 由 sink 自身配平)。
+     *
+     * <p>判定标准 (删 safeReoffer 必挂): 不包 try 则 reoffer 抛冒泡进被丢弃 dependent future,
+     * mustDrain 永真 gauge 泄漏 (本断言 mustDrainPending()==0 与 mustDrain()==false 挂);
+     * 删 sink 自身 inc/offer 配平则 serializing 泄漏。
+     */
+    @Test
+    void reoffer_synchronous_throw_balances_must_drain_and_serializing() {
+        ChunkSaveState state = dirtyState();   // gen=1, inFlightGeneration=1
+        ChunkSnapshot snapshot = prebuiltSnapshot(state);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+        metrics.incInFlightSerializing();
+
+        CompletableFuture<Void> gen1Future = new CompletableFuture<>();
+        java.util.Deque<CompletableFuture<Void>> futures = new java.util.ArrayDeque<>();
+        futures.add(gen1Future);
+        ChunkSaveTask.IoSubmitter submitter = tag -> {
+            CompletableFuture<Void> f = futures.poll();
+            return f != null ? f : CompletableFuture.completedFuture(null);
+        };
+        // reoffer sink 复刻生产: 先 inc serializing, 再抛 (模拟 ctor/offer 同步抛). safeReoffer 应清 mustDrain;
+        // sink 自身负责 dec 回它 inc 的 serializing (这里复刻 SnapshotPipeline sink 的自包 try)。
+        ChunkSaveTask.PendingReoffer throwingReoffer = pending -> {
+            metrics.incInFlightSerializing();
+            try {
+                throw new RuntimeException("relay sink teardown surrogate");
+            } catch (Throwable t) {
+                metrics.decInFlightSerializing();
+                throw t;
+            }
+        };
+
+        ChunkSaveTask task = new ChunkSaveTask(snapshot, metrics, null, recoveryQueue, submitter, throwingReoffer);
+        task.execute();             // gen=1 IO 在飞
+
+        // 碰撞登记 pending(gen=2), 置 mustDrain.
+        state.markDirty();          // gen=2
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        state.registerPendingSnapshot(prebuiltSnapshotGen(state, 2L));
+
+        // gen=1 落地 -> REQUEUE_DIRTY -> 取 pending -> safeReoffer -> sink 抛 -> 补偿.
+        gen1Future.complete(null);
+
+        assertFalse(state.hasPendingSnapshot(), "reoffer 抛后 pending 已 take 走, 槽空 (不残留)");
+        assertFalse(state.mustDrain(), "safeReoffer 必须清 mustDrain (该接力代无法落盘)");
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.mustDrainPending(), "mustDrain gauge 配平归零 (不泄漏)");
+        assertEquals(0L, snap.inFlightSerializing(),
+                "serializing gauge 配平归零 (sink 自身 dec 回 inc)");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+    }
+
+    private ChunkSnapshot prebuiltSnapshotGen(ChunkSaveState state, long generation) {
+        CompoundTag tag = new CompoundTag();
+        tag.putLong("gen", generation);
+        return ChunkSnapshot.ofPrebuiltFullTag(new ChunkPos(3, -5), DIM, tag, generation, state,
+                ConfigSpec.EventCompatMode.FULL);
     }
 
     private static int setMaxRetries(int value) throws Exception {
