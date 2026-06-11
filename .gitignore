@@ -39,3 +39,6 @@ CLAUDE.md
 
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
+
+# 本地协作规范, 永不入库
+AGENTS.md
