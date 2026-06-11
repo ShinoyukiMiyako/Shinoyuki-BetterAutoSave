@@ -54,6 +54,11 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final List<Thread> savedDataWorkerThreads = new ArrayList<>();
 
     private final AtomicBoolean degraded = new AtomicBoolean(false);
+    // v0.10.2 修复 (C-*-unload-collision, 隐角 C): joinWorkers 一旦请求 worker 停机即置位。
+    // 接力重投 sink 据此判定: worker 已停 (关服残窗) 时再 offer 接力 task 会落入无人消费的队列,
+    // 走 ERROR 安全网 (带 dim+坐标) 而非沉默 offer。drainPending 在 join 前会等 inFlight 归零, 正常关服
+    // 接力链已落地, 此分支仅覆盖 drainPending 超时后 + join 后的微秒级迟到回调残窗。
+    private volatile boolean workersStopping;
     // Critical 修复 2: chunk IO 失败后由 worker 线程投递, 主线程 tick drain 还原 unsaved 标志.
     private final ChunkRecoveryQueue chunkRecoveryQueue = new ChunkRecoveryQueue();
     // Minor 修复 4: SavedData 在途文件名去重, 防多 worker 并发写同名 .dat.
@@ -174,11 +179,23 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     /**
      * v0.10.2 修复 (C-chunk-unload-collision): 构造接力快照重投 sink。把 pending 快照包成新 ChunkSaveTask
      * offer 回 chunkWorkerQueue —— assemble 由序列化 worker 做, **不**在调用本 sink 的 IOWorker 邮箱线程内联
-     * (内联会堵全服写盘, 这是已批复的备选案)。inFlightSerializing 的 inc 由调用方 (ChunkSaveTask 回调) 在
-     * reoffer 前做, 与新 task execute 首行的 dec 配平; 新 task 同样持有本 sink, 支持任意深度的接力链 (隐角 A)。
+     * (内联会堵全服写盘, 这是已批复的备选案)。本 sink 自己 inc inFlightSerializing (与新 task execute 首行
+     * dec 配平), 仅在真正 offer 时 inc —— 关服残窗 (workersStopping) 走 ERROR 安全网时不 inc 不 offer。
+     * 新 task 同样持有本 sink, 支持任意深度的接力链 (隐角 A)。
      */
     private ChunkSaveTask.PendingReoffer chunkPendingReoffer(ServerLevel level) {
         return pending -> {
+            // 隐角 C 关服残窗: worker 已请求停机, 再 offer 接力 task 会落入无人消费的队列。走 ERROR 安全网
+            // (带 dim+坐标) 而非沉默 offer。不 inc serializing (没有 task 会 execute 来 dec)。
+            if (workersStopping) {
+                LOGGER.error("[BetterAutoSave] chunk {} dim={} pending relay arrived after workers stopped (shutdown "
+                                + "residual window); its latest-generation increment cannot be flushed by BAS "
+                                + "(vanilla sync flush will recover it only if still loaded)",
+                        pending.pos(), pending.dimension().location());
+                return;
+            }
+            // inc serializing 与新 task execute 首行 dec 配平; 在 offer 前 inc (与首次 dispatch 同序)。
+            metrics.incInFlightSerializing();
             ChunkSaveTask relay = new ChunkSaveTask(pending, level, ioBridge, metrics, latencyTracker,
                     chunkRecoveryQueue, chunkPendingReoffer(level));
             chunkWorkerQueue.offer(relay);
@@ -261,6 +278,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
     public boolean joinWorkers(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
+        // 接力重投 sink 据此判定 worker 已停, 迟到回调走 ERROR 安全网而非沉默 offer 进死队列 (隐角 C)。
+        workersStopping = true;
         for (SerializationWorker w : chunkWorkers) {
             w.requestStop();
         }
@@ -338,11 +357,21 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
      * {@link #chunkPendingReoffer} 对称。把 pending EntitySnapshot 包成新 EntitySaveTask offer 回
      * entityWorkerQueue (assemble 由序列化 worker 做)。entity task 在 mixin 构造 (持有 per-level
      * EntityStorage 的 IOWorker 与 stateOwner), 故由 mixin 调本工厂传入这两者。新 task 同样持有本 sink,
-     * 支持任意深度接力链 (隐角 A)。inFlightSerializing 的 inc 由调用方在 reoffer 前做, 与新 task
-     * execute 首行 dec 配平。
+     * 支持任意深度接力链 (隐角 A)。本 sink 自己 inc inFlightSerializing (仅真正 offer 时), 与新 task
+     * execute 首行 dec 配平; 关服残窗 (workersStopping) 走 ERROR 安全网时不 inc 不 offer。
      */
     public EntitySaveTask.PendingReoffer entityPendingReoffer(IOWorker entityIoWorker, EntitySaveStateAccess stateOwner) {
         return pending -> {
+            // 隐角 C 关服残窗: worker 已停, 再 offer 落入死队列。走 ERROR 安全网 (带 dim+坐标)。entity 已被
+            // vanilla 驱逐出内存, 无 vanilla 兜底可救, 这份最新增量丢失。不 inc serializing 不 offer。
+            if (workersStopping) {
+                LOGGER.error("[BetterAutoSave] entity chunk {} dim={} pending relay arrived after workers stopped "
+                                + "(shutdown residual window); its latest entity increment is lost (entities already "
+                                + "evicted, no vanilla fallback)",
+                        pending.pos(), pending.dimension().location());
+                return;
+            }
+            metrics.incInFlightSerializing();
             EntitySaveTask relay = new EntitySaveTask(pending, entityIoWorker, metrics, stateOwner,
                     entityPendingReoffer(entityIoWorker, stateOwner));
             entityWorkerQueue.offer(relay);

@@ -197,8 +197,8 @@ public final class ChunkSaveTask implements SaveTask {
                 if (pending != null && pendingReoffer != null) {
                     // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
                     // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。
+                    // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
                     state.reenterSerializingForPending(pending.capturedGeneration());
-                    metrics.incInFlightSerializing();
                     pendingReoffer.reoffer(pending);
                 }
                 metrics.recordChunkRetried();

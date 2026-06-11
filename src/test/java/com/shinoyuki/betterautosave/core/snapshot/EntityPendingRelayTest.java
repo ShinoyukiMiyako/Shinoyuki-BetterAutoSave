@@ -105,6 +105,8 @@ class EntityPendingRelayTest {
         };
         EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
         reofferHolder[0] = pending -> {
+            // 复刻生产 reoffer sink: 真正接力前 inc serializing (与 relay execute 首行 dec 配平).
+            metrics.incInFlightSerializing();
             EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, null, reofferHolder[0]);
             relay.execute();
         };
@@ -180,6 +182,8 @@ class EntityPendingRelayTest {
         };
         EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
         reofferHolder[0] = pending -> {
+            // 复刻生产 reoffer sink: 真正接力前 inc serializing (与 relay execute 首行 dec 配平).
+            metrics.incInFlightSerializing();
             EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, null, reofferHolder[0]);
             relay.execute();
         };
@@ -219,5 +223,34 @@ class EntityPendingRelayTest {
         int prev = f.getInt(null);
         f.setInt(null, value);
         return prev;
+    }
+
+    /**
+     * 隐角 C 关服残窗 ERROR 安全网: worker 已停 (joinWorkers 置 workersStopping) 后迟到的接力重投不得
+     * 沉默 offer 进无人消费的死队列, 也不得泄漏 serializing gauge。本测试用真实 SnapshotPipeline 的公开
+     * entityPendingReoffer sink: 先 joinWorkers(0) (无 worker, 仅置位 workersStopping), 再调 sink,
+     * 断言队列保持空 + serializing gauge 不变 (走 ERROR 安全网而非 inc+offer)。
+     *
+     * <p>判定标准: 删 sink 的 workersStopping ERROR 分支 -> sink 改 inc+offer, 队列非空 + gauge=1, 两断言挂。
+     */
+    @Test
+    void relay_after_workers_stopped_takes_error_safety_net_not_silent_offer() {
+        SaveMetrics metrics = new SaveMetrics();
+        // scheduler / ioBridge 传 null: joinWorkers 与 entityPendingReoffer 的 workersStopping 分支都不触碰
+        // 这两个协作者 (SaveScheduler 在单测环境构造会因未初始化 config 抛异常, 同 SnapshotPipelineDegradedTest)。
+        SnapshotPipeline pipeline = new SnapshotPipeline(null, null, metrics);
+
+        // 关服: 无 worker 线程, joinWorkers 仅置 workersStopping=true 并立即返回.
+        pipeline.joinWorkers(0L);
+
+        EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        EntitySnapshot pending = snapshotForGeneration(state, 9L);
+        // 迟到接力: worker 已停, sink 必须走 ERROR 安全网.
+        pipeline.entityPendingReoffer(null, null).reoffer(pending);
+
+        assertEquals(0, pipeline.entityWorkerQueue().size(),
+                "worker 已停后接力不得 offer 进死队列 (走 ERROR 安全网)");
+        assertEquals(0L, metrics.snapshot().inFlightSerializing(),
+                "ERROR 安全网路径不得 inc serializing (无 task 会 dec, 否则泄漏毒化 drainPending)");
     }
 }

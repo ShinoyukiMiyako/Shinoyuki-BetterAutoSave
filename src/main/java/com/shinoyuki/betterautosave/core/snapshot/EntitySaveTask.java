@@ -199,8 +199,8 @@ public final class EntitySaveTask implements SaveTask {
             // reenterSerializingForPending 锁 pending 自己的代 (隐角 A); mustDrain 维持 (REQUEUE_DIRTY 不清)。
             EntitySnapshot pending = state.takePendingSnapshot();
             if (pending != null && pendingReoffer != null) {
+                // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
                 state.reenterSerializingForPending(pending.capturedGeneration());
-                metrics.incInFlightSerializing();
                 pendingReoffer.reoffer(pending);
             }
             metrics.recordEntityRetried();

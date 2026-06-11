@@ -107,6 +107,8 @@ class ChunkPendingRelayTest {
         // fake reoffer: 用同一 submitter 把 pending 包成新 task 并立即 execute (模拟 worker 接力消费).
         ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
         reofferHolder[0] = pending -> {
+            // 复刻生产 reoffer sink: 真正接力前 inc serializing (与 relay execute 首行 dec 配平).
+            metrics.incInFlightSerializing();
             ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
                     submitter, reofferHolder[0]);
             relay.execute();
@@ -172,6 +174,8 @@ class ChunkPendingRelayTest {
         };
         ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
         reofferHolder[0] = pending -> {
+            // 复刻生产 reoffer sink: 真正接力前 inc serializing (与 relay execute 首行 dec 配平).
+            metrics.incInFlightSerializing();
             ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
                     submitter, reofferHolder[0]);
             relay.execute();
@@ -231,6 +235,8 @@ class ChunkPendingRelayTest {
         };
         ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
         reofferHolder[0] = pending -> {
+            // 复刻生产 reoffer sink: 真正接力前 inc serializing (与 relay execute 首行 dec 配平).
+            metrics.incInFlightSerializing();
             ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
                     submitter, reofferHolder[0]);
             relay.execute();
@@ -284,6 +290,8 @@ class ChunkPendingRelayTest {
         };
         ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
         reofferHolder[0] = pending -> {
+            // 复刻生产 reoffer sink: 真正接力前 inc serializing (与 relay execute 首行 dec 配平).
+            metrics.incInFlightSerializing();
             ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
                     submitter, reofferHolder[0]);
             relay.execute();
