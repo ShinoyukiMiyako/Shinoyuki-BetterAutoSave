@@ -217,6 +217,93 @@ class EntityPendingRelayTest {
         assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
     }
 
+    /**
+     * M-unhandled-abandons-pending (entity 侧, 与 chunk 对称): onUnhandledError 撞上非空 pending 必须接力
+     * 重投最新代。entity 侧更严重 (无坐标恢复队列), 漏接力即静默永久丢失。
+     *
+     * <p>判定标准 (删修复必挂): 删 onUnhandledError 的 takePendingSnapshot + reoffer 分支 -> gen=2 未提交,
+     * 接力断言挂; hasPendingSnapshot 残留 true。
+     */
+    @Test
+    void unhandled_error_with_pending_relays_latest_generation() {
+        EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+        assertTrue(state.tryMarkMustDrain());
+
+        // relay IO 用手动 future, 接力后保持在途, 以便在 "relay 在途" 状态点断言不变式.
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        CompletableFuture<Void> relayFuture = new CompletableFuture<>();
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            return relayFuture;
+        };
+        EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, null, reofferHolder[0]);
+            relay.execute();
+        };
+
+        state.markDirty();          // gen=2 (碰撞登记)
+        EntitySnapshot gen2Pending = snapshotForGeneration(state, 2L);
+        state.registerPendingSnapshot(gen2Pending);
+
+        // 在飞 task worker execute 抛非受控异常 -> onUnhandledError. 先 dec 它的 serializing inc.
+        metrics.decInFlightSerializing();
+        EntitySaveTask inFlightTask = new EntitySaveTask(gen1, metrics, submitter, null, reofferHolder[0]);
+        inFlightTask.onUnhandledError(new RuntimeException("assemble boom"));
+
+        // 不变式断言点 (relay 在途): entity 侧旧码同样无条件清 mustDrain 不取 pending; 回退则两断言挂.
+        assertEquals(1, submittedTags.size(), "接力必须提交一次最新代 IO");
+        assertEquals(2L, submittedGeneration(submittedTags.get(0)),
+                "entity onUnhandledError 必须接力把碰撞后最新代 (gen=2) 落盘, 而非静默丢弃");
+        assertTrue(state.mustDrain(),
+                "onUnhandledError 接力 relay 仍在途时 mustDrain 必须维持真 (不变式: 在途 -> mustDrain)");
+        assertFalse(state.hasPendingSnapshot(), "pending 已被接力 take 走, 槽清空");
+
+        relayFuture.complete(null);
+        assertEquals(EntitySaveState.Phase.CLEAN, state.phase(), "接力落地后 phase 回 CLEAN");
+        assertFalse(state.mustDrain(), "接力链落地后 mustDrain 归零");
+        assertFalse(state.hasPendingSnapshot());
+
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+    }
+
+    /**
+     * M-unhandled-abandons-pending 安全网 (entity): 有 pending 但 sink 不可达 (null) 时取走 pending 清槽
+     * + 清 mustDrain + 配平 gauge。
+     */
+    @Test
+    void unhandled_error_with_pending_but_no_sink_clears_slot_and_must_drain() {
+        EntitySaveState state = new EntitySaveState(0L, "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+
+        state.markDirty();
+        state.trySnapshot();
+        state.enterSerializing();
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        state.markDirty();
+        state.registerPendingSnapshot(snapshotForGeneration(state, 2L));
+
+        // pendingReoffer = null (3 参构造).
+        EntitySaveTask task = new EntitySaveTask(gen1, metrics, tag -> CompletableFuture.completedFuture(null));
+        task.onUnhandledError(new RuntimeException("boom"));
+
+        assertFalse(state.hasPendingSnapshot(), "sink 不可达也必须取走 pending 清空槽 (防永久泄漏)");
+        assertFalse(state.mustDrain(), "无接力可投时必须清 mustDrain");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(), "mustDrain gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);

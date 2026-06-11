@@ -320,6 +320,108 @@ class ChunkPendingRelayTest {
         assertFalse(state.hasPendingSnapshot());
     }
 
+    /**
+     * M-unhandled-abandons-pending: onUnhandledError 撞上非空 pending 时必须接力重投最新代, 而非清 mustDrain
+     * 丢弃 pending。复刻: gen=1 IO 在飞 -> 碰撞登记 pending(gen=2) -> 在飞 task 的 worker execute 抛非受控异常
+     * (走 onUnhandledError) -> 接力把 gen=2 落盘。
+     *
+     * <p>判定标准 (删修复必挂): 删 onUnhandledError 的 takePendingSnapshot + reoffer 分支 -> pending 不被接力,
+     * 最终未提交 gen=2, "接力落最新代"断言挂; 且 hasPendingSnapshot 残留 true (槽泄漏)。
+     */
+    @Test
+    void unhandled_error_with_pending_relays_latest_generation() {
+        ChunkSaveState state = new ChunkSaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        ChunkSnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+        // mixin 碰撞分支语义: 在飞期间置 mustDrain.
+        assertTrue(state.tryMarkMustDrain());
+
+        // relay IO 用手动 future, 接力后保持在途 (不完成), 以便在 "relay 在途" 这个状态点断言不变式.
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        CompletableFuture<Void> relayFuture = new CompletableFuture<>();
+        ChunkSaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            return relayFuture;
+        };
+        ChunkSaveTask.PendingReoffer[] reofferHolder = new ChunkSaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            ChunkSaveTask relay = new ChunkSaveTask(pending, metrics, null, recoveryQueue,
+                    submitter, reofferHolder[0]);
+            relay.execute();
+        };
+
+        // 在飞那代登记接力 pending(gen=2).
+        state.markDirty();          // gen=2
+        ChunkSnapshot gen2Pending = snapshotForGeneration(state, 2L);
+        state.registerPendingSnapshot(gen2Pending);
+
+        // 在飞 task 的 worker execute 抛非受控异常 -> 走 onUnhandledError. dec 掉它的 serializing inc
+        // (复刻 execute 同步异常路径的 gauge 复位: assemble 抛会先 dec serializing).
+        metrics.decInFlightSerializing();
+        ChunkSaveTask inFlightTask = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, submitter, reofferHolder[0]);
+        inFlightTask.onUnhandledError(new RuntimeException("assemble boom"));
+
+        // 不变式断言点 (relay 在途, future 未完成): 这是上一轮不变式测试的盲区 —— 它只走 happy 状态机序列,
+        // 从不经 onUnhandledError。旧码 onUnhandledError 无条件清 mustDrain 且不取 pending, 回退到旧码则
+        // 此刻 mustDrain=false (下面第一断言挂) 且 pending 残留非空 (第二断言挂)。
+        assertEquals(1, submittedTags.size(), "接力必须提交一次最新代 IO");
+        assertEquals(2L, submittedTags.get(0).getLong("gen"),
+                "onUnhandledError 必须接力把碰撞后最新代 (gen=2) 落盘, 而非丢弃 pending");
+        assertSame(gen2Pending.preBuiltFullTag(), submittedTags.get(0),
+                "接力提交的是 pending 快照的 tag 实例");
+        assertTrue(state.mustDrain(),
+                "onUnhandledError 接力 relay 仍在途时 mustDrain 必须维持真 (不变式: 在途 -> mustDrain)");
+        assertFalse(state.hasPendingSnapshot(), "pending 已被接力 take 走, 槽清空 (不泄漏)");
+
+        // 完成 relay IO -> CLEAN_LANDED 收口.
+        relayFuture.complete(null);
+        assertEquals(ChunkSaveState.Phase.CLEAN, state.phase(), "接力落地后 phase 回 CLEAN");
+        assertFalse(state.mustDrain(), "接力链落地后 mustDrain 归零");
+        assertFalse(state.hasPendingSnapshot());
+
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+    }
+
+    /**
+     * M-unhandled-abandons-pending 安全网: onUnhandledError 有 pending 但 reoffer sink 不可达 (null) 时,
+     * 必须取走 pending (不泄漏) + 清 mustDrain + 配平 gauge, 走 ERROR 安全网。
+     *
+     * <p>判定标准 (删修复必挂): 删 onUnhandledError 的 takePendingSnapshot -> 槽残留 true, hasPendingSnapshot
+     * 断言挂; 删 mustDrain 清除路径 -> mustDrain 永真, gauge 泄漏。
+     */
+    @Test
+    void unhandled_error_with_pending_but_no_sink_clears_slot_and_must_drain() {
+        ChunkSaveState state = new ChunkSaveState(0L, "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        ChunkRecoveryQueue recoveryQueue = new ChunkRecoveryQueue();
+
+        state.markDirty();
+        state.trySnapshot();
+        state.enterSerializing();
+        ChunkSnapshot gen1 = snapshotForGeneration(state, 1L);
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        state.markDirty();
+        state.registerPendingSnapshot(snapshotForGeneration(state, 2L));
+
+        // pendingReoffer = null (sink 不可达).
+        ChunkSaveTask task = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, tag -> CompletableFuture.completedFuture(null));
+        task.onUnhandledError(new RuntimeException("boom"));
+
+        assertFalse(state.hasPendingSnapshot(), "sink 不可达也必须取走 pending 清空槽 (防永久泄漏)");
+        assertFalse(state.mustDrain(), "无接力可投时必须清 mustDrain");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(), "mustDrain gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);

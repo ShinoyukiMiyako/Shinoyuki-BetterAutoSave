@@ -211,10 +211,30 @@ public final class EntitySaveTask implements SaveTask {
     @Override
     public void onUnhandledError(Throwable cause) {
         EntitySaveState state = snapshot.state();
-        // worker 未捕获异常 (assemble 抛 / 同步抛) 无 tag 可重投, 该轮 async in-flight 到此终结,
-        // 不再有挂在 mustDrain 上的在途任务. 故无论 REQUEUE_DIRTY 还是 FAILED_TERMINAL 都必须无条件
-        // 清 mustDrain, 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join 死等且 gauge 泄漏.
-        // compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec (v0.10.2 修复 M6).
+        LOGGER.error("[BetterAutoSave] entity worker uncaught for {}", taskName(), cause);
+
+        // v0.10.2 修复 (M-unhandled-abandons-pending): 与 ChunkSaveTask 对称, 接力槽前置消费。entity 侧更
+        // 严重 —— 无坐标恢复队列, 实体已被 vanilla 驱逐出内存, 接力槽是最新实体增量 (命名生物/盔甲架/展示框等)
+        // 的唯一副本, 旧逻辑清 mustDrain 不取 pending 则该坐标增量永久静默丢失且无 ERROR。
+        EntitySnapshot pending = state.takePendingSnapshot();
+        if (pending != null && pendingReoffer != null) {
+            // 接力链可达: 重投最新代, mustDrain 维持 (重投仍在途, 关服 join 须继续等)。reoffer sink 自身在
+            // 真正 offer 时 inc serializing, workersStopping 关服残窗走 ERROR 安全网并在那里清 mustDrain+gauge。
+            // 本路径不调 ioFailed —— 该轮 in-flight 由接力 task 接管 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
+            state.reenterSerializingForPending(pending.capturedGeneration());
+            pendingReoffer.reoffer(pending);
+            return;
+        }
+
+        // 无 pending 或 sink 不可达: 走原有安全网。无在途接力任务挂在 mustDrain 上, 故无条件清 mustDrain,
+        // 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join 死等且 gauge 泄漏 (v0.10.2 修复 M6 的 CAS 配平)。
+        if (pending != null) {
+            // sink 为 null (无法重投): entity 无 vanilla 兜底, 该坐标最新实体增量永久丢失, 明示 ERROR 防静默。
+            LOGGER.error("[BetterAutoSave] entity chunk {} dim={} had a pending relay snapshot in onUnhandledError but "
+                            + "no reoffer sink; its latest entity increment is lost (entities already evicted, no "
+                            + "vanilla fallback)",
+                    snapshot.pos(), snapshot.dimension().location());
+        }
         if (state.compareAndClearMustDrain()) {
             metrics.decMustDrainPending();
         }
@@ -225,6 +245,5 @@ public final class EntitySaveTask implements SaveTask {
             // entity 无坐标恢复队列 (实体已离开内存, 坐标恢复无意义); 非终态 unhandled error 仅记数.
             metrics.recordEntityRetried();
         }
-        LOGGER.error("[BetterAutoSave] entity worker uncaught for {}", taskName(), cause);
     }
 }

@@ -213,10 +213,34 @@ public final class ChunkSaveTask implements SaveTask {
     @Override
     public void onUnhandledError(Throwable cause) {
         ChunkSaveState state = snapshot.state();
-        // worker 未捕获异常无 tag 可重投, 该轮 async in-flight 到此终结 (后续靠坐标恢复队列 +
-        // vanilla 兜底, 不再有挂在 mustDrain 上的在途任务). 故无论 ioFailed 返 REQUEUE_DIRTY 还是
-        // FAILED_TERMINAL 都必须无条件清 mustDrain — 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join
-        // 死等且 gauge 泄漏. compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec (v0.10.2 修复 M6).
+        LOGGER.error("[BetterAutoSave] worker uncaught for {}", taskName(), cause);
+
+        // v0.10.2 修复 (M-unhandled-abandons-pending): 接力槽前置消费, 与 whenComplete 终态路径对称。
+        // 接力槽存在的唯一场景就是"在飞碰撞 + 卸载", 此刻 pending 是卸载坐标最新代的唯一副本。旧逻辑
+        // onUnhandledError 无条件清 mustDrain 却不取 pending, 破坏不变式 (pendingSnapshot 非空 -> mustDrain
+        // 恒真): 槽永久泄漏 (AtomicReference 持快照 + NBT/section 副本), 关服 join 不再等这条接力链, 且
+        // chunk 路径接力槽语义前提是已卸载 (vanilla 兜底大概率落空且无 ERROR), entity 路径更是静默永久丢失。
+        ChunkSnapshot pending = state.takePendingSnapshot();
+        if (pending != null && pendingReoffer != null) {
+            // 接力链可达: 把最新代重投, mustDrain 维持 (重投仍在途, 关服 join 必须继续等)。reoffer sink
+            // 自身在真正 offer 时 inc serializing (与 relay execute 首行 dec 配平), workersStopping 关服残窗
+            // 走 ERROR 安全网并在那里清 mustDrain+gauge。本路径不调 ioFailed/enqueueRecovery —— 该轮 in-flight
+            // 由接力 task 接管, 不进 FAILED 也不投坐标恢复队列 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
+            state.reenterSerializingForPending(pending.capturedGeneration());
+            pendingReoffer.reoffer(pending);
+            return;
+        }
+
+        // 无 pending 或 sink 不可达 (单测未注入接力 / 关服后): 走原有安全网。无在途接力任务挂在 mustDrain 上,
+        // 故无条件清 mustDrain — 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join 死等且 gauge 泄漏。
+        // compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec (v0.10.2 修复 M6)。
+        if (pending != null) {
+            // sink 为 null (无法重投): pending 的最新代增量随这次 unhandled 一并丢失, 明示 ERROR 防静默。
+            LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot in onUnhandledError but no "
+                            + "reoffer sink; its latest-generation increment is lost (vanilla sync fallback will "
+                            + "recover it only if still loaded)",
+                    snapshot.pos(), snapshot.dimension().location());
+        }
         if (state.compareAndClearMustDrain()) {
             metrics.decMustDrainPending();
         }
@@ -230,7 +254,6 @@ public final class ChunkSaveTask implements SaveTask {
         } else {
             metrics.recordChunkRetried();
         }
-        LOGGER.error("[BetterAutoSave] worker uncaught for {}", taskName(), cause);
     }
 
     /**
