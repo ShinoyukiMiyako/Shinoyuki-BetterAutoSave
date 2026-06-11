@@ -140,6 +140,15 @@ public final class BetterAutoSaveMod {
             LOGGER.warn("[BetterAutoSave] worker join timed out after {}ms; vanilla synchronous flush will catch remaining writes",
                     elapsed);
         }
+        // drainPending 期间 server 线程阻塞在本 handler 内, tick 不再运行, 这段窗口里
+        // IO 失败投进恢复队列的条目没有 tick 尾去 drain; 不在这里补一次的话 uninstall
+        // 之后 vanilla 最终 flush 按 isUnsaved 过滤会跳过它们 (unsaved 仍是 false),
+        // 失败 chunk 静默丢失. 放在 joinWorkers 之后能连 drain 超时窗口的迟到失败一起捞.
+        int recovered = pipeline.drainChunkRecoveryQueue();
+        if (recovered > 0) {
+            LOGGER.warn("[BetterAutoSave] restored unsaved flag for {} chunk(s) that failed IO during shutdown drain; vanilla flush will retry them",
+                    recovered);
+        }
         BetterAutoSaveCore.uninstall();
     }
 }
