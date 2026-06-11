@@ -3,6 +3,7 @@ package com.shinoyuki.betterautosave.mixin;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
+import com.shinoyuki.betterautosave.core.dispatch.SaveDispatcher;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
@@ -147,9 +148,17 @@ public abstract class ChunkMapSaveMixin {
             // v0.7.1 修复 (M3): capture 抛后 phase 已被 enterSerializing 推到 SERIALIZING,
             // 或 trySnapshot 已推到 SNAPSHOTTING. catch 不复位 phase 会让该 chunk 后续永远走
             // mixin line 104-115 早 return 路径 (phase 非 DIRTY/FAILED), 既不入 BAS worker 也不
-            // 走 vanilla 同步, 数据永久丢失而无 telemetry. resetAfterFallback 把 phase 归零到
-            // CLEAN + 清 retryCount, 配合 vanilla 同步路径接管把状态重置干净.
-            state.resetAfterFallback();
+            // 走 vanilla 同步, 数据永久丢失而无 telemetry.
+            //
+            // v0.10.2 修复 (C1): capture 第一行已 setUnsaved(false). 这里不 cancel cir,
+            // vanilla ChunkMap.save 方法体续跑会撞 isUnsaved 门 (此刻 false) -> 直接 return false
+            // 跳过本次同步序列化 -> 本次数据丢失; 该 chunk 此后不再编辑则 unload 与关服 flush
+            // 同样按 isUnsaved 门跳过, 永久丢失. 只 resetAfterFallback 归零 phase 不够 (vanilla
+            // 重入门看的是 isUnsaved 而非 phase). 改用 recoverAfterDispatchFailure 同时还原
+            // isUnsaved=true, 让续跑的 vanilla 方法体过门 -> 当场同步写盘救回本次数据. 与
+            // SaveDispatcher.onPriorityDrained catch 的修复同源 (v0.10.1 修 SaveDispatcher 时漏了这里).
+            // catch 内已有的 compareAndClearMustDrain 保留: recoverAfterDispatchFailure 不碰 mustDrain, 无重复.
+            SaveDispatcher.recoverAfterDispatchFailure(state, levelChunk::setUnsaved);
             metrics.recordChunkMapSaveFallback();
             LOGGER.error("[BetterAutoSave] ChunkMap.save async dispatch failed for {} dim={}, falling back to vanilla",
                     chunk.getPos(), dimensionId, t);

@@ -149,6 +149,13 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             // v0.7.1 修复 (M3): 同 ChunkMapSaveMixin, capture 抛后 phase 已推到
             // SNAPSHOTTING/SERIALIZING. 不复位会让该 chunk entity 后续永远走早 return
             // 路径既不入 BAS 也不走 vanilla, 数据永久丢失. resetAfterFallback 归零状态机.
+            //
+            // 与 ChunkMapSaveMixin C1 修复的非对称 (勿"补齐"): chunk 路径 catch 额外
+            // setUnsaved(true) 是因为 vanilla ChunkMap.save 续跑时按 isUnsaved 门过滤,
+            // 不还原门就跳过同步写. entity 路径无 isUnsaved 等价门 — storeEntities 续跑
+            // 无条件序列化写盘 (vanilla EntityStorage 不看任何 dirty 标志), resetAfterFallback
+            // 归零 phase 已完整. 这里若多调一次 setUnsaved 既无对象可调 (EntityStorage 非
+            // per-chunk) 也无意义.
             state.resetAfterFallback();
             metrics.recordEntityFallback();
             LOGGER.error("[BetterAutoSave] EntityStorage.storeEntities async dispatch failed for {} dim={}, falling back to vanilla",
