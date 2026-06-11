@@ -5,6 +5,7 @@ import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
+import com.shinoyuki.betterautosave.core.snapshot.FlushHandler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
@@ -47,12 +48,24 @@ public abstract class ChunkMapMixin {
         if (pipeline.isDegraded()) {
             return;
         }
+
+        SaveScheduler scheduler = BetterAutoSaveCore.scheduler();
         if (flush) {
-            pipeline.drainPending(BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L);
+            // Major 修复: 区分关服 flush 与运营中 /save-all flush.
+            // - 关服 (isShutdownMode): 必须同步 drainPending 等 BAS in-flight 落盘,
+            //   再 return 让 vanilla 同步 flush 兜底剩余, 语义要求不能丢.
+            // - 运营中 (!isShutdownMode): drainPending 内 Thread.sleep(50) 循环最多卡主线程
+            //   shutdownTimeoutSeconds 秒 ("Can't keep up" + 玩家卡顿). 不阻塞 — 直接 return
+            //   让 vanilla 自己的同步 flush 处理当前 dirty chunk (有界, 玩家显式 flush 可接受),
+            //   BAS 已 dispatch 的异步任务继续由 worker + tick drain 推进.
+            //   saveAllChunks 返回 void, vanilla 调用方不依赖 BAS 是否 drain 完, 立即 return 安全.
+            FlushHandler.handleFlush(scheduler.isShutdownMode(),
+                    () -> pipeline.drainPending(BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L),
+                    () -> LOGGER.info("[BetterAutoSave] /save-all flush during operation: not blocking main thread; "
+                            + "async saves continue in background (use /betterautosave status to watch progress)"));
             return;
         }
 
-        SaveScheduler scheduler = BetterAutoSaveCore.scheduler();
         if (scheduler.isShutdownMode()) {
             return;
         }
