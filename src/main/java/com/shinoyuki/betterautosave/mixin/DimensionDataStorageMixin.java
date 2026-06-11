@@ -4,6 +4,7 @@ import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
+import com.shinoyuki.betterautosave.core.snapshot.SavedDataDispatch;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataSaveTask;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataSnapshot;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataSyncFallback;
@@ -169,10 +170,13 @@ public abstract class DimensionDataStorageMixin {
             try {
                 SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
                         betterautosave$lastWrittenSize, pipeline.savedDataInFlight());
-                metrics.incInFlightSerializing();
                 metrics.recordSavedDataSubmitted();
-                // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask).
-                pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
+                // v0.10.2 修复 (M5): inc serializing + offer 的 gauge 配平不变式收口到 SavedDataDispatch。
+                // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask); inc 抵消
+                // 责任移交 worker execute 首行 dec。offer 阶段抛异常时 enqueue 内部已先补 dec 再上抛,
+                // 故下面 dispatch catch 不得再碰 serializing (已配平), 仅走同步兜底写。
+                SavedDataDispatch.enqueue(pipeline.savedDataWorkerQueue(),
+                        new SavedDataSaveTask(snapshot, metrics), metrics);
                 // v0.10.2 修复 (M4): SavedData 队列深度入指标. 与 chunk/entity 不同, SavedData
                 // 不走 SaveScheduler 的 tick 节流队列 (无逐 tick drain 回写时机), 只能在 offer
                 // 后即时回写 queue.size() — worker 消费后的回落由下一周期 offer 重新采样.
@@ -183,6 +187,7 @@ public abstract class DimensionDataStorageMixin {
                 // 不消费导致 setDirty 永久丢失).
                 savedData.setDirty(false);
             } catch (Throwable t) {
+                // serializing gauge 已由 SavedDataDispatch.enqueue 在 offer 失败时配平, 此处不再碰。
                 metrics.recordSavedDataFallback();
                 // dispatch 抛, 未成功入 worker, 释放在途占位.
                 pipeline.savedDataInFlight().remove(name);
