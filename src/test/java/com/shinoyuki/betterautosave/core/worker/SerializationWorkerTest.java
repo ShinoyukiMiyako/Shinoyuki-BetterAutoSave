@@ -4,8 +4,8 @@ import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -13,6 +13,52 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SerializationWorkerTest {
+
+    /**
+     * 消费侧队列深度回写单测 (Minor 修复 M7).
+     *
+     * <p>现场: SavedData 深度 gauge 仅在主线程 offer 后写峰值, worker 排空后无回写 (SavedData 不走
+     * SaveScheduler 逐 tick drain 回写时机), gauge 长期停在峰值误导运维。修复: worker 每消费一个 task
+     * 后经注入的 depthSink 回写 queue.size()。
+     *
+     * <p>判定标准: 删掉 run() 内 finally 的 depthSink.accept(queue.size()), drain 完成后 lastDepth
+     * 停在初始峰值而非 0, 归零断言挂。
+     */
+    @Test
+    void depth_sink_writes_back_queue_size_after_each_consume() throws InterruptedException {
+        LinkedBlockingQueue<SaveTask> queue = new LinkedBlockingQueue<>();
+        SaveMetrics metrics = new SaveMetrics();
+        AtomicLong lastDepth = new AtomicLong(-1L);
+        AtomicLong maxDepthSeen = new AtomicLong(-1L);
+
+        // 先把 task 灌满队列再启动 worker, 保证 worker 启动时能观察到 backlog 峰值.
+        AtomicInteger executed = new AtomicInteger();
+        for (int i = 0; i < 6; i++) {
+            queue.offer(new RecordingTask("d-" + i, executed::incrementAndGet));
+        }
+        SerializationWorker worker = new SerializationWorker("depth-1", queue, metrics, depth -> {
+            lastDepth.set(depth);
+            maxDepthSeen.accumulateAndGet(depth, Math::max);
+        });
+        Thread t = new Thread(worker, "depth-1");
+        t.start();
+
+        long deadline = System.currentTimeMillis() + 2000;
+        while (executed.get() < 6 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(6, executed.get(), "全部 task 必须被消费");
+
+        worker.requestStop();
+        t.join(2000);
+
+        // drain 全部完成后最后一次回写必须是 0 (空队列), 而非停在主线程 offer 的峰值.
+        assertEquals(0L, lastDepth.get(),
+                "worker 排空后 depthSink 最后回写必须为 0, 反映真实积压");
+        // 中途必然观察到 >0 的积压 (6 个 task 不可能一启动就全空), 证明回写跟踪了 drain 过程.
+        assertTrue(maxDepthSeen.get() > 0L,
+                "drain 过程中应观察到非 0 积压深度, got " + maxDepthSeen.get());
+    }
 
     @Test
     void worker_executes_tasks_until_stop_request() throws InterruptedException {

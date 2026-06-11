@@ -113,7 +113,11 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             SerializationWorker w = new SerializationWorker(
                     "BetterAutoSave-SavedData-Worker-" + (i + 1),
                     savedDataWorkerQueue,
-                    metrics);
+                    metrics,
+                    // v0.10.2 修复 (M7): SavedData 无 SaveScheduler 逐 tick drain 回写时机, worker
+                    // 消费后回写深度, 消除主线程 offer 峰值长期陈旧. chunk 由 scheduler 回写、entity
+                    // 已无深度指标 (v0.10.2 删死调度链), 故仅 savedData worker 注入回写 sink.
+                    metrics::setSavedDataQueueDepth);
             Thread t = savedDataFactory.newThread(w);
             savedDataWorkers.add(w);
             savedDataWorkerThreads.add(t);

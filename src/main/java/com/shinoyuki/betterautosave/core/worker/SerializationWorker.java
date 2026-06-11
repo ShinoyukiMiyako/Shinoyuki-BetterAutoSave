@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongConsumer;
 
 public final class SerializationWorker implements Runnable {
 
@@ -15,13 +16,23 @@ public final class SerializationWorker implements Runnable {
     private final BlockingQueue<SaveTask> queue;
     private final SaveMetrics metrics;
     private final String name;
+    // v0.10.2 修复 (M7): 消费侧队列深度回写. 主线程 offer 后写的是峰值, worker 排空后不回写则
+    // gauge 长期停在峰值 (尤其 SavedData 无 SaveScheduler 逐 tick drain 回写时机). 每次 execute 后
+    // 调 depthSink.accept(queue.size()) 让深度指标反映真实积压. 默认 no-op (不需要回写的通道).
+    private final LongConsumer depthSink;
     private volatile boolean running = true;
     private volatile boolean drainedAfterStop;
 
     public SerializationWorker(String name, BlockingQueue<SaveTask> queue, SaveMetrics metrics) {
+        this(name, queue, metrics, depth -> {
+        });
+    }
+
+    public SerializationWorker(String name, BlockingQueue<SaveTask> queue, SaveMetrics metrics, LongConsumer depthSink) {
         this.name = name;
         this.queue = queue;
         this.metrics = metrics;
+        this.depthSink = depthSink;
     }
 
     public String name() {
@@ -65,6 +76,10 @@ public final class SerializationWorker implements Runnable {
                     } catch (Throwable inner) {
                         LOGGER.error("[BetterAutoSave] task fallback for {} itself threw", task.taskName(), inner);
                     }
+                } finally {
+                    // v0.10.2 修复 (M7): 无论 execute 成功还是抛, 消费一个 task 后回写当前队列深度,
+                    // 让深度 gauge 反映 drain 后的真实积压而非主线程 offer 时的峰值.
+                    depthSink.accept(queue.size());
                 }
             }
             drainedAfterStop = true;
