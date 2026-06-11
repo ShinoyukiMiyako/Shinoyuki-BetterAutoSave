@@ -16,12 +16,17 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * IO 失败后 vanilla isUnsaved 仍是 false → 三条门全跳过 → 失败 chunk 除非玩家再次编辑
  * 否则永久丢失本次快照, 关服 vanilla flush 同样按 isUnsaved 过滤救不回.
  *
- * <p><b>设计</b>: 失败回调投 (dimensionId, packedPos) 进本队列 (worker 线程安全),
+ * <p><b>v0.10.2 修复 (M2) 后职责收窄</b>: REQUEUE_DIRTY (未超 maxRetries) 已改为在
+ * ChunkSaveTask.submitIo 内用已序列化的 tag 原地重投 IO, 不依赖 chunk 仍加载, 不再经本队列.
+ * 本队列现仅服务两个无 tag 可重投的入口: FAILED_TERMINAL (重试耗尽) 与 onUnhandledError
+ * (assemble 抛 / storeChunk 同步抛, tag 不在回调作用域). 还原 isUnsaved 让 vanilla 同步兜底.
+ *
+ * <p><b>设计</b>: 失败回调投 (dimensionId, packedPos, terminal) 进本队列 (worker 线程安全),
  * 主线程 tick 路径 drain: 按 dim 找已加载 LevelChunk, {@code setUnsaved(true)} 还原
  * vanilla 重入门 (经 ChunkAccessMixin 触发 markDirty 把 phase 推回 DIRTY,
  * CAS(CLEAN->DIRTY) 在 phase 已是 DIRTY 时失败无害). chunk 已 unload 则该数据已由
- * unload 路径处理或确已丢失, log WARN. FAILED_TERMINAL 同样还原 isUnsaved 让 vanilla
- * 同步路径兜底.
+ * unload 路径处理或确已丢失: 非终态 log WARN, 终态 (耗尽 + 卸载, 本次增量确定丢失)
+ * 升级 ERROR 带 dim+坐标.
  *
  * <p><b>不覆盖 entity 路径</b>: entity 重入由 PersistentEntitySectionManager.autoSave()
  * 每周期无条件对非空 chunk 调 storeEntities 驱动, 唯一的重入门是 EntitySaveState.phase
@@ -76,9 +81,18 @@ public final class ChunkRecoveryQueue {
         while ((e = pending.poll()) != null) {
             UnsavedSetter chunk = resolver.resolve(e.dimensionId(), e.packedPos());
             if (chunk == null) {
-                LOGGER.warn("[BetterAutoSave] IO-failed chunk {} dim={} no longer loaded; "
-                                + "recovery skipped (data handled by unload path or already lost)",
-                        e.packedPos(), e.dimensionId());
+                // v0.10.2 修复 (M2): unloaded + terminal 升级到 ERROR 并带 dim+坐标 — 重试已耗尽
+                // 且 chunk 已卸载, 本次增量确定丢失, 不再是可由 unload 路径兜底的轻微情形.
+                // 非终态 unloaded (仅 onUnhandledError 的 REQUEUE_DIRTY 可达) 维持 WARN.
+                if (e.terminal()) {
+                    LOGGER.error("[BetterAutoSave] IO-failed chunk {} dim={} hit terminal retry limit and is no longer loaded; "
+                                    + "this chunk's increment for this cycle is lost",
+                            e.packedPos(), e.dimensionId());
+                } else {
+                    LOGGER.warn("[BetterAutoSave] IO-failed chunk {} dim={} no longer loaded; "
+                                    + "recovery skipped (data handled by unload path or already lost)",
+                            e.packedPos(), e.dimensionId());
+                }
                 continue;
             }
             // setUnsaved(true) 还原 vanilla 重入门; 经 ChunkAccessMixin 触发 markDirty,
