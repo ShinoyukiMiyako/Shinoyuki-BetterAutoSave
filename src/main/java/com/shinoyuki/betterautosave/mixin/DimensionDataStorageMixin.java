@@ -173,6 +173,10 @@ public abstract class DimensionDataStorageMixin {
                 metrics.recordSavedDataSubmitted();
                 // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask).
                 pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
+                // v0.10.2 修复 (M4): SavedData 队列深度入指标. 与 chunk/entity 不同, SavedData
+                // 不走 SaveScheduler 的 tick 节流队列 (无逐 tick drain 回写时机), 只能在 offer
+                // 后即时回写 queue.size() — worker 消费后的回落由下一周期 offer 重新采样.
+                metrics.setSavedDataQueueDepth(pipeline.savedDataWorkerQueue().size());
                 // 乐观清 dirty: 跟 vanilla 行为差异 — vanilla 在 IO 完成后清,
                 // BAS 在 dispatch 时清. 失败时 worker 直接 setDirty(true) (v0.7.1
                 // M9 修复: 不再走 server.execute, 避免关服阶段主线程 task queue 已

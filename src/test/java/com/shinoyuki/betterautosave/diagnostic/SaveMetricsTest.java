@@ -106,6 +106,25 @@ class SaveMetricsTest {
     }
 
     @Test
+    void queue_depth_gauges_are_independent_per_path() {
+        SaveMetrics m = new SaveMetrics();
+        m.setWorkerQueueDepth(11L);
+        m.setEntityQueueDepth(4L);
+        m.setSavedDataQueueDepth(6L);
+
+        SaveMetrics.Snapshot snap = m.snapshot();
+        // 三条队列深度互不串线 (共用 set/get 模板, 易接错 AtomicLong).
+        assertEquals(11, snap.workerQueueDepth());
+        assertEquals(4, snap.entityQueueDepth());
+        assertEquals(6, snap.savedDataQueueDepth());
+
+        // setter 覆盖语义 (绝对值, 非累加): 后写覆盖前值.
+        m.setSavedDataQueueDepth(2L);
+        assertEquals(2, m.snapshot().savedDataQueueDepth());
+        assertEquals(11, m.snapshot().workerQueueDepth());
+    }
+
+    @Test
     void must_drain_pending_gauge_tracks_inc_dec() {
         SaveMetrics m = new SaveMetrics();
         m.incMustDrainPending();

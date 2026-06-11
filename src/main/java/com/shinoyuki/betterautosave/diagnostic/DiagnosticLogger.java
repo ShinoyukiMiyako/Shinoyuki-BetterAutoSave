@@ -77,9 +77,10 @@ public final class DiagnosticLogger {
                     snap.savedDataFailed(),
                     snap.savedDataFallback());
         }
-        LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} entityDepth={}",
+        LOGGER.info("[BetterAutoSave]   |- queue: chunkDepth={} entityDepth={} savedDataDepth={}",
                 snap.workerQueueDepth(),
-                snap.entityQueueDepth());
+                snap.entityQueueDepth(),
+                snap.savedDataQueueDepth());
         LOGGER.info("[BetterAutoSave]   |- inflight: serializing={} ioPending={}",
                 snap.inFlightSerializing(),
                 snap.inFlightIoPending());

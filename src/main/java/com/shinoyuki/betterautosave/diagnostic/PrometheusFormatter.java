@@ -80,6 +80,8 @@ public final class PrometheusFormatter {
                 "Chunk worker queue depth", snap.workerQueueDepth());
         gauge(sb, "bas_entity_queue_depth",
                 "Entity worker queue depth", snap.entityQueueDepth());
+        gauge(sb, "bas_saved_data_queue_depth",
+                "SavedData worker queue depth", snap.savedDataQueueDepth());
         gauge(sb, "bas_in_flight_serializing",
                 "Snapshots currently in SERIALIZING state", snap.inFlightSerializing());
         gauge(sb, "bas_in_flight_io_pending",
