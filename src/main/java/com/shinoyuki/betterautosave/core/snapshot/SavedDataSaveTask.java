@@ -2,9 +2,9 @@ package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
+import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import net.minecraft.nbt.NbtIo;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -52,7 +52,9 @@ public final class SavedDataSaveTask implements SaveTask {
         metrics.incInFlightIoPending();
         long submitNs = System.nanoTime();
         try {
-            NbtIo.writeCompressed(snapshot.preBuiltTag(), snapshot.targetFile());
+            // Minor 修复 4 (b): 原子写 (tmp + fsync + ATOMIC_MOVE) 替代 vanilla 的直接覆盖,
+            // 防写到一半崩溃留截断 .dat 导致下次加载 gzip 解压失败丢数据.
+            AtomicNbtWriter.writeCompressed(snapshot.preBuiltTag(), snapshot.targetFile());
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             metrics.recordSavedDataCompleted();
@@ -72,19 +74,32 @@ public final class SavedDataSaveTask implements SaveTask {
             snapshot.savedData().setDirty();
             LOGGER.error("[BetterAutoSave] SavedData {} write failed, re-marked dirty for next cycle",
                     snapshot.fileName(), e);
+        } finally {
+            // Minor 修复 4 (a): 释放在途文件名占位, 让下个周期可重新 dispatch 该文件.
+            // finally 保证无论成功 / IOException 都释放; 非 IOException 逃到 onUnhandledError
+            // 也另行释放 (该路径 execute 的 finally 已先跑).
+            releaseInFlight();
         }
     }
 
     @Override
     public void onUnhandledError(Throwable cause) {
         // v0.7.1 修复 (C2): execute 第一行已 dec serializing + inc ioPending,
-        // 然后 NbtIo.writeCompressed 抛**非 IOException** (例如 OOM / NPE) 时 try-catch
+        // 然后 AtomicNbtWriter.writeCompressed 抛**非 IOException** (例如 OOM / NPE) 时 try-catch
         // 不接, 异常逃到 worker 走 onUnhandledError. 此时:
         // - serializing 已 dec, 不能再 dec (会变负)
         // - ioPending 已 inc 但 try 内的 dec 路径全没跑到, 必须补 dec
+        // 注意: execute 的 finally 已先于本方法跑, 在途占位已释放; 此处不重复释放
+        // (newKeySet 的 remove 幂等无害, 但语义上占位已归 execute finally 负责).
         metrics.decInFlightIoPending();
         metrics.recordSavedDataFailed();
         snapshot.savedData().setDirty();
         LOGGER.error("[BetterAutoSave] SavedData worker uncaught for {}", taskName(), cause);
+    }
+
+    private void releaseInFlight() {
+        if (snapshot.inFlight() != null) {
+            snapshot.inFlight().remove(snapshot.fileName());
+        }
     }
 }

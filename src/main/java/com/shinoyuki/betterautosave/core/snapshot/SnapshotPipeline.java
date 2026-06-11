@@ -26,7 +26,9 @@ import org.slf4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,6 +54,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final AtomicBoolean degraded = new AtomicBoolean(false);
     // Critical 修复 2: chunk IO 失败后由 worker 线程投递, 主线程 tick drain 还原 unsaved 标志.
     private final ChunkRecoveryQueue chunkRecoveryQueue = new ChunkRecoveryQueue();
+    // Minor 修复 4: SavedData 在途文件名去重, 防多 worker 并发写同名 .dat.
+    // 主线程 mixin 入队前 add, worker task finally remove.
+    private final Set<String> savedDataInFlight = ConcurrentHashMap.newKeySet();
     private volatile MinecraftServer server;
     private volatile ChunkResolutionHook chunkResolution;
     private volatile EntityResolutionHook entityResolution;
@@ -208,6 +213,11 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
     public ChunkRecoveryQueue chunkRecoveryQueue() {
         return chunkRecoveryQueue;
+    }
+
+    /** Minor 修复 4: SavedData 在途文件名去重集合, mixin 入队前 add, task finally remove. */
+    public Set<String> savedDataInFlight() {
+        return savedDataInFlight;
     }
 
     /**

@@ -114,6 +114,14 @@ public abstract class DimensionDataStorageMixin {
             }
             File file = invoker.betterautosave$getDataFile(name);
 
+            // Minor 修复 4 (a): 在途文件名去重. savedDataWorkerThreads 可配 1-4, 同名 .dat
+            // 被多 worker 并发写会交错损坏. 上轮该文件的 worker 还没写完 (in-flight) 就跳过
+            // 本轮 dispatch, 不清 dirty → 下个 autosave 周期自然重试. add 成功才往下走;
+            // 失败 (已在途) continue 且保持 dirty.
+            if (!pipeline.savedDataInFlight().add(name)) {
+                continue;
+            }
+
             // 大文件 fallback: 现存文件已超阈值, 走 vanilla 同步避免 worker queue
             // 被几十 MB 单文件堵死.
             // v0.7.1 修复 (M7): 优先用历史 size (worker 上次写完回写), 兜底再用
@@ -124,6 +132,8 @@ public abstract class DimensionDataStorageMixin {
             if (sizeForGuard > maxBytes) {
                 metrics.recordSavedDataFallback();
                 savedData.save(file);
+                // 同步 fallback 不入 worker, 立即释放在途占位 (否则该文件名永久占位永不再 dispatch).
+                pipeline.savedDataInFlight().remove(name);
                 continue;
             }
 
@@ -144,6 +154,8 @@ public abstract class DimensionDataStorageMixin {
                 NbtUtils.addCurrentDataVersion(tag);
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
+                // mod 序列化抛, 未入 worker, 释放在途占位.
+                pipeline.savedDataInFlight().remove(name);
                 LOGGER.error("[BetterAutoSave] SavedData {} mod serialization threw, skipping this cycle (data still dirty for next cycle)",
                         name, t);
                 continue;
@@ -151,9 +163,10 @@ public abstract class DimensionDataStorageMixin {
 
             try {
                 SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
-                        betterautosave$lastWrittenSize);
+                        betterautosave$lastWrittenSize, pipeline.savedDataInFlight());
                 metrics.incInFlightSerializing();
                 metrics.recordSavedDataSubmitted();
+                // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask).
                 pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
                 // 乐观清 dirty: 跟 vanilla 行为差异 — vanilla 在 IO 完成后清,
                 // BAS 在 dispatch 时清. 失败时 worker 直接 setDirty(true) (v0.7.1
@@ -162,6 +175,8 @@ public abstract class DimensionDataStorageMixin {
                 savedData.setDirty(false);
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
+                // dispatch 抛, 未成功入 worker, 释放在途占位.
+                pipeline.savedDataInFlight().remove(name);
                 LOGGER.error("[BetterAutoSave] SavedData {} dispatch failed, falling back to direct sync write",
                         name, t);
                 // 用已构好的 tag 直接写盘, 不调 savedData.save(file) 避免 mod
