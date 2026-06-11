@@ -4,6 +4,7 @@ import com.mojang.serialization.Codec;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
+import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.ChunkSerializerInvoker;
 import com.shinoyuki.betterautosave.util.ServerThreadAssert;
 import it.unimi.dsi.fastutil.longs.LongSet;
@@ -40,6 +41,8 @@ import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
 import net.minecraft.world.level.lighting.LevelLightEngine;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.level.ChunkDataEvent;
 import org.slf4j.Logger;
 
 import java.util.EnumMap;
@@ -90,6 +93,60 @@ public final class ChunkCaptureProcedure {
             ChunkSaveState state,
             ConfigSpec.EventCompatMode mode) {
         return captureWithGeneration(chunk, level, state, mode, state.generation());
+    }
+
+    /**
+     * 实际把 {@code ChunkDataEvent.Save} 投到事件总线的 seam。生产绑到
+     * {@link MinecraftForge#EVENT_BUS}; 单测注入记录性 dispatcher 验证 tag 选择与派发次数 —— bare JUnit
+     * 下 Forge eventbus 注册 listener 需要事件类无参构造 (ModLauncher 字节码变换才补), 无法直接 post 真
+     * 总线, 故把 post 抽到可注入 seam 而把 mode 守卫/tag 选择留在 {@link #dispatchSaveEvent} 内供测。
+     */
+    @FunctionalInterface
+    public interface SaveEventDispatcher {
+        void post(LevelChunk chunk, ServerLevel level, CompoundTag eventTag);
+    }
+
+    private static volatile SaveEventDispatcher saveEventDispatcher =
+            (chunk, level, eventTag) -> MinecraftForge.EVENT_BUS.post(new ChunkDataEvent.Save(chunk, level, eventTag));
+
+    /** 单测注入记录性 dispatcher; 返回原值供 teardown 还原。仅供测试, 生产代码不调。 */
+    public static SaveEventDispatcher swapSaveEventDispatcher(SaveEventDispatcher dispatcher) {
+        SaveEventDispatcher prev = saveEventDispatcher;
+        saveEventDispatcher = dispatcher;
+        return prev;
+    }
+
+    /**
+     * 在主线程派发 Forge {@code ChunkDataEvent.Save}, 复刻 vanilla 在 {@code ChunkMap.save} 体内注入的
+     * 事件 (Forge 把它注入到 ChunkSerializer.write 之后、IOWorker.store 之前)。常规 dispatch 路径与
+     * pending 接力登记路径共用本入口, 杜绝两处派发逻辑漂移 (C-relay-skips-save-event 修复)。
+     *
+     * <p><b>线程契约</b>: Forge listener 假定在主线程同步执行。两个调用点均在主线程: 常规路径在
+     * {@link SnapshotPipeline#captureAndDispatchChunk} (mixin 拦截 save 在主线程), pending 路径在
+     * {@link com.shinoyuki.betterautosave.mixin.ChunkMapSaveMixin} 碰撞分支 (同样在主线程)。绝不可在
+     * worker / IOWorker 回调线程调本方法。
+     *
+     * <p><b>三档行为</b> (与 capture 的 tag 构建对齐):
+     * PARTIAL 用 preBuiltCoreTag (无 sections), FULL 用 preBuiltFullTag (完整 tag), DISABLED 跳过派发。
+     *
+     * <p><b>异常语义</b>: 派发抛 (第三方 listener 故障) 原样冒泡, 由各调用点的 catch 按其语义降级
+     * (常规路径 -> recoverAfterDispatchFailure 退 vanilla 同步; pending 路径 -> 不登记接力, 退信任在飞旧代)。
+     */
+    public static void dispatchSaveEvent(
+            LevelChunk chunk,
+            ServerLevel level,
+            ChunkSnapshot snapshot,
+            ConfigSpec.EventCompatMode mode,
+            SaveMetrics metrics) {
+        if (mode == ConfigSpec.EventCompatMode.DISABLED) {
+            return;
+        }
+        CompoundTag eventTag = snapshot.preBuiltFullTag() != null
+                ? snapshot.preBuiltFullTag()
+                : snapshot.preBuiltCoreTag();
+        long evT0 = System.nanoTime();
+        saveEventDispatcher.post(chunk, level, eventTag);
+        metrics.recordEventDispatchNs(System.nanoTime() - evT0);
     }
 
     private static ChunkSnapshot captureWithGeneration(

@@ -16,14 +16,11 @@ import com.shinoyuki.betterautosave.core.worker.WorkerThreadFactory;
 import com.shinoyuki.betterautosave.diagnostic.ChunkLatencyTracker;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.util.ServerThreadAssert;
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.storage.IOWorker;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.event.level.ChunkDataEvent;
 import org.slf4j.Logger;
 
 import java.util.ArrayList;
@@ -160,14 +157,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         // PARTIAL  -> 用 preBuiltCoreTag (无 sections), 90%+ 监听 mod 不读 sections 不受影响
         // FULL     -> 用 preBuiltFullTag (vanilla 完整 tag), 100% 兼容但主线程负担与 v0.1 接近
         // DISABLED -> 完全跳过事件; 仅当用户确认无监听 mod 依赖 Save 时启用
-        if (mode != ConfigSpec.EventCompatMode.DISABLED) {
-            CompoundTag eventTag = snapshot.preBuiltFullTag() != null
-                    ? snapshot.preBuiltFullTag()
-                    : snapshot.preBuiltCoreTag();
-            long evT0 = System.nanoTime();
-            MinecraftForge.EVENT_BUS.post(new ChunkDataEvent.Save(chunk, level, eventTag));
-            metrics.recordEventDispatchNs(System.nanoTime() - evT0);
-        }
+        // v0.10.2 修复 (C-relay-skips-save-event): 派发逻辑收口到 ChunkCaptureProcedure.dispatchSaveEvent,
+        // 与 mixin 碰撞分支的 pending 接力派发共用同一入口, 杜绝两处漂移。
+        ChunkCaptureProcedure.dispatchSaveEvent(chunk, level, snapshot, mode, metrics);
 
         ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker, chunkRecoveryQueue,
                 chunkPendingReoffer(level));

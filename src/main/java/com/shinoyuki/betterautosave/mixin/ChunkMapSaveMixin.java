@@ -3,6 +3,7 @@ package com.shinoyuki.betterautosave.mixin;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
+import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.dispatch.SaveDispatcher;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.ChunkCaptureProcedure;
@@ -120,14 +121,26 @@ public abstract class ChunkMapSaveMixin {
             // (隐角 B 最新者胜, 旧 pending 作废), inFlightGeneration 随接力 dispatch 推进。
             if (state.generation() != state.inFlightGeneration()) {
                 try {
+                    ConfigSpec.EventCompatMode mode = BetterAutoSaveConfig.eventCompatMode();
                     ChunkSnapshot pending = ChunkCaptureProcedure.capturePending(
-                            levelChunk, level, state, BetterAutoSaveConfig.eventCompatMode());
+                            levelChunk, level, state, mode);
+                    // v0.10.2 修复 (C-relay-skips-save-event): 接力链落盘的"碰撞后最新代" tag 也必须经过
+                    // Forge ChunkDataEvent.Save listener —— 否则依赖该事件向 tag 写增量的第三方 mod (容量
+                    // 数据 ForgeCaps 之外的监听者) 在最新代 tag 上从未经过其 listener, 增量永久静默丢失。
+                    // 在主线程 (mixin save 拦截在主线程) 用 pending 当代 tag 派发, 满足 Forge listener 线程契约,
+                    // 与常规路径 capture 后即派发同序。必须在 registerPendingSnapshot 之前 —— 见下方 catch。
+                    ChunkCaptureProcedure.dispatchSaveEvent(levelChunk, level, pending, mode, metrics);
                     state.registerPendingSnapshot(pending);
                 } catch (Throwable t) {
-                    // 纯 capture 抛 (mod BE/section 序列化异常等): 不污染在飞 task, 退回信任在飞旧代,
-                    // 与修复前行为等价 (本次最新代增量按旧路径丢失或靠下轮接管), 但记录可见。
-                    LOGGER.error("[BetterAutoSave] pending relay capture failed for in-flight chunk {} dim={}; "
-                                    + "trusting in-flight snapshot (latest-generation increment may be lost)",
+                    // 纯 capture 或 事件派发 抛: 不污染在飞 task, 退回信任在飞旧代, 与修复前行为等价
+                    // (本次最新代增量按旧路径丢失或靠下轮接管), 但记录可见。
+                    //
+                    // 派发抛的 gauge 配平: dispatchSaveEvent 在 registerPendingSnapshot 之前, 此刻 mustDrain
+                    // 已由上方 tryMarkMustDrain 置位但 pending 尚未登记。不登记 pending 则在飞旧代正常落地清
+                    // mustDrain, 不变式 (pendingSnapshot 非空 -> mustDrain 恒真) 不破, 无需额外 compareAndClearMustDrain
+                    // (区别于常规路径 catch: 常规路径已 inc serializing 并 dispatch 了新 task, 此分支两者都未发生)。
+                    LOGGER.error("[BetterAutoSave] pending relay capture or event dispatch failed for in-flight chunk "
+                                    + "{} dim={}; trusting in-flight snapshot (latest-generation increment may be lost)",
                             chunk.getPos(), dimensionId, t);
                 }
             }
