@@ -6,6 +6,7 @@ import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -68,5 +69,43 @@ class SnapshotPipelineDegradedTest {
         pipeline.triggerDegraded();
 
         assertEquals(1, fires.get(), "单向闩锁: 多次 triggerDegraded 只 fire 一次");
+    }
+
+    /**
+     * Major 修复 M2: 恢复队列 drain 必须与 degraded 闸门解耦。降级后存活 worker 与 IOWorker 回调
+     * 仍在 enqueueRecovery, 若 drain 跟随 degraded 停摆则失败 chunk 的 isUnsaved 永不还原, 降级会话
+     * 期间不落盘, 进程被 kill 即静默丢失。本测试断言: 即便 pipeline 已 degraded, 其 ChunkRecoveryQueue
+     * 仍能 drain 并还原 isUnsaved (恢复队列对象不持有 pipeline 引用, 零 degraded 耦合)。
+     *
+     * <p>判定标准: 把恢复 drain 退回 degraded 闸门之后 (即降级时跳过 drain), 降级期投递的恢复条目
+     * 不会被处理, 此处断言 recovered==2 与 resolver 被调用挂。
+     */
+    @Test
+    void recovery_queue_drains_while_degraded() {
+        SnapshotPipeline pipeline = newPipeline();
+        pipeline.triggerDegraded();
+        assertTrue(pipeline.isDegraded(), "前置: pipeline 已降级");
+
+        // 降级会话期间存活 worker / IOWorker 回调投递 IO 失败恢复条目.
+        pipeline.chunkRecoveryQueue().offer("minecraft:overworld", 100L, true);
+        pipeline.chunkRecoveryQueue().offer("minecraft:the_nether", 200L, false);
+
+        AtomicInteger resolved = new AtomicInteger();
+        AtomicBoolean restoredUnsaved = new AtomicBoolean(false);
+        // resolver 复刻主线程 drainChunkRecoveryQueue 行为: 找到已加载 chunk 还原 isUnsaved.
+        int recovered = pipeline.chunkRecoveryQueue().drain((dim, packed) -> {
+            resolved.incrementAndGet();
+            return unsaved -> {
+                if (unsaved) {
+                    restoredUnsaved.set(true);
+                }
+            };
+        });
+
+        assertEquals(2, recovered,
+                "降级态下恢复队列仍须 drain 并还原全部失败 chunk 的 isUnsaved");
+        assertEquals(2, resolved.get(), "两条恢复条目都必须被 resolver 处理");
+        assertTrue(restoredUnsaved.get(), "drain 必须以 setUnsaved(true) 还原 vanilla 重入门");
+        assertEquals(0, pipeline.chunkRecoveryQueue().size(), "drain 后队列清空");
     }
 }
