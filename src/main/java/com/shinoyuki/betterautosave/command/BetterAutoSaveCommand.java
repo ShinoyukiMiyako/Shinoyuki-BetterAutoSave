@@ -6,6 +6,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
+import com.shinoyuki.betterautosave.core.dispatch.SaveDispatcher;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
@@ -266,6 +267,11 @@ public final class BetterAutoSaveCommand {
                     fallback++;
                 }
             } catch (Throwable t) {
+                // 同 SaveDispatcher / ChunkMapSaveMixin 的 M3 修复: capture 抛后 chunk 停在
+                // unsaved=false + phase=SERIALIZING, 不复位则永远走早 return 路径数据丢失.
+                // force-async 跑在命令线程 (server thread), setUnsaved 安全. 复用 SaveDispatcher
+                // 的复位 seam 保持单一来源.
+                SaveDispatcher.recoverAfterDispatchFailure(state, levelChunk::setUnsaved);
                 metrics.recordChunkFailed();
                 errors++;
                 BetterAutoSaveMod.LOGGER.error(

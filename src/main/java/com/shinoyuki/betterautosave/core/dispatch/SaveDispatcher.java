@@ -78,10 +78,42 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
                         pos.x, pos.z, priority.dimensionId());
             }
         } catch (Throwable t) {
+            // capture 第一行 setUnsaved(false) + enterSerializing 已把 chunk 推到
+            // unsaved=false + phase=SERIALIZING. catch 不复位会让该 chunk 永远走
+            // 三条重入门 (isUnsaved gate + 非 DIRTY/FAILED phase) 的早 return 路径,
+            // 既不入 BAS worker 也不走 vanilla 同步, markDirty 的 CAS(CLEAN->DIRTY) 从
+            // SERIALIZING 无法自愈 — 数据永久丢失. 对齐 ChunkMapSaveMixin M3 修复:
+            // resetAfterFallback 归零状态机 + setUnsaved(true) 还原 vanilla 重入门,
+            // 让下一轮 autosave / vanilla 同步路径接管. onPriorityDrained 跑在主线程
+            // (SaveScheduler.onServerTick -> submitChunk -> 本回调), setUnsaved 安全.
+            //
+            // capture 中途若已 markMustDrain (经 mixin tryMarkMustDrain), 这里不配平 gauge:
+            // 本路径的 dispatch 由 SaveDispatcher 直接发起, 未经 mixin 的 mustDrain 标记,
+            // mustDrain 配平责任在 mixin catch (ChunkMapSaveMixin:144), 不在此处.
+            recoverAfterDispatchFailure(state, levelChunk::setUnsaved);
             metrics.recordChunkFailed();
             LOGGER.error("[BetterAutoSave] async dispatch failed for {} dim={}, falling back",
                     pos, priority.dimensionId(), t);
         }
+    }
+
+    /** capture/dispatch 抛后的 chunk 状态恢复: 单参回调抽象出 LevelChunk.setUnsaved 以便单测. */
+    @FunctionalInterface
+    public interface UnsavedSetter {
+        void setUnsaved(boolean unsaved);
+    }
+
+    /**
+     * dispatch 异常后把 chunk 还原成可被任一重入门重新接管的状态.
+     * resetAfterFallback 把状态机从 SERIALIZING/SNAPSHOTTING 归零到 CLEAN,
+     * setUnsaved(true) 还原 vanilla isUnsaved 重入门 (并经 ChunkAccessMixin
+     * 触发 markDirty 把 phase 推回 DIRTY). 两步缺一不可: 只复位 phase 不还原
+     * isUnsaved -> vanilla autosave 仍跳过; 只 setUnsaved 不复位 phase ->
+     * phase 卡在 SERIALIZING, markDirty 的 CAS(CLEAN->DIRTY) 失败, BAS 重入门跳过.
+     */
+    public static void recoverAfterDispatchFailure(ChunkSaveState state, UnsavedSetter chunk) {
+        state.resetAfterFallback();
+        chunk.setUnsaved(true);
     }
 
     private static ServerLevel findLevel(MinecraftServer server, String dimensionId) {
