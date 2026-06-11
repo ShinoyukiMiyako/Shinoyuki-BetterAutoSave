@@ -1,5 +1,6 @@
 package com.shinoyuki.betterautosave.core.dispatch;
 
+import com.shinoyuki.betterautosave.core.snapshot.ChunkRecoveryQueue;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import org.junit.jupiter.api.Test;
 
@@ -40,7 +41,7 @@ class SaveDispatcherRecoveryTest {
 
         AtomicReference<Boolean> setUnsavedArg = new AtomicReference<>(null);
         // fake setter 复刻 ChunkAccessMixin.betterautosave$onSetUnsaved: unsaved=true 时调 markDirty.
-        SaveDispatcher.UnsavedSetter chunk = unsaved -> {
+        ChunkRecoveryQueue.UnsavedSetter chunk = unsaved -> {
             setUnsavedArg.set(unsaved);
             if (unsaved) {
                 state.markDirty();

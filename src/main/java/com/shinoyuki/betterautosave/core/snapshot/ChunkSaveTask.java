@@ -23,14 +23,16 @@ public final class ChunkSaveTask implements SaveTask {
     private final AsyncIoBridge ioBridge;
     private final SaveMetrics metrics;
     private final ChunkLatencyTracker latencyTracker;
+    private final ChunkRecoveryQueue recoveryQueue;
 
     public ChunkSaveTask(ChunkSnapshot snapshot, ServerLevel level, AsyncIoBridge ioBridge, SaveMetrics metrics,
-                         ChunkLatencyTracker latencyTracker) {
+                         ChunkLatencyTracker latencyTracker, ChunkRecoveryQueue recoveryQueue) {
         this.snapshot = snapshot;
         this.level = level;
         this.ioBridge = ioBridge;
         this.metrics = metrics;
         this.latencyTracker = latencyTracker;
+        this.recoveryQueue = recoveryQueue;
     }
 
     @Override
@@ -86,6 +88,10 @@ public final class ChunkSaveTask implements SaveTask {
                 if (wasDraining) {
                     metrics.decMustDrainPending();
                 }
+                // Critical 修复 2: ioFailed 把 phase 置回 DIRTY/FAILED, 但 vanilla isUnsaved
+                // 仍是 capture 时清的 false, 三条重入门全跳过该 chunk → 永久丢失. 投待恢复队列,
+                // 主线程 tick drain 还原 isUnsaved. FAILED_TERMINAL 也投, 让 vanilla 同步兜底.
+                enqueueRecovery(outcome);
                 if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
                     metrics.recordChunkFailed();
                 } else {
@@ -127,11 +133,24 @@ public final class ChunkSaveTask implements SaveTask {
         if (wasDraining) {
             metrics.decMustDrainPending();
         }
+        // Critical 修复 2: 同 whenComplete 错误分支, worker 未捕获异常 (assemble 后 / IO 提交期
+        // 抛非 IOException) 也把 phase 推到 DIRTY/FAILED 但 vanilla isUnsaved 没还原, 必须投恢复队列.
+        enqueueRecovery(outcome);
         if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
             metrics.recordChunkFailed();
         } else {
             metrics.recordChunkRetried();
         }
         LOGGER.error("[BetterAutoSave] worker uncaught for {}", taskName(), cause);
+    }
+
+    /**
+     * IO 失败后投待恢复队列. dimension 取 location().toString() 与三条重入门用的
+     * level.dimension().location().toString() 同口径. CLEAN_LANDED 不会进这里
+     * (仅失败路径调用), REQUEUE_DIRTY/FAILED_TERMINAL 都需还原 isUnsaved.
+     */
+    private void enqueueRecovery(ChunkSaveState.IoOutcome outcome) {
+        boolean terminal = outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL;
+        recoveryQueue.offer(snapshot.dimension().location().toString(), snapshot.pos().toLong(), terminal);
     }
 }

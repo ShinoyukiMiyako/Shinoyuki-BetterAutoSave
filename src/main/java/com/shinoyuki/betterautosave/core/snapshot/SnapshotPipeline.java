@@ -18,6 +18,7 @@ import com.shinoyuki.betterautosave.util.ServerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.level.ChunkDataEvent;
@@ -49,6 +50,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final List<Thread> savedDataWorkerThreads = new ArrayList<>();
 
     private final AtomicBoolean degraded = new AtomicBoolean(false);
+    // Critical 修复 2: chunk IO 失败后由 worker 线程投递, 主线程 tick drain 还原 unsaved 标志.
+    private final ChunkRecoveryQueue chunkRecoveryQueue = new ChunkRecoveryQueue();
     private volatile MinecraftServer server;
     private volatile ChunkResolutionHook chunkResolution;
     private volatile EntityResolutionHook entityResolution;
@@ -155,7 +158,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             metrics.recordEventDispatchNs(System.nanoTime() - evT0);
         }
 
-        ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker);
+        ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker, chunkRecoveryQueue);
         metrics.incInFlightSerializing();
         chunkWorkerQueue.offer(task);
         return true;
@@ -201,6 +204,46 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
     public MinecraftServer server() {
         return server;
+    }
+
+    public ChunkRecoveryQueue chunkRecoveryQueue() {
+        return chunkRecoveryQueue;
+    }
+
+    /**
+     * Critical 修复 2: 主线程 tick 路径调, drain IO 失败待恢复队列.
+     * 对每条记录按 dim 找 ServerLevel -> getChunkNow 拿已加载 chunk -> setUnsaved(true)
+     * 还原 vanilla 重入门. chunk 已 unload 返 null, 由 ChunkRecoveryQueue 内 log WARN.
+     * 必须在主线程调 — getChunkNow / setUnsaved 都非线程安全.
+     *
+     * @return 实际恢复的 chunk 数 (0 表示队列空, 无开销)
+     */
+    public int drainChunkRecoveryQueue() {
+        if (chunkRecoveryQueue.size() == 0) {
+            return 0;
+        }
+        MinecraftServer localServer = server;
+        if (localServer == null) {
+            return 0;
+        }
+        return chunkRecoveryQueue.drain((dimensionId, packedPos) -> {
+            ServerLevel level = null;
+            for (ServerLevel l : localServer.getAllLevels()) {
+                if (l.dimension().location().toString().equals(dimensionId)) {
+                    level = l;
+                    break;
+                }
+            }
+            if (level == null) {
+                return null;
+            }
+            ChunkPos pos = new ChunkPos(packedPos);
+            LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x, pos.z);
+            if (chunk == null) {
+                return null;
+            }
+            return chunk::setUnsaved;
+        });
     }
 
     public boolean joinWorkers(long timeoutMs) {

@@ -38,6 +38,9 @@ public abstract class MinecraftServerMixin {
         int remainingSeconds = remainingTicks / 20;
 
         BetterAutoSaveCore.scheduler().onServerTick(getAverageTickTime(), remainingSeconds);
+        // Critical 修复 2: 主线程 drain IO 失败待恢复队列, 还原失败 chunk 的 vanilla unsaved 标志.
+        // 必须在主线程 (getChunkNow / setUnsaved 非线程安全), 队列空时零开销.
+        BetterAutoSaveCore.pipeline().drainChunkRecoveryQueue();
         DiagnosticLogger diag = BetterAutoSaveCore.diagnosticLogger();
         if (diag != null) {
             diag.onServerTick();

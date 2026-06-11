@@ -2,6 +2,7 @@ package com.shinoyuki.betterautosave.core.dispatch;
 
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
+import com.shinoyuki.betterautosave.core.snapshot.ChunkRecoveryQueue;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveStateAccess;
@@ -97,12 +98,6 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
         }
     }
 
-    /** capture/dispatch 抛后的 chunk 状态恢复: 单参回调抽象出 LevelChunk.setUnsaved 以便单测. */
-    @FunctionalInterface
-    public interface UnsavedSetter {
-        void setUnsaved(boolean unsaved);
-    }
-
     /**
      * dispatch 异常后把 chunk 还原成可被任一重入门重新接管的状态.
      * resetAfterFallback 把状态机从 SERIALIZING/SNAPSHOTTING 归零到 CLEAN,
@@ -110,8 +105,10 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
      * 触发 markDirty 把 phase 推回 DIRTY). 两步缺一不可: 只复位 phase 不还原
      * isUnsaved -> vanilla autosave 仍跳过; 只 setUnsaved 不复位 phase ->
      * phase 卡在 SERIALIZING, markDirty 的 CAS(CLEAN->DIRTY) 失败, BAS 重入门跳过.
+     *
+     * <p>复用 {@link ChunkRecoveryQueue.UnsavedSetter} 抽象 LevelChunk.setUnsaved 以便单测.
      */
-    public static void recoverAfterDispatchFailure(ChunkSaveState state, UnsavedSetter chunk) {
+    public static void recoverAfterDispatchFailure(ChunkSaveState state, ChunkRecoveryQueue.UnsavedSetter chunk) {
         state.resetAfterFallback();
         chunk.setUnsaved(true);
     }
