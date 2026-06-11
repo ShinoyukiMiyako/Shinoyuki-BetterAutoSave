@@ -44,6 +44,10 @@ public final class EntitySaveState {
     private final AtomicInteger retryCount = new AtomicInteger();
     private volatile long inFlightGeneration;
     private final AtomicBoolean mustDrain = new AtomicBoolean();
+    // v0.10.2 修复 (M6): 终态转换 (CLEAN_LANDED / FAILED_TERMINAL) 内部 CAS 清 mustDrain 的结果,
+    // 供 IO 完成回调线程在调完转换后读取以驱动 gauge dec. 仅被同一回调线程写后即读 (whenComplete
+    // 是 per-task 单线程序列), 无跨线程可见性需求, 故普通字段即可.
+    private boolean lastTransitionClearedMustDrain;
 
     public EntitySaveState(long packedPos, String dimensionId, long enqueueSequence) {
         this.packedPos = packedPos;
@@ -107,10 +111,14 @@ public final class EntitySaveState {
         if (generation.get() == inFlightGeneration) {
             phase.set(Phase.CLEAN);
             retryCount.set(0);
-            mustDrain.compareAndSet(true, false);
+            // v0.10.2 修复 (M6): 记录本次 CAS 是否真正清掉 mustDrain, 让调用方据此 dec gauge.
+            // 终态 phase.set 在 CAS 之前完成, mixin 重入门只在 IO_PENDING 等在途 phase 才 inc;
+            // 谁的 CAS 赢得 true->false 谁负责唯一一次 dec, 杜绝拆分读快照漏 dec.
+            lastTransitionClearedMustDrain = mustDrain.compareAndSet(true, false);
             return IoOutcome.CLEAN_LANDED;
         }
         phase.set(Phase.DIRTY);
+        lastTransitionClearedMustDrain = false;
         return IoOutcome.REQUEUE_DIRTY;
     }
 
@@ -118,11 +126,21 @@ public final class EntitySaveState {
         int n = retryCount.incrementAndGet();
         if (n > maxRetries) {
             phase.set(Phase.FAILED);
-            mustDrain.compareAndSet(true, false);
+            lastTransitionClearedMustDrain = mustDrain.compareAndSet(true, false);
             return IoOutcome.FAILED_TERMINAL;
         }
         phase.set(Phase.DIRTY);
+        lastTransitionClearedMustDrain = false;
         return IoOutcome.REQUEUE_DIRTY;
+    }
+
+    /**
+     * v0.10.2 修复 (M6): 返回上一次终态转换 (ioCompletedSuccessfully / ioFailed) 内部 CAS
+     * 是否真正把 mustDrain 由 true 清成 false. IO 完成回调据此决定是否 dec mustDrainPending gauge,
+     * 保证 boolean 清零与 gauge dec 是同一次 CAS 的原子结果. 仅由同一回调线程在调完转换后立即读取.
+     */
+    public boolean lastTransitionClearedMustDrain() {
+        return lastTransitionClearedMustDrain;
     }
 
     public void resetAfterFallback() {

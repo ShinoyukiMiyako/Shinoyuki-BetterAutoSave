@@ -131,16 +131,12 @@ public final class ChunkSaveTask implements SaveTask {
             if (error != null) {
                 LOGGER.error("[BetterAutoSave] IO store failed for chunk {} dim={}",
                         snapshot.pos(), snapshot.dimension().location(), error);
-                // mustDrain gauge 配平: 必须在 ioFailed 前读, 因 ioFailed 在 FAILED_TERMINAL
-                // 内部会 mustDrain.compareAndSet(true,false), 之后再 compareAndClear 必返 false 漏 dec.
-                // 此刻 phase=IO_PENDING, mixin 的 tryMarkMustDrain 只在 DIRTY/CLEAN 重入门触发,
-                // 与本回调互斥, mustDrain 读无并发竞争.
-                boolean wasDraining = state.mustDrain();
                 ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
                 if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
-                    // 重试耗尽: ioFailed 内部已清 mustDrain AtomicBoolean, 这里仅配平 gauge,
+                    // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
+                    // 杜绝"先读快照 wasDraining 再内部静默 clear"拆分被并发 inc 抢跑漏 dec (v0.10.2 修复 M6).
                     // 还原 isUnsaved 让 vanilla 同步兜底.
-                    if (wasDraining) {
+                    if (state.lastTransitionClearedMustDrain()) {
                         metrics.decMustDrainPending();
                     }
                     enqueueRecovery(outcome);
@@ -153,12 +149,11 @@ public final class ChunkSaveTask implements SaveTask {
                 submitIo(state, tag);
                 return;
             }
-            // 成功回调: 终态 (CLEAN_LANDED 或 stale REQUEUE_DIRTY) 都终结本轮 in-flight, 用
-            // compareAndClearMustDrain 原子清 boolean + 配平 gauge (与历史行为一致). CLEAN_LANDED 时
-            // ioCompletedSuccessfully 内部也会 compareAndSet(true,false), 这里先于它调保证 gauge 不漏.
-            boolean wasDraining = state.compareAndClearMustDrain();
+            // 成功回调: 终态 (CLEAN_LANDED 或 stale REQUEUE_DIRTY) 都终结本轮 in-flight.
+            // CLEAN_LANDED 时 ioCompletedSuccessfully 内部 CAS 清 mustDrain boolean, 用其返回值配平 gauge
+            // (v0.10.2 修复 M6: 单一 CAS 既清 boolean 又驱动 dec, 无读快照拆分缝隙).
             ChunkSaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
-            if (wasDraining) {
+            if (state.lastTransitionClearedMustDrain()) {
                 metrics.decMustDrainPending();
             }
             if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
@@ -178,11 +173,14 @@ public final class ChunkSaveTask implements SaveTask {
     @Override
     public void onUnhandledError(Throwable cause) {
         ChunkSaveState state = snapshot.state();
-        boolean wasDraining = state.compareAndClearMustDrain();
-        ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
-        if (wasDraining) {
+        // worker 未捕获异常无 tag 可重投, 该轮 async in-flight 到此终结 (后续靠坐标恢复队列 +
+        // vanilla 兜底, 不再有挂在 mustDrain 上的在途任务). 故无论 ioFailed 返 REQUEUE_DIRTY 还是
+        // FAILED_TERMINAL 都必须无条件清 mustDrain — 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join
+        // 死等且 gauge 泄漏. compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec (v0.10.2 修复 M6).
+        if (state.compareAndClearMustDrain()) {
             metrics.decMustDrainPending();
         }
+        ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
         // worker 未捕获异常 (assemble 后 / IO 提交期抛非 IOException) 把 phase 推到 DIRTY/FAILED,
         // 但 tag 此刻不在 onUnhandledError 作用域内 (assemble 抛则根本没 tag, storeChunk 同步抛则
         // tag 在 execute 局部), 无法在此重投. 仍投坐标恢复队列还原 isUnsaved 让 vanilla 兜底.
