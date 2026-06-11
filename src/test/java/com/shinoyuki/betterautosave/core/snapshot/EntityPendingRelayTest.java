@@ -454,24 +454,21 @@ class EntityPendingRelayTest {
         assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
     }
 
-    private static int setMaxRetries(int value) throws Exception {
-        Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
-        f.setAccessible(true);
-        int prev = f.getInt(null);
-        f.setInt(null, value);
-        return prev;
-    }
-
     /**
      * 隐角 C 关服残窗 ERROR 安全网: worker 已停 (joinWorkers 置 workersStopping) 后迟到的接力重投不得
      * 沉默 offer 进无人消费的死队列, 也不得泄漏 serializing gauge。本测试用真实 SnapshotPipeline 的公开
      * entityPendingReoffer sink: 先 joinWorkers(0) (无 worker, 仅置位 workersStopping), 再调 sink,
      * 断言队列保持空 + serializing gauge 不变 (走 ERROR 安全网而非 inc+offer)。
      *
-     * <p>判定标准: 删 sink 的 workersStopping ERROR 分支 -> sink 改 inc+offer, 队列非空 + gauge=1, 两断言挂。
+     * <p>v0.11.0 修复 (m-workersStopping-doc-mismatch): 补 mustDrain 维度 —— 复刻碰撞登记 (state markMustDrain
+     * + gauge inc), 断言迟到接力走 ERROR 安全网时真正清 mustDrain + 配平 gauge (实现向注释看齐, 不留孤儿
+     * 正偏移)。这正是旧"注释谎言"能存活的盲区 (原用例只断言 queue 空 + serializing, 从不触 mustDrain)。
+     *
+     * <p>判定标准: 删 sink 的 workersStopping ERROR 分支 -> sink 改 inc+offer, 队列非空 + serializing gauge=1
+     * 挂; 删 sink 内新加的 compareAndClearMustDrain -> mustDrain()==false 与 mustDrainPending()==0 挂。
      */
     @Test
-    void relay_after_workers_stopped_takes_error_safety_net_not_silent_offer() {
+    void relay_after_workers_stopped_takes_error_safety_net_and_clears_must_drain() {
         SaveMetrics metrics = new SaveMetrics();
         // scheduler / ioBridge 传 null: joinWorkers 与 entityPendingReoffer 的 workersStopping 分支都不触碰
         // 这两个协作者 (SaveScheduler 在单测环境构造会因未初始化 config 抛异常, 同 SnapshotPipelineDegradedTest)。
@@ -482,12 +479,60 @@ class EntityPendingRelayTest {
 
         EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
         EntitySnapshot pending = snapshotForGeneration(state, 9L);
-        // 迟到接力: worker 已停, sink 必须走 ERROR 安全网.
+        // 复刻碰撞登记: mixin 在飞碰撞分支置 mustDrain + inc gauge (槽非空 -> mustDrain 不变式).
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        assertEquals(1L, metrics.snapshot().mustDrainPending());
+
+        // 迟到接力: worker 已停, sink 必须走 ERROR 安全网 + 清 mustDrain.
         pipeline.entityPendingReoffer(null, null).reoffer(pending);
 
         assertEquals(0, pipeline.entityWorkerQueue().size(),
                 "worker 已停后接力不得 offer 进死队列 (走 ERROR 安全网)");
         assertEquals(0L, metrics.snapshot().inFlightSerializing(),
                 "ERROR 安全网路径不得 inc serializing (无 task 会 dec, 否则泄漏毒化 drainPending)");
+        assertFalse(state.mustDrain(),
+                "关服残窗放弃接力时必须清 mustDrain (该接力是唯一会把 mustDrain 带向终态的路径)");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(),
+                "mustDrain gauge 必须配平归零 (不留孤儿正偏移毒化诊断/Prometheus)");
+    }
+
+    /**
+     * m-workersStopping-doc-mismatch (chunk 对称): chunk 接力 sink 的 workersStopping 残窗同样真正清
+     * mustDrain + 配平 gauge。chunk 路径需 ServerLevel 才能构 task, 但 workersStopping 分支在构 task 之前
+     * 早返回, 故 level 传 null 不触发 NPE (与 entity 对称用例同技法)。
+     *
+     * <p>判定标准: 删 chunk sink 的 compareAndClearMustDrain -> mustDrain()==false 与 mustDrainPending()==0 挂。
+     */
+    @Test
+    void chunk_relay_after_workers_stopped_clears_must_drain() {
+        SaveMetrics metrics = new SaveMetrics();
+        SnapshotPipeline pipeline = new SnapshotPipeline(null, null, metrics);
+        pipeline.joinWorkers(0L);
+
+        com.shinoyuki.betterautosave.core.state.ChunkSaveState state =
+                new com.shinoyuki.betterautosave.core.state.ChunkSaveState(
+                        new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        CompoundTag tag = new CompoundTag();
+        tag.putLong("gen", 9L);
+        ChunkSnapshot pending = ChunkSnapshot.ofPrebuiltFullTag(new ChunkPos(3, -5), DIM, tag, 9L, state,
+                com.shinoyuki.betterautosave.config.ConfigSpec.EventCompatMode.FULL);
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+
+        pipeline.chunkPendingReoffer(null).reoffer(pending);
+
+        assertEquals(0, pipeline.chunkWorkerQueue().size(), "worker 已停后 chunk 接力不得 offer 进死队列");
+        assertEquals(0L, metrics.snapshot().inFlightSerializing(), "ERROR 安全网不得 inc serializing");
+        assertFalse(state.mustDrain(), "chunk 关服残窗放弃接力必须清 mustDrain");
+        assertEquals(0L, metrics.snapshot().mustDrainPending(), "chunk mustDrain gauge 配平归零");
+    }
+
+    private static int setMaxRetries(int value) throws Exception {
+        Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
+        f.setAccessible(true);
+        int prev = f.getInt(null);
+        f.setInt(null, value);
+        return prev;
     }
 }

@@ -172,14 +172,25 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
      * v0.10.2 修复 (C-chunk-unload-collision): 构造接力快照重投 sink。把 pending 快照包成新 ChunkSaveTask
      * offer 回 chunkWorkerQueue —— assemble 由序列化 worker 做, **不**在调用本 sink 的 IOWorker 邮箱线程内联
      * (内联会堵全服写盘, 这是已批复的备选案)。本 sink 自己 inc inFlightSerializing (与新 task execute 首行
-     * dec 配平), 仅在真正 offer 时 inc —— 关服残窗 (workersStopping) 走 ERROR 安全网时不 inc 不 offer。
-     * 新 task 同样持有本 sink, 支持任意深度的接力链 (隐角 A)。
+     * dec 配平), 仅在真正 offer 时 inc —— 关服残窗 (workersStopping) 走 ERROR 安全网时不 inc 不 offer, 并清
+     * mustDrain+gauge 防孤儿正偏移泄漏。新 task 同样持有本 sink, 支持任意深度的接力链 (隐角 A)。
      */
-    private ChunkSaveTask.PendingReoffer chunkPendingReoffer(ServerLevel level) {
+    // 包级可见 (而非 private): 让同包 EntityPendingRelayTest 直接验证 chunk sink 的 workersStopping
+    // 残窗 mustDrain 配平 (与公开的 entityPendingReoffer 对称), 无需额外 test-only 转发方法。
+    ChunkSaveTask.PendingReoffer chunkPendingReoffer(ServerLevel level) {
         return pending -> {
             // 隐角 C 关服残窗: worker 已请求停机, 再 offer 接力 task 会落入无人消费的队列。走 ERROR 安全网
             // (带 dim+坐标) 而非沉默 offer。不 inc serializing (没有 task 会 execute 来 dec)。
             if (workersStopping) {
+                // v0.11.0 修复 (m-workersStopping-doc-mismatch): 实现向注释看齐, 真正清 mustDrain + 配平 gauge。
+                // 这条接力被放弃 (无 task 会 offer/execute), 它是唯一会把 mustDrain 带向终态的路径; 不清则
+                // mustDrain boolean=true + gauge=1 成无主孤儿永久正偏移 —— DiagnosticLogger 空闲门失效 /
+                // drain-unload 误报超时 / Prometheus 失真 (正是 M6 立项要消灭的泄漏)。compareAndClearMustDrain
+                // 单 CAS 幂等, 与可能并发的同 state 终态回调互斥 (谁赢谁唯一 dec)。数据丢失已由本分支 ERROR 上报,
+                // 清 mustDrain 不掩盖异常。
+                if (pending.state().compareAndClearMustDrain()) {
+                    metrics.decMustDrainPending();
+                }
                 LOGGER.error("[BetterAutoSave] chunk {} dim={} pending relay arrived after workers stopped (shutdown "
                                 + "residual window); its latest-generation increment cannot be flushed by BAS "
                                 + "(vanilla sync flush will recover it only if still loaded)",
@@ -358,13 +369,21 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
      * entityWorkerQueue (assemble 由序列化 worker 做)。entity task 在 mixin 构造 (持有 per-level
      * EntityStorage 的 IOWorker 与 stateOwner), 故由 mixin 调本工厂传入这两者。新 task 同样持有本 sink,
      * 支持任意深度接力链 (隐角 A)。本 sink 自己 inc inFlightSerializing (仅真正 offer 时), 与新 task
-     * execute 首行 dec 配平; 关服残窗 (workersStopping) 走 ERROR 安全网时不 inc 不 offer。
+     * execute 首行 dec 配平; 关服残窗 (workersStopping) 走 ERROR 安全网时不 inc 不 offer, 并清 mustDrain+gauge
+     * 防孤儿正偏移泄漏。
      */
     public EntitySaveTask.PendingReoffer entityPendingReoffer(IOWorker entityIoWorker, EntitySaveStateAccess stateOwner) {
         return pending -> {
             // 隐角 C 关服残窗: worker 已停, 再 offer 落入死队列。走 ERROR 安全网 (带 dim+坐标)。entity 已被
             // vanilla 驱逐出内存, 无 vanilla 兜底可救, 这份最新增量丢失。不 inc serializing 不 offer。
             if (workersStopping) {
+                // v0.11.0 修复 (m-workersStopping-doc-mismatch): 与 chunk sink 对称, 实现向注释看齐真正清
+                // mustDrain + 配平 gauge。这条接力被放弃, 是唯一会把 mustDrain 带向终态的路径; 不清则 boolean=true
+                // + gauge=1 成无主孤儿永久正偏移 (毒化 DiagnosticLogger / drain-unload / Prometheus)。
+                // compareAndClearMustDrain 单 CAS 幂等; 数据丢失已由本分支 ERROR 上报, 清 mustDrain 不掩盖异常。
+                if (pending.state().compareAndClearMustDrain()) {
+                    metrics.decMustDrainPending();
+                }
                 LOGGER.error("[BetterAutoSave] entity chunk {} dim={} pending relay arrived after workers stopped "
                                 + "(shutdown residual window); its latest entity increment is lost (entities already "
                                 + "evicted, no vanilla fallback)",
