@@ -55,10 +55,11 @@ import java.util.concurrent.atomic.AtomicReference;
  * 主线程   publishPendingSnapshot            PREPARING->READY; 同周期 missed 或 TERMINAL_HANDED 则返 snapshot 主线程自踢 (A6)
  * 主线程   abortPendingSnapshot              dispatch 抛: PREPARING->EMPTY 撤销, 恒取回非 null
  * 主线程   reenterSerializingForPending      接力前锁 inFlightGeneration=pending 代 + 新 inFlightCycleSeq, phase=SERIALIZING
- * 回调     ioCompletedSuccessfully           land: generation==inFlightGeneration ? CLEAN_LANDED(清 drainOwner) : REQUEUE_DIRTY
+ * 回调     landAndTake                       land+take 单 CAS (A5 根治): land 判 CLEAN/REQUEUE + 同一 CAS 取 READY 接力 / 标本周期 missedCycle
+ * 回调     ioCompletedSuccessfully           land only (不并 take, 供 entity-parity 单测/降级直驱): CLEAN_LANDED(清 drainOwner) / REQUEUE_DIRTY
  * 回调     ioFailed                          land: 超 maxRetries ? FAILED_TERMINAL(清 drainOwner) : REQUEUE_DIRTY
- * 回调     takeReadyPendingSnapshot          REQUEUE_DIRTY 接力: READY 取走 / PREPARING|EMPTY 标 missedCycle 离开
- * 回调     takeReadyForTerminalConsumer      终态死亡: READY 消费 / PREPARING|EMPTY 标 missedCycle+TERMINAL_HANDED 交还主线程 (A3/A6)
+ * 回调     takeReadyPendingSnapshot          REQUEUE_DIRTY 接力 (拆分入口): READY 取走 / PREPARING|EMPTY 标本周期 missedCycle 离开
+ * 回调     takeReadyForTerminalConsumer      终态死亡: READY 消费 / PREPARING 标 missedCycle+拨 TERMINAL_HANDED 交还 / EMPTY 仅标 missedCycle (A3/A6)
  * 关服     drainSlot                         关服终局任意态全清 -> NONE + drainOwner 配平 (主线程已不再 publish 才安全)
  * </pre>
  *
@@ -72,12 +73,14 @@ import java.util.concurrent.atomic.AtomicReference;
  *       drainSlot 仅关服终局保留 (主线程已不再 publish)。</li>
  *   <li>A4 跨周期 stale missed: missedCycle 携带周期序号, beginPendingSnapshot 校验 missedCycle==inFlightCycleSeq
  *       才继承, stale (旧周期) 自动丢弃。不依赖时序清理。</li>
- *   <li>A5 DIRTY 发布竞速: missedCycle 绑周期序号 —— 即便回调在 land(DIRTY) 与 take 之间被切走、主线程在窗口内
- *       开新周期、回调随后才在 EMPTY 上写 missed, 那个 missed 带的是旧周期序号; 新周期 begin 校验不等丢弃,
- *       publish 不提前自踢, inFlightGeneration 不被误覆盖, 在飞回调不误判 CLEAN_LANDED。</li>
- *   <li>A6 begin 前终态: takeReadyForTerminalConsumer 的 EMPTY 分支对称标 missedCycle + drainOwner=TERMINAL_HANDED;
- *       主线程 begin 继承之, publish 见 TERMINAL_HANDED 不发 READY 孤儿, 改返 snapshot 主线程自踢; drainOwner
- *       不变式保证 mustDrain 不会在槽即将非空时被清成 NONE。</li>
+ *   <li>A5 DIRTY 发布竞速: 双防线 —— (1) {@link #landAndTake} 把 land(置 DIRTY) 与 take(标 missedCycle) 合并单
+ *       CAS, 消除 "land 已见但 take 未发生" 的窗口本体, 故 missed 必带 land 周期序号 (主线程开新周期是在 missed
+ *       写定之后); (2) 即便残留任何 stale missed, 它带旧周期序号, 新周期 begin/publish 校验不等丢弃, 不提前自踢、
+ *       inFlightGeneration 不被误覆盖、在飞回调不误判 CLEAN_LANDED。</li>
+ *   <li>A6 begin 前终态: takeReadyForTerminalConsumer 的 EMPTY 分支对称标 missedCycle (本周期序号), 主线程 begin
+ *       同周期继承之并发现 drainOwner 被 ioFailed 清空而重新获取 IN_FLIGHT (返 true 让调用方补 inc gauge),
+ *       publish 见同周期 missed 自踢不发 READY 孤儿; PREPARING 分支额外拨 drainOwner=TERMINAL_HANDED (第二个
+ *       publish 自踢触发点)。drainOwner 不变式保证 mustDrain 不会在槽即将非空时被清成 NONE。</li>
  *   <li>A7 周期序号复用 (本设计自找的新边缘): inFlightCycleSeq 用全局单调递增 {@link AtomicLong}, 每次 begin/reenter
  *       都 incrementAndGet, 与内容代彻底解耦 —— 内容代会因接力 reenter 复用 pending 旧代, 周期序号永不复用,
  *       故 "两个不同周期偶然同号" 不可能, missedCycle 的同周期判据单调可靠。</li>
@@ -117,7 +120,8 @@ public final class ChunkSaveState {
         IN_FLIGHT,
         /** 接力链在途持有 drain, 由接力 task 的终态清 (落最新代后)。 */
         RELAY,
-        /** 终态消费者路过 PREPARING/EMPTY 把 drain 交还主线程, 由主线程自踢的接力链终态清 (A6)。 */
+        /** 终态消费者路过 PREPARING 把 drain 交还主线程, 由主线程自踢的接力链终态清 (A6/A3)。EMPTY 窗口不拨此值
+         *  (那里 ioFailed 已清 drainOwner, 由随后的 begin 重新获取 IN_FLIGHT, 见 takeReadyForTerminalConsumer)。 */
         TERMINAL_HANDED
     }
 
