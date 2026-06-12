@@ -263,14 +263,16 @@ public final class ChunkSaveTask implements SaveTask {
      * v0.11.0 修复 (C-callback-sync-throw-swallowed): IO 成功落地的统一处置, 从原 whenComplete 成功分支抽出。
      */
     private void onIoSuccess(ChunkSaveState state, CompoundTag tag) {
-        // 终态 (CLEAN_LANDED 或 stale REQUEUE_DIRTY) 都终结本轮 in-flight.
-        // CLEAN_LANDED 时 ioCompletedSuccessfully 内部 CAS 清 mustDrain boolean, 用其返回值配平 gauge
-        // (v0.10.2 修复 M6: 单一 CAS 既清 boolean 又驱动 dec, 无读快照拆分缝隙).
-        ChunkSaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
+        // v0.11.0 REDESIGN (A5 根治): land (置 phase) 与 take (取 READY 接力 / 标 missed) 合并成 landAndTake
+        // 单 CAS 线性化点, 消除旧两步 (ioCompletedSuccessfully + takeReadyPendingSnapshot) 之间的窗口本体 ——
+        // 主线程绝不会再观测到 "已 land DIRTY 但 take 未发生" 的中间态, 故 stale missed 不会被误标成新周期序号。
+        // CLEAN_LANDED 时 landAndTake 内部 CAS 清 drainOwner, 用 lastTransitionClearedMustDrain 配平 gauge
+        // (单一 CAS 既清 drainOwner 又驱动 dec, 无读快照拆分缝隙).
+        ChunkSaveState.LandResult land = state.landAndTake();
         if (state.lastTransitionClearedMustDrain()) {
             metrics.decMustDrainPending();
         }
-        if (outcome == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
+        if (land.outcome() == ChunkSaveState.IoOutcome.CLEAN_LANDED) {
             metrics.recordChunkCompleted();
         } else {
             // 落盘成功但 chunk 期间 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 region file
@@ -278,11 +280,11 @@ public final class ChunkSaveTask implements SaveTask {
             // v0.10.2 修复 (C-chunk-unload-collision): 优先用接力快照接力 —— 若 mixin 碰撞分支登记过
             // pending (该 chunk 在飞期间被编辑且卸载), 取出它重投, 把最新内存代落盘, 不依赖 chunk 是否
             // 仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已 setUnsaved(true), 下轮 mixin 接管。
-            // v0.11.0 修复 (C-dispatch-register-toctou 终局): 只消费 READY 槽 —— takeReadyPendingSnapshot 见
-            // PREPARING (dispatch 仍在跑, tag 未就绪) 时不取走而标 consumerMissed 返 null, 把补踢交还主线程
-            // (publish 时自踢)。这关死"在飞回调取走 listener 仍在改写的未就绪 tag"门 (第八轮 Critical)。
-            // 返 null 时若槽仍非空 (PREPARING-missed), mustDrain 由主线程自踢的接力链终态清, 此处不碰。
-            ChunkSnapshot pending = state.takeReadyPendingSnapshot();
+            // landAndTake 只取 READY 槽 (relayPending 非 null 仅当槽 READY); 见 PREPARING (dispatch 仍在跑,
+            // tag 未就绪) 时不取走而原子标 missedCycle (在同一 land CAS 里), 把补踢交还主线程 (publish 时自踢)。
+            // 这关死"在飞回调取走 listener 仍在改写的未就绪 tag"门 (A2)。relayPending 为 null 时若槽仍非空
+            // (PREPARING-missed), mustDrain 由主线程自踢的接力链终态清, 此处不碰。
+            ChunkSnapshot pending = land.relayPending();
             if (pending != null && pendingReoffer != null) {
                 // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
                 // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。

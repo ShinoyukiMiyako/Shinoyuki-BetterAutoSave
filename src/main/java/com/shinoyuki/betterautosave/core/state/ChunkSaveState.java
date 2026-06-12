@@ -344,6 +344,82 @@ public final class ChunkSaveState {
         return outcome;
     }
 
+    /**
+     * IO 成功落地 + 接力槽处置, <b>合并成单个 CAS 线性化点</b> (A5 根治)。这是把旧的两步 {@code ioCompletedSuccessfully()}
+     * (land: 置 phase=DIRTY/CLEAN) + {@code takeReadyPendingSnapshot()} (take: 取 READY 或标 missed) 收口进一次 CAS。
+     *
+     * <p><b>为何必须合并 (A5 的根本)</b>: 两步分离时, 回调在 land 置 phase=DIRTY 之后、take 之前可能被 OS 切走;
+     * 主线程在此窗口看到 phase=DIRTY 开新周期 (enterSerializing 把 inFlightCycleSeq 推到新周期); 随后回调的 take
+     * 读到的 inFlightCycleSeq 已是<b>新周期</b>的, 把 stale missed 误标成新周期序号 -> 新周期 begin 校验同周期通过
+     * 继承 -> 提前自踢 / 误判 CLEAN_LANDED (这正是第十轮 A5)。合并后 land 与 take 在同一 CAS 原子发生: 主线程看到
+     * phase=DIRTY 时 take 必已完成 (missed 已用<b>本周期</b> inFlightCycleSeq 标好), 主线程随后 enterSerializing 推
+     * cycleSeq 是在 missed 写定<b>之后</b>, 那个 missed 带的是旧周期序号, 新周期 begin 校验不等丢弃。窗口本体消失。
+     *
+     * <p><b>三态处置 (REQUEUE_DIRTY 时)</b>: READY 取走返回 (回调 reoffer); PREPARING 标 missedCycle=本周期 不取走
+     * (交还主线程 publish 自踢); NONE 标 missedCycle=本周期 (供主线程随后 begin 同周期继承)。CLEAN_LANDED 不碰槽
+     * (蕴含无碰撞编辑, 不应有 pending), 清 drainOwner。
+     *
+     * @return land 的判定 + REQUEUE_DIRTY 时取走的 READY 接力 (CLEAN_LANDED 或非 READY 时 relayPending 为 null)
+     */
+    public LandResult landAndTake() {
+        SlotWord cur;
+        SlotWord next;
+        IoOutcome outcome;
+        ChunkSnapshot relayPending;
+        do {
+            cur = word.get();
+            relayPending = null;
+            if (generation.get() == cur.inFlightGeneration) {
+                retryCount.set(0);
+                next = cur.withPhase(Phase.CLEAN).withDrainOwner(DrainOwner.NONE);
+                outcome = IoOutcome.CLEAN_LANDED;
+            } else {
+                outcome = IoOutcome.REQUEUE_DIRTY;
+                switch (cur.pendingKind) {
+                    case READY -> {
+                        relayPending = cur.pendingSnapshot;
+                        next = cur.withPhase(Phase.DIRTY)
+                                .withPending(PendingKind.NONE, null, 0L, NO_MISSED, cur.drainOwner);
+                    }
+                    case PREPARING -> {
+                        // 标本周期 (land 时刻的 inFlightCycleSeq) missed: A5 根治 —— land 与标 missed 同一 CAS,
+                        // 故 missed 必带 land 周期, 主线程随后开新周期推 cycleSeq 是在此之后, 不会漂移到新周期。
+                        next = cur.withPhase(Phase.DIRTY)
+                                .withPending(PendingKind.PREPARING, cur.pendingSnapshot, cur.pendingEpoch,
+                                        cur.inFlightCycleSeq, cur.drainOwner);
+                    }
+                    case NONE -> {
+                        next = cur.withPhase(Phase.DIRTY)
+                                .withPending(PendingKind.NONE, null, 0L, cur.inFlightCycleSeq, cur.drainOwner);
+                    }
+                    default -> throw new IllegalStateException("unreachable pending kind: " + cur.pendingKind);
+                }
+            }
+            lastTransitionClearedDrain = outcome == IoOutcome.CLEAN_LANDED && cur.drainOwner != DrainOwner.NONE;
+        } while (!word.compareAndSet(cur, next));
+        return new LandResult(outcome, relayPending);
+    }
+
+    /** {@link #landAndTake} 的原子结果: land 判定 + REQUEUE_DIRTY 时取走的 READY 接力 (否则 null)。 */
+    public static final class LandResult {
+        private final IoOutcome outcome;
+        private final ChunkSnapshot relayPending;
+
+        private LandResult(IoOutcome outcome, ChunkSnapshot relayPending) {
+            this.outcome = outcome;
+            this.relayPending = relayPending;
+        }
+
+        public IoOutcome outcome() {
+            return outcome;
+        }
+
+        /** 仅 REQUEUE_DIRTY 且槽为 READY 时非 null (取走的就绪接力)。 */
+        public ChunkSnapshot relayPending() {
+            return relayPending;
+        }
+    }
+
     public IoOutcome ioFailed(int maxRetries) {
         int n = retryCount.incrementAndGet();
         SlotWord cur;
