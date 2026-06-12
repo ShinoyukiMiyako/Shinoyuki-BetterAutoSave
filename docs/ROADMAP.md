@@ -458,7 +458,7 @@ scrape_configs:
 
 ### BAS 兼容性矩阵 (代码核对)
 
-BAS mixin 拦截点 (见 [shinoyuki_betterautosave.mixins.json](src/main/resources/shinoyuki_betterautosave.mixins.json)):
+BAS mixin 拦截点 (见 [shinoyuki_betterautosave.mixins.json](../src/main/resources/shinoyuki_betterautosave.mixins.json)):
 - `ChunkMap.saveAllChunks(boolean)` HEAD
 - `ChunkMap.save(ChunkAccess)` HEAD
 - `EntityStorage.storeEntities(ChunkEntities)` HEAD
