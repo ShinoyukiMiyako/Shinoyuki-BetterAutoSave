@@ -189,7 +189,10 @@ public final class ChunkSaveTask implements SaveTask {
             // 增量随这次彻底失败一并丢失。在飞 task 已死, 无法再接力。取走清空防泄漏并明示 ERROR ——
             // 对仍加载的 chunk, 下面 enqueueRecovery 还原 isUnsaved 让 vanilla 同步重写最新内存救回;
             // 已卸载的, ChunkRecoveryQueue.drain 的 terminal+unloaded 分支再升级 ERROR (带 dim+坐标)。
-            if (state.takePendingSnapshot() != null) {
+            // v0.11.0 修复 (C-dispatch-register-toctou 终局): 用 drainPendingSnapshot 全清 (含 PREPARING) ——
+            // 本 state 已终态死亡, 连主线程仍在 dispatch 的 PREPARING 也一并夺走; 主线程随后 publish 在 EMPTY
+            // 上空转不自踢, 不残留孤儿。这与"消费 READY"语义不同: 终态不接力, 只清账 + 记丢失。
+            if (state.drainPendingSnapshot() != null) {
                 LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot when IO hit terminal "
                                 + "retry limit; its latest-generation increment may be lost (vanilla sync fallback "
                                 + "will recover it only if still loaded)",
@@ -224,7 +227,11 @@ public final class ChunkSaveTask implements SaveTask {
             // v0.10.2 修复 (C-chunk-unload-collision): 优先用接力快照接力 —— 若 mixin 碰撞分支登记过
             // pending (该 chunk 在飞期间被编辑且卸载), 取出它重投, 把最新内存代落盘, 不依赖 chunk 是否
             // 仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已 setUnsaved(true), 下轮 mixin 接管。
-            ChunkSnapshot pending = state.takePendingSnapshot();
+            // v0.11.0 修复 (C-dispatch-register-toctou 终局): 只消费 READY 槽 —— takeReadyPendingSnapshot 见
+            // PREPARING (dispatch 仍在跑, tag 未就绪) 时不取走而标 consumerMissed 返 null, 把补踢交还主线程
+            // (publish 时自踢)。这关死"在飞回调取走 listener 仍在改写的未就绪 tag"门 (第八轮 Critical)。
+            // 返 null 时若槽仍非空 (PREPARING-missed), mustDrain 由主线程自踢的接力链终态清, 此处不碰。
+            ChunkSnapshot pending = state.takeReadyPendingSnapshot();
             if (pending != null && pendingReoffer != null) {
                 // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
                 // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。
@@ -242,8 +249,8 @@ public final class ChunkSaveTask implements SaveTask {
 
     /**
      * v0.11.0 修复 (C-callback-sync-throw-swallowed): 接力重投的安全包装。reoffer sink 同步抛 (生产几乎仅
-     * teardown-NPE / OOM) 时不得静默丢 pending —— 此刻 pending 已被 takePendingSnapshot 取走 (getAndSet),
-     * 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
+     * teardown-NPE / OOM) 时不得静默丢 pending —— 此刻 pending 已被 takeReadyPendingSnapshot / drainPendingSnapshot
+     * 取走, 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
      *
      * <p><b>补偿</b>: serializing gauge 由 sink 自身在 inc 与 offer 之间自包 try 配平 (见
      * {@link SnapshotPipeline} 的 reoffer sink, 抛前 dec 回); 本层只负责 mustDrain 终态配平 + ERROR ——
@@ -273,7 +280,11 @@ public final class ChunkSaveTask implements SaveTask {
         // onUnhandledError 无条件清 mustDrain 却不取 pending, 破坏不变式 (pendingSnapshot 非空 -> mustDrain
         // 恒真): 槽永久泄漏 (AtomicReference 持快照 + NBT/section 副本), 关服 join 不再等这条接力链, 且
         // chunk 路径接力槽语义前提是已卸载 (vanilla 兜底大概率落空且无 ERROR), entity 路径更是静默永久丢失。
-        ChunkSnapshot pending = state.takePendingSnapshot();
+        // v0.11.0 修复 (C-dispatch-register-toctou 终局): 用 drainPendingSnapshot 全清 (含 PREPARING) ——
+        // 在飞 task 此刻死亡, 是该坐标接力的自然消费者, 连主线程仍在 dispatch 的 PREPARING 也一并夺走接力,
+        // 主线程随后 publish 在 EMPTY 上空转不重复自踢。不走 takeReadyPendingSnapshot (它会把 PREPARING 留给
+        // 主线程), 因为本 task 立即接管重投比交还更直接, 且与 FAILED_TERMINAL 全清语义一致。
+        ChunkSnapshot pending = state.drainPendingSnapshot();
         if (pending != null && pendingReoffer != null) {
             // 接力链可达: 把最新代重投, mustDrain 维持 (重投仍在途, 关服 join 必须继续等)。reoffer sink
             // 自身在真正 offer 时 inc serializing (与 relay execute 首行 dec 配平), workersStopping 关服残窗

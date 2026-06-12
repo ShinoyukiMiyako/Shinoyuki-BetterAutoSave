@@ -213,6 +213,30 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         };
     }
 
+    /**
+     * v0.11.0 修复 (C-dispatch-register-toctou 终局): 主线程在 publishPendingSnapshot 检测到"回调已路过 PREPARING"
+     * (consumerMissed) 时的自我补踢入口。那个路过的回调是本代在飞 IO 的唯一消费者, 走后不再来, 故补踢责任落到
+     * 主线程 —— 主线程是合法 offer 方 (与 dispatch 同线程), 不像 worker 阻塞那样有死锁面。
+     *
+     * <p>语义与 {@link ChunkSaveTask} 回调侧的 REQUEUE_DIRTY 接力一致: 先把 inFlightGeneration 锁到 pending 自己
+     * 的代 (隐角 A), 再经 {@link #chunkPendingReoffer} sink reoffer。sink 同步抛 (生产几乎仅 teardown-NPE / OOM)
+     * 时不得静默丢 pending: serializing 由 sink 自身 inc/offer 间自包 try 配平 (抛前 dec 回), 本层只负责 mustDrain
+     * 终态配平 + ERROR (该接力代无法落盘, 与 ChunkSaveTask.safeReoffer 同构)。
+     */
+    public void reofferChunkPendingFromMainThread(ServerLevel level, ChunkSaveState state, ChunkSnapshot pending) {
+        state.reenterSerializingForPending(pending.capturedGeneration());
+        try {
+            chunkPendingReoffer(level).reoffer(pending);
+        } catch (Throwable t) {
+            if (state.compareAndClearMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+            LOGGER.error("[BetterAutoSave] main-thread pending relay reoffer threw for chunk {} dim={}; its "
+                            + "latest-generation increment is lost (no in-flight task left to retry it)",
+                    pending.pos(), pending.dimension().location(), t);
+        }
+    }
+
     @Override
     public void submitChunk(ChunkSavePriority priority) {
         ChunkResolutionHook hook = chunkResolution;

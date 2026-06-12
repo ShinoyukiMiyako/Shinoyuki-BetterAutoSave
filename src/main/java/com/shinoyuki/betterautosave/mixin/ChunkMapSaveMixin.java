@@ -139,12 +139,20 @@ public abstract class ChunkMapSaveMixin {
                     pending = null;
                 }
                 if (pending != null) {
-                    // v0.11.0 修复 (C-dispatch-register-toctou): 必须先 registerPendingSnapshot 再 dispatchSaveEvent。
-                    // dispatchSaveEvent 同步跑第三方 Forge ChunkDataEvent.Save listener (耗时无上界), 而在飞那代 IO 在
-                    // 并发的 IOWorker 线程落地、其 whenComplete 在该窗口内判 REQUEUE_DIRTY 并 takePendingSnapshot —— 若
-                    // 登记晚于派发, 该 take 取到空槽 (lost wakeup), 之后登记的 pending 成无人消费的孤儿, 最新代增量永久
-                    // 静默丢失 + mustDrain gauge 永久泄漏。登记在派发之前则 IO 回调任何时刻都能取到接力快照。
-                    state.registerPendingSnapshot(pending);
+                    // v0.11.0 修复 (C-dispatch-register-toctou 终局, 第八轮 Critical): 槽位三态协议 begin -> dispatch
+                    // -> publish, 取代第七轮的 register -> dispatch 裸双步。
+                    //
+                    // 第七轮把 registerPendingSnapshot 前置于 dispatchSaveEvent 是为关 lost-wakeup, 但它把"已登记"
+                    // 等同于"可消费": dispatchSaveEvent 同步跑第三方 Forge listener (耗时无上界) 期间, 在飞那代 IO 在
+                    // 并发 IOWorker 线程落地判 REQUEUE_DIRTY, 会把这份 listener 仍在原地改写的**未就绪可变 tag** 取走
+                    // reoffer 给序列化 worker assemble —— 三线程无栅栏共享同一 CompoundTag 的 HashMap, 静默数据损坏。
+                    //
+                    // 状态机拆"已登记"与"可消费"两个正交维度: beginPendingSnapshot 挂 PREPARING (回调能发现关
+                    // lost-wakeup, 但 PREPARING 不可消费, 回调只标 consumerMissed 离开关未就绪暴露); dispatch 跑完
+                    // (listener 改写完成) 才 publishPendingSnapshot 发布 READY 让回调消费。若 dispatch 期间回调路过
+                    // (publish 返回非 null), 补踢责任落到主线程自己 (合法 offer 方, 不引入 worker 阻塞)。
+                    state.beginPendingSnapshot(pending);
+                    boolean dispatchThrew = false;
                     try {
                         // v0.10.2 修复 (C-relay-skips-save-event): 接力链落盘的"碰撞后最新代" tag 也必须经过 Forge
                         // ChunkDataEvent.Save listener —— 否则依赖该事件向 tag 写增量的第三方 mod (容量数据 ForgeCaps
@@ -152,21 +160,28 @@ public abstract class ChunkMapSaveMixin {
                         // 主线程) 用 pending 当代 tag 派发, 满足 Forge listener 线程契约, 与常规路径 capture 后即派发同序。
                         ChunkCaptureProcedure.dispatchSaveEvent(levelChunk, level, pending, mode, metrics);
                     } catch (Throwable t) {
-                        // v0.11.0 修复 (C-dispatch-register-toctou) 的撤销补偿: 登记已先于派发完成, 故派发抛时接力槽里
-                        // 可能仍挂着这份 pending, 也可能已被在飞 IO 回调的 REQUEUE_DIRTY 分支取走并重投。takePendingSnapshot
-                        // 的 getAndSet 与那个回调的 take 天然去重, 据返回值分流:
-                        //   取回非 null = 接力尚未被消费, 由本次派发失败"自我撤销"。撤销后净效果等价于"从未登记 pending":
-                        //     在飞旧代落地必判 REQUEUE_DIRTY 永不清 mustDrain, 槽已空回调取 null 不重投 -> 此后无路径清
-                        //     mustDrain, 故必须在此 compareAndClearMustDrain 亲自配平 gauge。退回信任在飞旧代, 记录可见。
-                        //   取回 null = 接力已被在飞回调消费并重投, 成功在途。不得当作失败: 不降级、不报错、不碰 mustDrain
-                        //     (重投仍在途, 由接力链终态 CAS 清)。
-                        if (state.takePendingSnapshot() != null) {
+                        // dispatch 抛 (第三方 listener 故障): abortPendingSnapshot 把 PREPARING 撤销归 EMPTY。回调在
+                        // PREPARING 期间从不消费 (只标 missed), 故槽必仍 PREPARING, 撤销恒取回非 null。撤销后净效果等价
+                        // "从未登记": 在飞旧代落地判 REQUEUE_DIRTY 永不清 mustDrain, 槽空回调取 null 不重投 -> 此后无路径
+                        // 清 mustDrain, 故必须在此 compareAndClearMustDrain 亲自配平 gauge。退回信任在飞旧代, 记录可见。
+                        dispatchThrew = true;
+                        if (state.abortPendingSnapshot() != null) {
                             if (state.compareAndClearMustDrain()) {
                                 metrics.decMustDrainPending();
                             }
                             LOGGER.error("[BetterAutoSave] pending relay event dispatch failed for in-flight chunk "
                                             + "{} dim={}; trusting in-flight snapshot (latest-generation increment may be lost)",
                                     chunk.getPos(), dimensionId, t);
+                        }
+                    }
+                    if (!dispatchThrew) {
+                        // dispatch 成功: 发布消费权 PREPARING -> READY。publish 返回非 null 表示 dispatch 期间有回调
+                        // 路过 PREPARING (标了 consumerMissed) 后离开未消费 —— 那个回调是本代在飞 IO 的唯一消费者,
+                        // 走后不再来, 补踢责任归主线程: 自己 reenterSerializing + reoffer 把就绪的 pending 接力落盘。
+                        // 返回 null 表示已发布 READY, 等在飞回调消费, 主线程无需补踢。
+                        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+                        if (toReoffer != null) {
+                            pipeline.reofferChunkPendingFromMainThread(level, state, toReoffer);
                         }
                     }
                 }

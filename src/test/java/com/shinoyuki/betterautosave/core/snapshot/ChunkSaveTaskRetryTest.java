@@ -297,7 +297,7 @@ class ChunkSaveTaskRetryTest {
         state.markDirty();          // gen=2
         assertTrue(state.tryMarkMustDrain());
         metrics.incMustDrainPending();
-        state.registerPendingSnapshot(prebuiltSnapshotGen(state, 2L));
+        state.registerReadyPendingSnapshot(prebuiltSnapshotGen(state, 2L));
 
         // gen=1 落地 -> REQUEUE_DIRTY -> 取 pending -> safeReoffer -> sink 抛 -> 补偿.
         gen1Future.complete(null);

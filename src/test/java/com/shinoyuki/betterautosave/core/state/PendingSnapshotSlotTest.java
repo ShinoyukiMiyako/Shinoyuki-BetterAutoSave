@@ -61,17 +61,18 @@ class PendingSnapshotSlotTest {
         ChunkSaveState state = new ChunkSaveState(0L, "minecraft:overworld", 1L);
         assertFalse(state.hasPendingSnapshot(), "初始无 pending");
 
+        // registerReadyPendingSnapshot = 无 dispatch 窗口的原子就绪登记 (READY 态), 复刻覆盖语义最新者胜。
         ChunkSnapshot genA = chunkSnapshot(state, 5L);
-        state.registerPendingSnapshot(genA);
+        state.registerReadyPendingSnapshot(genA);
         assertTrue(state.hasPendingSnapshot());
 
         // 槽已占用再登记 -> 直接替换, 旧 pending 作废 (它是更新 pending 的真子集).
         ChunkSnapshot genB = chunkSnapshot(state, 7L);
-        state.registerPendingSnapshot(genB);
+        state.registerReadyPendingSnapshot(genB);
 
-        ChunkSnapshot taken = state.takePendingSnapshot();
-        assertSame(genB, taken, "takePendingSnapshot 必须返回最新登记的那份 (最新者胜)");
-        assertNull(state.takePendingSnapshot(), "取走后槽必须清空");
+        ChunkSnapshot taken = state.takeReadyPendingSnapshot();
+        assertSame(genB, taken, "takeReadyPendingSnapshot 必须返回最新登记的那份 (最新者胜)");
+        assertNull(state.takeReadyPendingSnapshot(), "取走后槽必须清空");
         assertFalse(state.hasPendingSnapshot());
     }
 
@@ -148,16 +149,16 @@ class PendingSnapshotSlotTest {
         assertTrue(state.tryMarkMustDrain());
         assertInvariant(state, "首次在途 IO");
 
-        // 2) 碰撞: 主线程 markDirty 推 gen, mustDrain 已置, 登记接力快照.
+        // 2) 碰撞: 主线程 markDirty 推 gen, mustDrain 已置, 登记接力快照 (无 dispatch 窗口的就绪登记 = READY).
         state.markDirty();
-        state.registerPendingSnapshot(chunkSnapshot(state, state.generation()));
+        state.registerReadyPendingSnapshot(chunkSnapshot(state, state.generation()));
         assertInvariant(state, "碰撞登记 pending 后 (在途 IO + pending 双非空)");
 
         // 3) 在飞那代落地 REQUEUE_DIRTY: 不清 mustDrain. 回调取 pending 重投.
         ChunkSaveState.IoOutcome landed = state.ioCompletedSuccessfully();
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, landed);
         assertFalse(state.lastTransitionClearedMustDrain(), "REQUEUE_DIRTY 不得清 mustDrain");
-        ChunkSnapshot pending = state.takePendingSnapshot();
+        ChunkSnapshot pending = state.takeReadyPendingSnapshot();
         assertInvariant(state, "取走 pending 但即将重投 (phase 仍 DIRTY, 但 mustDrain 维持)");
 
         // 4) 接力重投: reenter 锁 pending 代 + ioPending. mustDrain 维持.
@@ -211,7 +212,7 @@ class PendingSnapshotSlotTest {
         if (state.tryMarkMustDrain()) {
             gauge.incrementAndGet();
         }
-        state.registerPendingSnapshot(chunkSnapshot(state, state.generation()));
+        state.registerReadyPendingSnapshot(chunkSnapshot(state, state.generation()));
         assertEquals(1L, gauge.get(), "碰撞登记不得重复 inc gauge");
 
         // 在飞落地 REQUEUE_DIRTY: 不 dec. 接力重投.
@@ -220,7 +221,7 @@ class PendingSnapshotSlotTest {
             gauge.decrementAndGet();
         }
         assertEquals(1L, gauge.get(), "REQUEUE_DIRTY 不得 dec gauge");
-        ChunkSnapshot pending = state.takePendingSnapshot();
+        ChunkSnapshot pending = state.takeReadyPendingSnapshot();
         state.reenterSerializingForPending(pending.capturedGeneration());
         state.enterIoPending();
 

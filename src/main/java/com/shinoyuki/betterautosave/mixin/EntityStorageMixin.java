@@ -129,6 +129,13 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             state.markDirty();
             try {
                 EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
+                // v0.11.0 协议非对称 (勿"对齐" chunk 路径的 PREPARING/READY 状态机): entity 路径在 capturePending
+                // 之后**没有 dispatchSaveEvent** —— Forge 无 entity save 事件, 无第三方 listener 会在主线程原地改写
+                // 这份 pending tag。故 registerPendingSnapshot 是碰撞分支最后一个碰 tag 的主线程动作, 登记后主线程
+                // 不再触碰它, 在飞那代 IO 回调 take 走时 tag 已是终态, 不存在 chunk 路径第八轮的"未就绪 tag 暴露"
+                // 窗口。chunk 路径必须 begin(PREPARING)->dispatch->publish(READY) 三步, 正是为给 dispatch 期间隔离
+                // 一个不可消费态; entity 无此窗口, 裸 AtomicReference<EntitySnapshot> 单槽 (登记即就绪) 已充分且正确,
+                // 升级状态机只会引入无对应风险的复杂度 (YAGNI)。这是经证伪的非对称, 不是遗漏。
                 state.registerPendingSnapshot(pending);
             } catch (Throwable t) {
                 // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 尚未登记 pending,
