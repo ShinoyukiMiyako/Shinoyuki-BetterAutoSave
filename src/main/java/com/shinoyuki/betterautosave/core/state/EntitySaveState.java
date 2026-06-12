@@ -107,6 +107,11 @@ public final class EntitySaveState {
         long captured = generation.get();
         inFlightGeneration = captured;
         phase.set(Phase.SERIALIZING);
+        // v0.11.0 (C-stale-missed-no-epoch): entity 路径无对应清理。chunk 侧 enterSerializing 末尾要清
+        // EMPTY_CONSUMER_PASSED 单例防 stale consumerMissed 跨周期继承; entity 槽是裸 AtomicReference<EntitySnapshot>
+        // (无 consumerMissed 概念, 见字段 57), 不存在四态状态机也不存在"标 missed 不消费"的 sticky 载体 ——
+        // 无 Forge entity save 事件即无 dispatch 窗口, 回调直接 getAndSet(null) 全态消费, 故本指控对 entity 免疫,
+        // 无需任何 CAS 清理。
         return captured;
     }
 

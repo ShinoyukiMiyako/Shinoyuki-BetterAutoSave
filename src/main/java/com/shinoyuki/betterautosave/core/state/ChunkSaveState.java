@@ -156,6 +156,19 @@ public final class ChunkSaveState {
         long captured = generation.get();
         inFlightGeneration = captured;
         phase.set(Phase.SERIALIZING);
+        // v0.11.0 修复 (C-stale-missed-no-epoch): 开新保存周期 (fresh capture, 非接力链) 时清掉上一周期
+        // 残留的 EMPTY_CONSUMER_PASSED 单例, 否则该 stale consumerMissed 会被下一次 beginPendingSnapshot
+        // 误继承进 PREPARING, 让 publishPendingSnapshot 提前自踢: 主线程在本代 IO 尚未落地时就并发 reoffer
+        // 接力, 经共享 chunkWorkerQueue 被另一 worker assemble, 把"前代 store happens-before 后代 store"的
+        // 写序保证降级成无序竞争 (多 worker 下旧代 last-write 覆盖最新代, 静默丢数据); 且提前覆盖
+        // inFlightGeneration 让本代回调误判 CLEAN_LANDED 提前清 mustDrain。
+        //
+        // 必须用精确 CAS(EMPTY_CONSUMER_PASSED, EMPTY) 只清这一个单例, 不得无条件 set(EMPTY): 那会误清
+        // 与本调用并发挂在槽上的 PREPARING/READY。enterSerializing 与碰撞登记 (beginPendingSnapshot) 虽都在
+        // 主线程串行, 但接力链回调 (takeReadyPendingSnapshot) 在 off-main 线程, 仍以原子 CAS 为安全。
+        // 接力链不走本方法 (它走 reenterSerializingForPending), 故 intra-cycle 的 PREPARING-missed 合并与
+        // 嵌套碰撞语义不受影响 —— 本清理只切断"missed 跨保存周期存活"这一条路径。
+        pendingState.compareAndSet(PendingState.EMPTY_CONSUMER_PASSED, PendingState.EMPTY);
         return captured;
     }
 
