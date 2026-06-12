@@ -154,9 +154,15 @@ public final class ChunkSaveState {
         private final long pendingEpoch;
         private final long missedCycle;
         private final DrainOwner drainOwner;
+        // pending 登记时是否已无在飞消费者: beginPendingSnapshot 看到 phase==CLEAN (在飞那代回调已
+        // CLEAN_LANDED 终态退出, 不再回来消费 READY) 时在同一 CAS 立此标记, publishPendingSnapshot 据它作第三个
+        // 自踢触发点 —— 把 pending 交还主线程自踢, 而非发布一个没有任何消费者的 READY 孤儿。仅随 pending 槽存活:
+        // 任何把 pendingKind 写回 NONE 的转移 (publish 自踢 / take / abort / drain) 都把它清回 false。
+        private final boolean pendingNoInFlightConsumer;
 
         private SlotWord(Phase phase, long inFlightGeneration, long inFlightCycleSeq, PendingKind pendingKind,
-                         ChunkSnapshot pendingSnapshot, long pendingEpoch, long missedCycle, DrainOwner drainOwner) {
+                         ChunkSnapshot pendingSnapshot, long pendingEpoch, long missedCycle, DrainOwner drainOwner,
+                         boolean pendingNoInFlightConsumer) {
             this.phase = phase;
             this.inFlightGeneration = inFlightGeneration;
             this.inFlightCycleSeq = inFlightCycleSeq;
@@ -165,30 +171,40 @@ public final class ChunkSaveState {
             this.pendingEpoch = pendingEpoch;
             this.missedCycle = missedCycle;
             this.drainOwner = drainOwner;
+            this.pendingNoInFlightConsumer = pendingNoInFlightConsumer;
         }
 
         private static SlotWord initial() {
-            return new SlotWord(Phase.CLEAN, 0L, 0L, PendingKind.NONE, null, 0L, NO_MISSED, DrainOwner.NONE);
+            return new SlotWord(Phase.CLEAN, 0L, 0L, PendingKind.NONE, null, 0L, NO_MISSED, DrainOwner.NONE, false);
         }
 
         private SlotWord withPhase(Phase next) {
             return new SlotWord(next, inFlightGeneration, inFlightCycleSeq, pendingKind, pendingSnapshot,
-                    pendingEpoch, missedCycle, drainOwner);
+                    pendingEpoch, missedCycle, drainOwner, pendingNoInFlightConsumer);
         }
 
         private SlotWord withInFlight(long generation, long cycleSeq, Phase next) {
             return new SlotWord(next, generation, cycleSeq, pendingKind, pendingSnapshot,
-                    pendingEpoch, missedCycle, drainOwner);
+                    pendingEpoch, missedCycle, drainOwner, pendingNoInFlightConsumer);
         }
 
         private SlotWord withDrainOwner(DrainOwner next) {
             return new SlotWord(phase, inFlightGeneration, inFlightCycleSeq, pendingKind, pendingSnapshot,
-                    pendingEpoch, missedCycle, next);
+                    pendingEpoch, missedCycle, next, pendingNoInFlightConsumer);
         }
 
         private SlotWord withPending(PendingKind kind, ChunkSnapshot snapshot, long epoch, long missed,
                                      DrainOwner owner) {
-            return new SlotWord(phase, inFlightGeneration, inFlightCycleSeq, kind, snapshot, epoch, missed, owner);
+            // 槽变 NONE 时强制清 noInFlightConsumer (它只对在槽的 pending 有意义); 槽非空则保持原值。
+            boolean noConsumer = kind == PendingKind.NONE ? false : pendingNoInFlightConsumer;
+            return new SlotWord(phase, inFlightGeneration, inFlightCycleSeq, kind, snapshot, epoch, missed, owner,
+                    noConsumer);
+        }
+
+        private SlotWord withPending(PendingKind kind, ChunkSnapshot snapshot, long epoch, long missed,
+                                     DrainOwner owner, boolean noInFlightConsumer) {
+            return new SlotWord(phase, inFlightGeneration, inFlightCycleSeq, kind, snapshot, epoch, missed, owner,
+                    noInFlightConsumer);
         }
 
         public Phase phase() {
@@ -213,6 +229,10 @@ public final class ChunkSaveState {
 
         public long missedCycle() {
             return missedCycle;
+        }
+
+        public boolean pendingNoInFlightConsumer() {
+            return pendingNoInFlightConsumer;
         }
     }
 
@@ -520,6 +540,14 @@ public final class ChunkSaveState {
      * EMPTY 分支只标 missedCycle 不夺 drain (留给随后必到的 publish 自踢链), 但它 honor 了 ioFailed 的 dec; begin
      * 发现 drain 被清空便重新获取并通知调用方补 inc, 让 "槽非空 -> gauge>=1" 不变式在该窗口闭合。
      *
+     * <p><b>在飞已 CLEAN 终态退出 (无在飞消费者)</b>: 若 CAS 时刻 {@code cur.phase == CLEAN}, 说明在飞那代回调
+     * 已经 CLEAN_LANDED 终态退出, 不会再回来消费一份 READY。这种交错下 missedCycle 与 drainOwner 都不构成自踢
+     * 触发点 (回调干净退出没标 missed, 也没拨 TERMINAL_HANDED), 若照常 publish 成 READY 就是一个永无消费者的孤儿:
+     * 槽永挂 READY + mustDrainPending 永久正偏移 + 卸载路径增量静默丢失。故在同一次 CAS 立 noInFlightConsumer 标记,
+     * 让 {@link #publishPendingSnapshot} 把 pending 交还主线程自踢 (主线程是合法 offer 方), 而非发布孤儿 READY。
+     * begin 看到 CLEAN 时 drainOwner 必为 NONE (CLEAN_LANDED 已清), 故同时走上面的 reacquire 分支补 inc gauge,
+     * 自踢链的终态回调唯一清 drainOwner 并 dec, 配平。
+     *
      * @param snapshot 本次碰撞 capture 的接力快照
      * @return true 表示 begin 把 drainOwner 由 NONE 重新拉为 IN_FLIGHT (补配平), 调用方须 inc gauge 一次;
      *         false 表示 drainOwner 进入时已非 NONE (常规), 调用方无需配平
@@ -534,7 +562,8 @@ public final class ChunkSaveState {
             long inheritedMissed = cur.missedCycle == cur.inFlightCycleSeq ? cur.missedCycle : NO_MISSED;
             reacquiredDrain = cur.drainOwner == DrainOwner.NONE;
             DrainOwner owner = reacquiredDrain ? DrainOwner.IN_FLIGHT : cur.drainOwner;
-            next = cur.withPending(PendingKind.PREPARING, snapshot, epoch, inheritedMissed, owner);
+            boolean noInFlightConsumer = cur.phase == Phase.CLEAN;
+            next = cur.withPending(PendingKind.PREPARING, snapshot, epoch, inheritedMissed, owner, noInFlightConsumer);
         } while (!word.compareAndSet(cur, next));
         return reacquiredDrain;
     }
@@ -542,12 +571,15 @@ public final class ChunkSaveState {
     /**
      * 发布消费权: dispatchSaveEvent 成功返回后 PREPARING -> READY。tag 此刻已就绪 (listener 改写完成), 回调可消费。
      *
-     * <p><b>返回值 = 主线程需自踢的 pending</b>: 两种情形主线程必须接过补踢 (那个本代在飞 IO 的唯一消费者走后不再来):
+     * <p><b>返回值 = 主线程需自踢的 pending</b>: 三种情形主线程必须接过补踢 (那个本代在飞 IO 的唯一消费者走后不再来):
      * <ul>
      *   <li>{@code missedCycle == inFlightCycleSeq} (本周期真有回调路过 PREPARING/EMPTY): 取走 pending, 槽归 NONE,
      *       drainOwner 维持 (接力在途), 返回 pending 主线程自踢。</li>
      *   <li>{@code drainOwner == TERMINAL_HANDED} (终态消费者已路过, 在飞 task 已死): 同样不发 READY 孤儿,
      *       取走 pending 主线程自踢接力 (主线程是合法 offer 方)。</li>
+     *   <li>{@code pendingNoInFlightConsumer} (begin 时在飞那代已 CLEAN_LANDED 退出, 无在飞消费者): 在飞回调干净
+     *       退出没标 missed 也没拨 TERMINAL_HANDED, 这两个触发点都不命中; 此标记是该交错下唯一的自踢凭据, 同样取走
+     *       pending 交主线程自踢, 杜绝发布一个永无消费者的 READY 孤儿。</li>
      * </ul>
      * 否则正常 PREPARING -> READY (返 null, 等在飞回调消费)。仅主线程在 dispatch 成功后调。
      *
@@ -565,7 +597,7 @@ public final class ChunkSaveState {
             }
             boolean sameCycleMissed = cur.missedCycle == cur.inFlightCycleSeq;
             boolean terminalHanded = cur.drainOwner == DrainOwner.TERMINAL_HANDED;
-            if (sameCycleMissed || terminalHanded) {
+            if (sameCycleMissed || terminalHanded || cur.pendingNoInFlightConsumer) {
                 next = cur.withPending(PendingKind.NONE, null, 0L, NO_MISSED, cur.drainOwner);
                 toReoffer = cur.pendingSnapshot;
             } else {
