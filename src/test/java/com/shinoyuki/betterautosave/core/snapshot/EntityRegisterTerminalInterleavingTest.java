@@ -320,7 +320,7 @@ class EntityRegisterTerminalInterleavingTest {
         state.markDirty();          // gen=2
 
         // 回调 IO 失败. whenComplete 先 dec gen=1 的 ioPending inc, 再调 onIoFailure -> ioFailed REQUEUE_DIRTY.
-        // 这是窗口开点: 修复后 phase 保持 IO_PENDING (在飞).
+        // 这是窗口开点: 原地重投不发布瞬态 DIRTY, phase 保持 IO_PENDING (在飞).
         metrics.decInFlightIoPending();
         assertEquals(EntitySaveState.IoOutcome.REQUEUE_DIRTY, state.ioFailed(3),
                 "未超 maxRetries -> REQUEUE_DIRTY in-place 重投");
@@ -329,7 +329,7 @@ class EntityRegisterTerminalInterleavingTest {
         assertTrue(state.isInFlight(),
                 "窗口内仍是在飞态 (回调正要原地重投, 它的下一个终态仍会取槽)");
 
-        // 主线程在窗口内 register + 重读 phase (碰撞分支后半). 修复后重读得 IO_PENDING -> 不偷槽.
+        // 主线程在窗口内 register + 重读 phase (碰撞分支后半). 重读得 IO_PENDING (在飞) -> 不偷槽.
         EntitySnapshot g2 = snapshotForGeneration(state, 2L);
         boolean[] selfKickInvoked = {false};
         boolean selfKicked = EntityPendingRelayCoordinator.registerAndSelfKick(state, g2, metrics,
