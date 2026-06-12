@@ -128,24 +128,38 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             state.markDirty();
             try {
                 EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
-                // entity 路径不迁 chunk 的 SlotWord 三态协议: entity 的合法交错空间远小于 chunk —— 根因是 entity
-                // 在 capturePending 之后没有 dispatchSaveEvent (Forge 无 entity save 事件)。逐项说明为何裸单槽充分:
-                // - 未就绪 tag 暴露 / lost-wakeup: registerPendingSnapshot 是碰撞分支最后一个碰 tag 的主线程动作,
-                //   登记后主线程不再触碰它, 回调 take 时 tag 已是终态。无 dispatch 窗口 -> 无 PREPARING/READY 两相之
-                //   分必要, 裸单槽 (登记即就绪) 充分。chunk 必须 begin(PREPARING)->dispatch->publish(READY) 三步正是
-                //   为隔离 dispatch 期间一个不可消费态; entity 无此窗口。
-                // - 跨周期 stale: 无 PREPARING 窗口 -> 回调无需 "路过标 missed 离开" 的 sticky note 机制 ->
-                //   无 missedCycle/cycleSeq 载体 -> 没有任何 note 能跨周期存活被误读。回调全态 getAndSet(null) 析构式
-                //   消费, 最坏只是被更新代 register 覆盖 (latest-wins, 正确)。reenterSerializingForPending 锁 pending
-                //   自己的 capturedGeneration 防错代接力 / 误判 CLEAN_LANDED。
-                // - begin 前终态: 本分支程序序 tryMarkMustDrain(:117) 严格先于 registerPendingSnapshot(:148)
-                //   置 mustDrain; 终态回调把清 mustDrain 的 CAS 与 takePendingSnapshot 同址 (EntitySaveTask.onIoFailure)。
-                //   终态后于 register (槽已满): 同一终态 handler take 走 + ERROR + 清 mustDrain, gauge 配平, 无孤儿。
-                //   终态先于 register (窄窗口交错): 终态 CAS 把 gauge 正确 dec 到 0, 随后 register 落进 phase=FAILED 的
-                //   死状态 (无在飞、无消费者), mustDrain=false 在此恰是正确的 (没有任何东西要等), 不构成孤儿 drain 不
-                //   变式破坏。chunk 路径同位窗口的危害 (gauge 正偏移泄漏 / 丢活消费者让关服 join 挂) 在 entity 不发生。
-                // 故迁 SlotWord 只引入无对应风险的复杂度 (YAGNI)。这是结构性非对称, 不是遗漏。
+                // entity 路径不迁 chunk 的 SlotWord 三态协议 (无 dispatchSaveEvent 窗口, 不需要 PREPARING/READY
+                // 两相隔离一个不可消费态), 但接力槽与终态回调跑在两条线程上, 仍需一道顺序纪律杜绝 "回调终态取槽" 与
+                // "主线程登记" 互相看不见。用既有 atomic 建立写后读对偶 (Dekker 式双向检查):
+                //   主线程侧: 先写 pending 槽 (registerPendingSnapshot), 再重读 phase。
+                //   回调侧:   先写 phase 终态 (ioCompletedSuccessfully/ioFailed 内 phase.set), 再 getAndSet 取槽。
+                // 两侧各自先写后读, 故任一交错至少一方看见对方: 若回调取槽早于主线程写槽, 主线程重读 phase 必见
+                // 回调写定的终态 (CLEAN/DIRTY/FAILED) -> 主线程取回自己刚放的 pending 自踢; 若主线程写槽早于回调取槽,
+                // 回调 getAndSet 必见这份 pending -> 回调接力。双方都看见时以 getAndSet 析构语义裁定唯一消费者 (谁取到
+                // 谁负责接力, 另一方取回 null 不再动作), 防双投。这道纪律消除两个无主丢失窗口:
+                //   1) 回调 stale 读旧代判 CLEAN_LANDED 后, 若不取槽直接 evict, 会把主线程刚 register 的更新代 pending
+                //      随状态对象送 GC (entity 无恢复队列无 isUnsaved 门, 永久静默丢失);
+                //   2) 回调 REQUEUE_DIRTY 取槽时主线程 register 尚未发生, 取到 null 跳过重投, 主线程随后 register 落进
+                //      phase=DIRTY 死状态 -> 条目滞留 + mustDrainPending 永久 +1。
                 state.registerPendingSnapshot(pending);
+                // 重读 phase: 不在在飞态即说明回调已写定终态并可能已取槽。getAndSet 自取回自己刚放的 pending (防与
+                // 回调取槽双投): 取回非空 -> 主线程自踢接力; 取回 null -> 回调已接管, 主线程不再动作。
+                EntitySaveState.Phase recheck = state.phase();
+                boolean inFlight = recheck == EntitySaveState.Phase.SNAPSHOTTING
+                        || recheck == EntitySaveState.Phase.SERIALIZING
+                        || recheck == EntitySaveState.Phase.IO_PENDING;
+                if (!inFlight) {
+                    EntitySnapshot taken = state.takePendingSnapshot();
+                    if (taken != null) {
+                        // 回调已终态退出, 不会再消费这份 pending。主线程自踢接力把更新代落盘。回调终态若已清
+                        // mustDrain (CLEAN_LANDED/FAILED_TERMINAL), 接力在途须恢复并补 inc gauge (关服 join 继续等);
+                        // 若 mustDrain 仍真 (REQUEUE_DIRTY 不清), tryMark 返 false 不重复 inc。接力链终态唯一清+dec。
+                        if (state.tryMarkMustDrain()) {
+                            metrics.incMustDrainPending();
+                        }
+                        pipeline.reofferEntityPendingFromMainThread(worker, this, state, taken);
+                    }
+                }
             } catch (Throwable t) {
                 // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 尚未登记 pending,
                 // 接力槽空。entity 路径无 dispatchSaveEvent, 故无 chunk 侧 register->dispatch 的 TOCTOU 窗口;

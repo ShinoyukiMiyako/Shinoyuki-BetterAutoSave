@@ -9,6 +9,7 @@ import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSubmissionSink;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
+import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import com.shinoyuki.betterautosave.core.state.EntitySaveStateAccess;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.core.worker.SerializationWorker;
@@ -423,6 +424,32 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
                 throw t;
             }
         };
+    }
+
+    /**
+     * 主线程在 registerPendingSnapshot 写槽后重读 phase, 发现回调已做完终态取槽 (phase 不在在飞态) 且自己取回了
+     * 刚放的 pending 时的自我补踢入口。与 chunk 的 {@link #reofferChunkPendingFromMainThread} 对称: 那个本代在飞
+     * IO 的唯一消费者已走 (终态退出), 不会再来消费这份 pending, 故补踢责任落到主线程 —— 它是合法 offer 方
+     * (与 register 同线程)。
+     *
+     * <p>语义与 {@link EntitySaveTask} 回调侧 REQUEUE_DIRTY 接力一致: 先把 inFlightGeneration 锁到 pending 自己
+     * 的代, 再经 {@link #entityPendingReoffer} sink reoffer。sink 同步抛 (生产几乎仅 teardown-NPE / OOM) 时不得
+     * 静默丢 pending: serializing 由 sink 自身 inc/offer 间自包 try 配平 (抛前 dec 回), 本层负责 mustDrain 终态
+     * 配平 + ERROR (该接力代无法落盘, entity 已被 vanilla 驱逐, 无兜底, 与 EntitySaveTask.safeReoffer 同构)。
+     */
+    public void reofferEntityPendingFromMainThread(IOWorker entityIoWorker, EntitySaveStateAccess stateOwner,
+                                                   EntitySaveState state, EntitySnapshot pending) {
+        state.reenterSerializingForPending(pending.capturedGeneration());
+        try {
+            entityPendingReoffer(entityIoWorker, stateOwner).reoffer(pending);
+        } catch (Throwable t) {
+            if (state.compareAndClearMustDrain()) {
+                metrics.decMustDrainPending();
+            }
+            LOGGER.error("[BetterAutoSave] main-thread entity pending relay reoffer threw for chunk {} dim={}; its "
+                            + "latest entity increment is lost (entities already evicted, no vanilla fallback)",
+                    pending.pos(), pending.dimension().location(), t);
+        }
     }
 
     public BlockingQueue<SaveTask> savedDataWorkerQueue() {

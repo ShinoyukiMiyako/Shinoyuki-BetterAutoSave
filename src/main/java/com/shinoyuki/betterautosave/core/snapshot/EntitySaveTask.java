@@ -199,18 +199,34 @@ public final class EntitySaveTask implements SaveTask {
     private void onIoSuccess(EntitySaveState state, CompoundTag tag) {
         EntitySaveState.IoOutcome outcome = state.ioCompletedSuccessfully();
         if (outcome == EntitySaveState.IoOutcome.CLEAN_LANDED) {
-            // CLEAN_LANDED 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge.
+            // 回调侧顺序纪律 (与主线程 registerPendingSnapshot 的写后读对偶): ioCompletedSuccessfully 已先把
+            // phase 写成 CLEAN (终态写), 这里再 getAndSet 取 pending 槽 (析构式读)。两侧各自先写后读, 保证
+            // "回调读 pending 时 register 已可见" 与 "register 重读 phase 时 CLEAN 已可见" 至少一方成立, 杜绝
+            // 双不见。CLEAN_LANDED 一般蕴含 generation 未推进 (无碰撞), 槽应空; 但回调读到的 generation 可能是
+            // 碰撞编辑推进 generation 之前的 stale 值, 此刻主线程已 register 了一份更新代 pending —— 若不取槽
+            // 直接 evict, 会把这份唯一副本随状态对象送 GC 永久丢失。故 evict 前必取一次。
+            EntitySnapshot pending = state.takePendingSnapshot();
+            if (pending != null && pendingReoffer != null) {
+                // 取到主线程登记的更新代 pending: 它是 vanilla 即将驱逐内存的唯一副本, 必须接力落盘而非随
+                // 状态对象 evict 丢弃。CLEAN_LANDED 已清 mustDrain, 接力在途须恢复 (关服 join 继续等): markMustDrain
+                // 把 boolean 拨回, 并跳过下面的 honor-dec (净效果 gauge 维持), 由接力链终态唯一清+dec。不 evict。
+                state.markMustDrain();
+                state.reenterSerializingForPending(pending.capturedGeneration());
+                safeReoffer(state, pending);
+                metrics.recordEntityRetried();
+                SaveListenerRegistry.fireEntityChunkSaved(snapshot.pos(), snapshot.dimension(), tag);
+                return;
+            }
+            // 槽空 (常规 CLEAN_LANDED, 无碰撞 pending): honor CLEAN_LANDED 的清除配平 gauge, 走 evict 收口。
+            // 若 pending 非空但 sink 不可达 (单测未注入 reoffer): 退化为下面的 honor + evict, takePendingSnapshot
+            // 已把槽清空防泄漏 (接力代增量随之丢失, 与无 sink 的终态路径一致, entity 无 vanilla 兜底)。
             if (state.lastTransitionClearedMustDrain()) {
                 metrics.decMustDrainPending();
             }
             metrics.recordEntityCompleted();
-            // CLEAN_LANDED 蕴含 generation==inFlightGeneration, 即在飞期间无碰撞 (碰撞会 markDirty
-            // 推 generation 使其判 REQUEUE_DIRTY)。故此分支不应有 pending; 不取槽, 也不会与下面的
-            // evict 冲突。
-            // CLEAN_LANDED 是确认安全的终态 (phase=CLEAN, 无在途 IO,
-            // generation 未变即无 pending 编辑). 尝试从 per-level 状态 map 剔除本条目, 防止
-            // EntityStorage 单例的状态 map 随进程运行无界增长. 剔除走 identity + phase==CLEAN
-            // 原子校验 (computeIfPresent), 主线程已开新一轮 save 则保留留待下次 CLEAN_LANDED.
+            // CLEAN_LANDED 且槽确空是确认安全的终态. 尝试从 per-level 状态 map 剔除本条目, 防止 EntityStorage
+            // 单例的状态 map 随进程运行无界增长. 剔除走 identity + phase==CLEAN 原子校验 (computeIfPresent),
+            // 主线程已开新一轮 save 则保留留待下次 CLEAN_LANDED. 槽非空时上面已 early-return, 绝不会带 pending evict.
             if (stateOwner != null) {
                 stateOwner.betterautosave$evictEntityStateIfClean(snapshot.pos().toLong(), state);
             }
