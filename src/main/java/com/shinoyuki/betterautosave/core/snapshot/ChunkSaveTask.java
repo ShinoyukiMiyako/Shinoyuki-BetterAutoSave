@@ -179,33 +179,84 @@ public final class ChunkSaveTask implements SaveTask {
     private void onIoFailure(ChunkSaveState state, CompoundTag tag, Throwable cause) {
         ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
         if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
-            // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
-            // 杜绝"先读快照 wasDraining 再内部静默 clear"拆分被并发 inc 抢跑漏 dec (v0.10.2 修复 M6).
-            // 还原 isUnsaved 让 vanilla 同步兜底.
-            if (state.lastTransitionClearedMustDrain()) {
-                metrics.decMustDrainPending();
-            }
-            // v0.10.2 修复 (C-chunk-unload-collision, 隐角 C): 终态前若挂着接力快照, 它的最新代
-            // 增量随这次彻底失败一并丢失。在飞 task 已死, 无法再接力。取走清空防泄漏并明示 ERROR ——
-            // 对仍加载的 chunk, 下面 enqueueRecovery 还原 isUnsaved 让 vanilla 同步重写最新内存救回;
-            // 已卸载的, ChunkRecoveryQueue.drain 的 terminal+unloaded 分支再升级 ERROR (带 dim+坐标)。
-            // v0.11.0 修复 (C-dispatch-register-toctou 终局): 用 drainPendingSnapshot 全清 (含 PREPARING) ——
-            // 本 state 已终态死亡, 连主线程仍在 dispatch 的 PREPARING 也一并夺走; 主线程随后 publish 在 EMPTY
-            // 上空转不自踢, 不残留孤儿。这与"消费 READY"语义不同: 终态不接力, 只清账 + 记丢失。
-            if (state.drainPendingSnapshot() != null) {
-                LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot when IO hit terminal "
-                                + "retry limit; its latest-generation increment may be lost (vanilla sync fallback "
-                                + "will recover it only if still loaded)",
-                        snapshot.pos(), snapshot.dimension().location());
-            }
-            enqueueRecovery(outcome);
-            metrics.recordChunkFailed();
+            handleTerminalFailure(state);
             return;
         }
         // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
         // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
         metrics.recordChunkRetried();
         submitIo(state, tag);
+    }
+
+    /**
+     * v0.11.0 修复 (C-unhandled-drains-preparing): FAILED_TERMINAL (IO 重试耗尽) 后按接力槽三态分流处置,
+     * 关死旧 drainPendingSnapshot 全清 PREPARING 的"未就绪 tag 暴露"旁路。
+     *
+     * <p><b>前置状态</b>: ioFailed 已把 phase 推 FAILED 且 CAS 清了 mustDrain boolean
+     * ({@code lastTransitionClearedMustDrain()} 记录是否真清)。下面按槽态决定是 honor 这次清除 (EMPTY_DEAD),
+     * 还是把 mustDrain 恢复给接力链 (CONSUMED / HANDED_TO_MAIN)。
+     *
+     * <p><b>终值表 (mustDrain boolean / gauge / phase / 接力归属)</b>, 设进入时 gauge=G, boolean=true:
+     * <pre>
+     * 槽态            | 出口动作                              | mustDrain boolean | gauge | phase            | 谁落最新代
+     * --------------- | ------------------------------------ | ----------------- | ----- | ---------------- | ----------
+     * READY(CONSUMED) | reenter+safeReoffer 本 task 接力     | true(恢复)        | G     | SERIALIZING(reenter) | 本 task 接力 READY
+     * PREPARING       | 标 missed 交还主线程, 不碰恢复路径   | true(恢复)        | G     | FAILED->主线程 reenter 覆盖 | 主线程 publish 自踢
+     * (HANDED)        |                                      |                   |       |                  |
+     * EMPTY(DEAD)     | honor 清除 + enqueueRecovery         | false             | G-1   | FAILED           | vanilla 同步兜底
+     * </pre>
+     * CONSUMED / HANDED_TO_MAIN 都"恢复" mustDrain: 跳过 ioFailed 清除的 gauge dec (不 dec) 并 markMustDrain
+     * 把 boolean 拨回 true —— 净效果 gauge/boolean 不变, 由接力链 (本 task 或主线程自踢) 的真正终态唯一清除+dec。
+     * 只有 EMPTY_DEAD 是真终态死亡: honor 清除 (dec gauge), 走 vanilla 兜底。
+     *
+     * <p><b>retryCount 不重置</b>: 接力沿用已耗尽的重试预算 (它是同一 state 的属性)。接力 IO 成功则
+     * CLEAN_LANDED 自然归零 retryCount; 接力 IO 再失败则立即 FAILED_TERMINAL, 此时槽已 EMPTY (READY 已被本
+     * task 消费) 走 EMPTY_DEAD 退 vanilla 兜底 —— 级联收敛, 不会无限接力重试 (重置 retryCount 反而会让持续性
+     * IO 故障永不终态、永不退兜底)。
+     */
+    private void handleTerminalFailure(ChunkSaveState state) {
+        ChunkSaveState.ReadyTake take = state.takeReadyForTerminalConsumer();
+        switch (take.disposition()) {
+            case CONSUMED -> {
+                // 槽 READY (碰撞后最新代已就绪): 旧代 IO 终态失败, 但最新代不该随之丢 —— 接力它。接力优先于
+                // vanilla 兜底 (接力落最新代, 兜底落旧内存代)。mustDrain 恢复 (接力在途, 关服 join 须继续等)。
+                if (pendingReoffer != null) {
+                    state.markMustDrain();
+                    state.reenterSerializingForPending(take.snapshot().capturedGeneration());
+                    safeReoffer(state, take.snapshot());
+                    metrics.recordChunkRetried();
+                    return;
+                }
+                // sink 不可达 (单测未注入): 无法接力, 退化为终态死亡。honor ioFailed 的清除, 走兜底。
+                if (state.lastTransitionClearedMustDrain()) {
+                    metrics.decMustDrainPending();
+                }
+                LOGGER.error("[BetterAutoSave] chunk {} dim={} had a READY relay snapshot when IO hit terminal retry "
+                                + "limit but no reoffer sink; its latest-generation increment is lost (vanilla sync "
+                                + "fallback will recover it only if still loaded)",
+                        snapshot.pos(), snapshot.dimension().location());
+                enqueueRecovery(ChunkSaveState.IoOutcome.FAILED_TERMINAL);
+                metrics.recordChunkFailed();
+            }
+            case HANDED_TO_MAIN -> {
+                // 槽 PREPARING: 主线程仍在 dispatch 改写这份未就绪 tag, 终态 task 绝不能夺走它接力 (数据竞争)。
+                // takeReadyForTerminalConsumer 已标 missed, 补踢交还主线程 publish 自踢。本 task 必须 early-return:
+                // 不 honor ioFailed 的 mustDrain 清除 (恢复 boolean=true, 不 dec gauge), 不走 enqueueRecovery ——
+                // 否则与主线程自踢接力链双重处置同一 state, 且会过早把 mustDrain 清掉让关服 join 不等接力。
+                // mustDrain 由主线程自踢的接力链终态唯一清。
+                state.markMustDrain();
+                metrics.recordChunkRetried();
+            }
+            case EMPTY_DEAD -> {
+                // 槽 EMPTY: 无就绪接力, 真终态死亡。honor ioFailed 的 mustDrain 清除 (配平 gauge),
+                // enqueueRecovery 还原 isUnsaved 让 vanilla 同步兜底重写最新内存。
+                if (state.lastTransitionClearedMustDrain()) {
+                    metrics.decMustDrainPending();
+                }
+                enqueueRecovery(ChunkSaveState.IoOutcome.FAILED_TERMINAL);
+                metrics.recordChunkFailed();
+            }
+        }
     }
 
     /**
@@ -249,8 +300,8 @@ public final class ChunkSaveTask implements SaveTask {
 
     /**
      * v0.11.0 修复 (C-callback-sync-throw-swallowed): 接力重投的安全包装。reoffer sink 同步抛 (生产几乎仅
-     * teardown-NPE / OOM) 时不得静默丢 pending —— 此刻 pending 已被 takeReadyPendingSnapshot / drainPendingSnapshot
-     * 取走, 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
+     * teardown-NPE / OOM) 时不得静默丢 pending —— 此刻 pending 已被 takeReadyPendingSnapshot /
+     * takeReadyForTerminalConsumer 取走, 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
      *
      * <p><b>补偿</b>: serializing gauge 由 sink 自身在 inc 与 offer 之间自包 try 配平 (见
      * {@link SnapshotPipeline} 的 reoffer sink, 抛前 dec 回); 本层只负责 mustDrain 终态配平 + ERROR ——
@@ -278,42 +329,58 @@ public final class ChunkSaveTask implements SaveTask {
         // v0.10.2 修复 (M-unhandled-abandons-pending): 接力槽前置消费, 与 whenComplete 终态路径对称。
         // 接力槽存在的唯一场景就是"在飞碰撞 + 卸载", 此刻 pending 是卸载坐标最新代的唯一副本。旧逻辑
         // onUnhandledError 无条件清 mustDrain 却不取 pending, 破坏不变式 (pendingSnapshot 非空 -> mustDrain
-        // 恒真): 槽永久泄漏 (AtomicReference 持快照 + NBT/section 副本), 关服 join 不再等这条接力链, 且
-        // chunk 路径接力槽语义前提是已卸载 (vanilla 兜底大概率落空且无 ERROR), entity 路径更是静默永久丢失。
-        // v0.11.0 修复 (C-dispatch-register-toctou 终局): 用 drainPendingSnapshot 全清 (含 PREPARING) ——
-        // 在飞 task 此刻死亡, 是该坐标接力的自然消费者, 连主线程仍在 dispatch 的 PREPARING 也一并夺走接力,
-        // 主线程随后 publish 在 EMPTY 上空转不重复自踢。不走 takeReadyPendingSnapshot (它会把 PREPARING 留给
-        // 主线程), 因为本 task 立即接管重投比交还更直接, 且与 FAILED_TERMINAL 全清语义一致。
-        ChunkSnapshot pending = state.drainPendingSnapshot();
-        if (pending != null && pendingReoffer != null) {
-            // 接力链可达: 把最新代重投, mustDrain 维持 (重投仍在途, 关服 join 必须继续等)。reoffer sink
-            // 自身在真正 offer 时 inc serializing (与 relay execute 首行 dec 配平), workersStopping 关服残窗
-            // 走 ERROR 安全网并在那里清 mustDrain+gauge。本路径不调 ioFailed/enqueueRecovery —— 该轮 in-flight
-            // 由接力 task 接管, 不进 FAILED 也不投坐标恢复队列 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
-            state.reenterSerializingForPending(pending.capturedGeneration());
-            // v0.11.0 修复 (C-callback-sync-throw-swallowed): 与 whenComplete REQUEUE_DIRTY 路径共用 safeReoffer,
-            // reoffer sink 同步抛时不丢 pending —— 做 mustDrain 终态配平 + ERROR (serializing 由 sink 自身配平)。
-            safeReoffer(state, pending);
-            return;
+        // 恒真): 槽永久泄漏 (AtomicReference 持快照 + NBT/section 副本), 关服 join 不再等这条接力链。
+        // v0.11.0 修复 (C-unhandled-drains-preparing): 改用 takeReadyForTerminalConsumer 只消费 READY,
+        // PREPARING 标 missed 交还主线程 —— 旧 drainPendingSnapshot 无条件夺 PREPARING 会把主线程 dispatch 仍在
+        // 原地改写的未就绪 tag 接力 assemble (跨线程读写同一 CompoundTag 的 HashMap, 静默数据损坏), 正是状态机
+        // 立项要消灭的"未就绪 tag 暴露"在 drain 出口复活。判别 + 取走是同一 CAS 原子结果, 无 TOCTOU。
+        ChunkSaveState.ReadyTake take = state.takeReadyForTerminalConsumer();
+        switch (take.disposition()) {
+            case CONSUMED -> {
+                // 槽 READY (就绪最新代): 在飞 task 死亡, 它是该坐标接力的自然消费者, 直接重投。mustDrain 维持
+                // (本路径未清过, 仍是 mixin 碰撞分支置的 true; 重投在途, 关服 join 须继续等)。不走 ioFailed/
+                // enqueueRecovery —— 该轮 in-flight 由接力 task 接管 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
+                if (pendingReoffer != null) {
+                    state.reenterSerializingForPending(take.snapshot().capturedGeneration());
+                    safeReoffer(state, take.snapshot());
+                    return;
+                }
+                // sink 不可达 (单测未注入接力 / 关服后): 无法重投, READY 最新代增量随这次 unhandled 丢失。
+                // 退化走安全网 (清 mustDrain + ioFailed + enqueueRecovery 让 vanilla 兜底)。
+                LOGGER.error("[BetterAutoSave] chunk {} dim={} had a READY relay snapshot in onUnhandledError but no "
+                                + "reoffer sink; its latest-generation increment is lost (vanilla sync fallback will "
+                                + "recover it only if still loaded)",
+                        snapshot.pos(), snapshot.dimension().location());
+                runUnhandledSafetyNet(state);
+            }
+            case HANDED_TO_MAIN -> {
+                // 槽 PREPARING: 主线程仍在 dispatch 改写未就绪 tag, 终态 task 绝不能夺走接力 (数据竞争)。
+                // takeReadyForTerminalConsumer 已标 missed, 补踢交还主线程 publish 自踢。本 task 必须 early-return:
+                // 不清 mustDrain (维持给主线程自踢的接力链, 由其终态唯一清)、不走 ioFailed/enqueueRecovery ——
+                // 否则与主线程自踢接力链双重处置同一 state, 且过早清 mustDrain 让关服 join 不等接力。
+                metrics.recordChunkRetried();
+            }
+            case EMPTY_DEAD -> {
+                // 槽 EMPTY: 无就绪接力, 真终态死亡。走安全网。
+                runUnhandledSafetyNet(state);
+            }
         }
+    }
 
-        // 无 pending 或 sink 不可达 (单测未注入接力 / 关服后): 走原有安全网。无在途接力任务挂在 mustDrain 上,
-        // 故无条件清 mustDrain — 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join 死等且 gauge 泄漏。
-        // compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec (v0.10.2 修复 M6)。
-        if (pending != null) {
-            // sink 为 null (无法重投): pending 的最新代增量随这次 unhandled 一并丢失, 明示 ERROR 防静默。
-            LOGGER.error("[BetterAutoSave] chunk {} dim={} had a pending relay snapshot in onUnhandledError but no "
-                            + "reoffer sink; its latest-generation increment is lost (vanilla sync fallback will "
-                            + "recover it only if still loaded)",
-                    snapshot.pos(), snapshot.dimension().location());
-        }
+    /**
+     * v0.11.0 修复 (C-unhandled-drains-preparing): onUnhandledError 无接力可投时的安全网 (EMPTY_DEAD, 或
+     * READY 但 sink 不可达)。无在途接力任务挂在 mustDrain 上, 故清 mustDrain —— 否则 REQUEUE_DIRTY 下
+     * mustDrain 永挂, 关服 join 死等且 gauge 泄漏。compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec
+     * (v0.10.2 修复 M6)。随后 ioFailed 推 phase + enqueueRecovery 还原 isUnsaved 让 vanilla 兜底。
+     */
+    private void runUnhandledSafetyNet(ChunkSaveState state) {
         if (state.compareAndClearMustDrain()) {
             metrics.decMustDrainPending();
         }
         ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
         // worker 未捕获异常 (assemble 后 / IO 提交期抛非 IOException) 把 phase 推到 DIRTY/FAILED,
-        // 但 tag 此刻不在 onUnhandledError 作用域内 (assemble 抛则根本没 tag, storeChunk 同步抛则
-        // tag 在 execute 局部), 无法在此重投. 仍投坐标恢复队列还原 isUnsaved 让 vanilla 兜底.
+        // 但 tag 此刻不在作用域内 (assemble 抛则根本没 tag, storeChunk 同步抛则 tag 在 execute 局部),
+        // 无法在此重投. 仍投坐标恢复队列还原 isUnsaved 让 vanilla 兜底.
         enqueueRecovery(outcome);
         if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
             metrics.recordChunkFailed();

@@ -378,13 +378,115 @@ public final class ChunkSaveState {
     }
 
     /**
-     * v0.11.0 修复 (C-dispatch-register-toctou 终局): 无条件清空槽 (任意态 -> EMPTY), 返回曾停泊的 pending
-     * (PREPARING 或 READY 的 snapshot, 否则 null)。供**终态死亡路径** (FAILED_TERMINAL / onUnhandledError 无
-     * 接力可投) 用: 在飞 task 已死, 该坐标的接力 (无论就绪与否) 一并放弃, 全清防泄漏并明示丢失。
+     * v0.11.0 修复 (C-unhandled-drains-preparing): 终态死亡路径 (FAILED_TERMINAL / onUnhandledError) 取出接力
+     * 槽的一次原子处置, 返回三态判别 + 取走的 pending, 关死"绕过 READY 门"的旁路出口。
      *
-     * <p>与 takeReadyPendingSnapshot 的区别: 后者只消费 READY (PREPARING 标 missed 交还主线程); 本方法连
-     * PREPARING 也夺走 —— 因为本 state 已终态死亡, 主线程随后的 publish 会在 EMPTY 上空转 (返 null 不自踢),
-     * 不残留孤儿。
+     * <p><b>为何不再用 drainPendingSnapshot 全清</b>: 旧 drain 无条件 getAndSet(EMPTY) 把任意态 (含 PREPARING)
+     * 夺走接力。但 PREPARING 的 tag 此刻仍被主线程 dispatchSaveEvent 内的第三方 listener 原地改写 (未就绪):
+     * 在飞 task 在 off-main worker 线程把它夺走 reoffer 给另一序列化 worker assemble = 跨线程读写同一
+     * CompoundTag 的 HashMap, 正是状态机立项要消灭的"未就绪 tag 暴露", 却在 drain 出口复活。本方法改为只消费
+     * READY, PREPARING 标 missed 交还主线程 (与 takeReadyPendingSnapshot 同语义), 主线程 dispatch 返回后
+     * publishPendingSnapshot 见 missed 自踢接力。
+     *
+     * <p><b>三态处置 (与 takeReadyPendingSnapshot 的差异)</b>:
+     * <ul>
+     *   <li>READY: CAS READY->EMPTY 取走, 判 {@code CONSUMED} —— 在飞 task 当其消费者直接重投 (合法就绪 tag, 无 race)。</li>
+     *   <li>PREPARING (无论是否已 missed): CAS 标 consumerMissed=true (幂等), 判 {@code HANDED_TO_MAIN}, 不取走 ——
+     *       补踢责任交还主线程 publish 自踢。调用方必须 early-return: **不**清 mustDrain、**不**走 ioFailed/enqueueRecovery
+     *       安全网, 否则与主线程自踢接力链双重处置同一 state (mustDrain 由自踢接力链终态清)。</li>
+     *   <li>EMPTY (含 EMPTY_CONSUMER_PASSED): 无就绪接力。判 {@code EMPTY_DEAD}, 不改槽 —— 与
+     *       takeReadyPendingSnapshot 的 EMPTY 分支不同, 本路径**不**标 missed (在飞 task 正在死, 不存在"本代回调
+     *       稍后路过"要交接的对象; 标了反而留 stale EMPTY_CONSUMER_PASSED)。调用方走原有安全网 (清 mustDrain +
+     *       ioFailed + enqueueRecovery)。</li>
+     * </ul>
+     *
+     * <p>判别与取走是同一次 CAS 的原子结果, 杜绝"take 返 null 后再 hasPendingSnapshot() 二次读"被主线程
+     * publish (PREPARING->EMPTY) 抢跑的 TOCTOU。
+     */
+    public ReadyTake takeReadyForTerminalConsumer() {
+        PendingState current;
+        PendingState next;
+        ReadyTake.Disposition disposition;
+        ChunkSnapshot taken;
+        do {
+            current = pendingState.get();
+            switch (current.kind) {
+                case READY -> {
+                    next = PendingState.EMPTY;
+                    disposition = ReadyTake.Disposition.CONSUMED;
+                    taken = current.snapshot;
+                }
+                case PREPARING -> {
+                    disposition = ReadyTake.Disposition.HANDED_TO_MAIN;
+                    taken = null;
+                    if (current.consumerMissed) {
+                        // 已 missed 则无需再 CAS (幂等), 直接返回判别。
+                        return ReadyTake.handedToMain();
+                    }
+                    next = new PendingState(PendingState.Kind.PREPARING, current.snapshot, true);
+                }
+                case EMPTY -> {
+                    // 不改槽 (含 EMPTY_CONSUMER_PASSED), 直接返回 —— 终态死亡不标 missed。
+                    return ReadyTake.emptyDead();
+                }
+                default -> throw new IllegalStateException("unreachable pending kind: " + current.kind);
+            }
+        } while (!pendingState.compareAndSet(current, next));
+        return new ReadyTake(disposition, taken);
+    }
+
+    /**
+     * {@link #takeReadyForTerminalConsumer} 的原子三态结果: 判别 + 取走的 pending。
+     */
+    public static final class ReadyTake {
+
+        public enum Disposition {
+            /** 取到就绪 READY pending, 在飞 task 直接重投它。 */
+            CONSUMED,
+            /** 槽为 PREPARING 已标 missed, 补踢交还主线程 publish 自踢; 调用方 early-return 不碰 mustDrain。 */
+            HANDED_TO_MAIN,
+            /** 槽 EMPTY 无就绪接力; 调用方走安全网 (清 mustDrain + ioFailed + enqueueRecovery)。 */
+            EMPTY_DEAD
+        }
+
+        private static final ReadyTake HANDED_TO_MAIN = new ReadyTake(Disposition.HANDED_TO_MAIN, null);
+        private static final ReadyTake EMPTY_DEAD = new ReadyTake(Disposition.EMPTY_DEAD, null);
+
+        private final Disposition disposition;
+        private final ChunkSnapshot snapshot;
+
+        private ReadyTake(Disposition disposition, ChunkSnapshot snapshot) {
+            this.disposition = disposition;
+            this.snapshot = snapshot;
+        }
+
+        private static ReadyTake handedToMain() {
+            return HANDED_TO_MAIN;
+        }
+
+        private static ReadyTake emptyDead() {
+            return EMPTY_DEAD;
+        }
+
+        public Disposition disposition() {
+            return disposition;
+        }
+
+        /** 仅 CONSUMED 时非 null (取走的就绪 READY pending)。 */
+        public ChunkSnapshot snapshot() {
+            return snapshot;
+        }
+    }
+
+    /**
+     * v0.11.0 修复 (C-dispatch-register-toctou 终局): 无条件清空槽 (任意态 -> EMPTY), 返回曾停泊的 pending
+     * (PREPARING 或 READY 的 snapshot, 否则 null)。供**关服终局** (joinWorkers 后 workersStopping 残窗,
+     * 主线程已不可能再 publish) 全清防泄漏。
+     *
+     * <p><b>用途已收窄</b>: 原本的两个终态死亡调用点 (onUnhandledError / onIoFailure FAILED_TERMINAL) 已改用
+     * {@link #takeReadyForTerminalConsumer} (只消费 READY, PREPARING 交还主线程), 因为那两处在飞 task 死亡时
+     * 主线程可能仍在 dispatch 改写 PREPARING tag, 全清会夺走未就绪 tag 接力 = 数据竞争。本方法只保留给关服终局:
+     * worker 已停、主线程已过 ChunkMap.save 拦截窗口不再 publish, 此时全清 (含理论上残留的 PREPARING) 才安全。
      *
      * @return 曾停泊的 pending (PREPARING/READY); 槽本就 EMPTY 时返 null
      */
