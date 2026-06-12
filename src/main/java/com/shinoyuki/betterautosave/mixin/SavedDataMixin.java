@@ -9,16 +9,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * v0.10.2 修复 (M-saveddata-dirty-visibility): 给 vanilla {@link SavedData#isDirty()} /
- * {@code setDirty(boolean)} 的 dirty 标志补一个 volatile 镜像, 消除 BAS 异步路径下的跨线程
- * 可见性 race.
+ * 给 vanilla {@link SavedData#isDirty()} / {@code setDirty(boolean)} 的 dirty 标志补一个
+ * volatile 镜像, 消除 BAS 异步路径下的跨线程可见性 race.
  *
  * <p><b>race 本体</b>: vanilla 的 {@code SavedData.dirty} 是普通非 volatile boolean。
  * BAS 的 {@link com.shinoyuki.betterautosave.core.snapshot.SavedDataSaveTask} 在 IO 失败时
  * 由 worker 线程调 {@code savedData.setDirty()} 写 dirty=true, 而主线程在
  * {@link DimensionDataStorageMixin} 周期遍历里裸读 {@code savedData.isDirty()}。两线程对同一
  * 非 volatile 字段无 happens-before, 主线程可能读到陈旧的 dirty=false, 把这个 IO 失败文件的
- * 重投推迟若干周期 (x86/HotSpot 上几乎即时可见, 仅弱内存序架构潜伏, 故 Minor)。
+ * 重投推迟若干周期 (x86/HotSpot 上几乎即时可见, 仅弱内存序架构潜伏)。
  *
  * <p><b>为何镜像而非直接把字段改 volatile</b>: dirty 在 vanilla 基类, mixin 不能改字段修饰符。
  * 用 {@code @Unique volatile} 镜像收口读写: {@code setDirty(boolean)} TAIL 同步写镜像 (no-arg

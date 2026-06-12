@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SavedData 在途文件名去重单测 (Minor 修复 4 第一层).
+ * SavedData 在途文件名去重单测.
  *
  * <p>现场: savedDataWorkerThreads 可配 1-4, 同名 .dat 被多 worker 并发写交错损坏.
  * mixin 入队前 add(name), worker task finally remove(name): 同名在上轮还没写完时

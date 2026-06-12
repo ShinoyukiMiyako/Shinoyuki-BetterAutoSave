@@ -13,16 +13,16 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ChunkMapSaveMixin dispatch 异常 catch 路径的恢复契约单测 (Critical 修复 C1).
+ * ChunkMapSaveMixin dispatch 异常 catch 路径的恢复契约单测.
  *
  * <p>现场: SnapshotPipeline.captureAndDispatchChunk 第一行 setUnsaved(false),
- * 随后 capture 抛异常冒泡到 ChunkMapSaveMixin 的 catch. 旧 catch 只调
+ * 随后 capture 抛异常冒泡到 ChunkMapSaveMixin 的 catch. 若 catch 只调
  * resetAfterFallback (归零 phase) + compareAndClearMustDrain + 计数 + log, 不还原
  * isUnsaved, 也不 cancel cir -> vanilla ChunkMap.save 方法体续跑撞 isUnsaved 门
  * (此刻 false) -> return false 跳过同步写 -> 本次保存丢失; 该 chunk 此后不再编辑则
  * unload 与关服 flush 同样按 isUnsaved 门跳过, 永久丢失.
  *
- * <p>修复: catch 改调 SaveDispatcher.recoverAfterDispatchFailure(state, levelChunk::setUnsaved),
+ * <p>catch 调 SaveDispatcher.recoverAfterDispatchFailure(state, levelChunk::setUnsaved),
  * 同时还原 isUnsaved=true, 让续跑的 vanilla 方法体过 isUnsaved 门 -> 当场同步写盘救回本次数据.
  *
  * <p>本测试不构造真实 LevelChunk (MC 类单测无法实例化), 复刻 ChunkAccessMixin.onSetUnsaved

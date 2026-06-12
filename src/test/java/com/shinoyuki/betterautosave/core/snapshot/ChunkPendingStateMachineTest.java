@@ -32,14 +32,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * pendingSnapshot 四态状态机 (EMPTY/PREPARING/READY + consumerMissed) 的交错穷举回归
- * (C-dispatch-register-toctou 终局, 第八轮 Critical)。
+ * (dispatch 与在途登记之间的 TOCTOU 窗口)。
  *
  * <p>两组用例:
  * <ol>
  *   <li><b>tag-race 受控复刻</b>: 注入门控 SaveEventDispatcher —— dispatch (PREPARING 窗口) 内手动完成在飞
  *       future 触发 REQUEUE_DIRTY, 断言回调**不**取走未就绪 tag (PREPARING 不可消费), 随后 listener 才往
  *       eventTag 写 sentinel, dispatch 返回 publish 自踢 —— 最终落盘的 relay tag **必含** sentinel, 证明
- *       worker assemble 严格晚于 listener 写完。修复前 (register==可消费) 回调会抢走 listener 仍在改写的 tag,
+ *       worker assemble 严格晚于 listener 写完。若把已登记 (register) 直接当作可消费, 回调会抢走 listener 仍在改写的 tag,
  *       relay 落盘缺 sentinel —— 该断言挂。受控交错 (无 sleep), 确定性。</li>
  *   <li><b>状态机全交错矩阵</b>: 回调到达点 (PREPARING 前/中/后) x dispatch 成功/抛 x 单代/嵌套, 每格断言
  *       pending 恰被消费一次 + mustDrain/serializing/ioPending 终值归零 + 槽终态 EMPTY + 无双投。</li>
@@ -81,12 +81,12 @@ class ChunkPendingStateMachineTest {
     // ===================== 1) tag-race 受控复刻 =====================
 
     /**
-     * 核心反例 (修复前必挂): 在飞 IO 落地于 dispatch (PREPARING) 窗口内时, 回调不得取走 listener 仍在原地
+     * 核心反例: 在飞 IO 落地于 dispatch (PREPARING) 窗口内时, 回调不得取走 listener 仍在原地
      * 改写的未就绪 tag。复刻全链: begin(PREPARING) -> [dispatcher 门内: 完成在飞 future 触发回调 -> 回调见
      * PREPARING 标 missed 不消费 -> listener 写 sentinel] -> publish 见 missed 自踢 -> relay assemble 落盘。
      * 断言落盘 relay tag 含 sentinel (worker 严格晚于 listener)。
      *
-     * <p>判定标准 (删修复必挂): 把 takeReadyPendingSnapshot 的 PREPARING 分支退回直接消费 -> 回调在门内就
+     * <p>判定标准: 把 takeReadyPendingSnapshot 的 PREPARING 分支退回直接消费 -> 回调在门内就
      * assemble 了 gen=2 tag (此刻 sentinel 尚未写入) -> 落盘 tag 缺 sentinel, "含 sentinel"断言挂。
      */
     @Test

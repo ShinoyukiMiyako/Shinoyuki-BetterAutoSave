@@ -70,13 +70,13 @@ public abstract class DimensionDataStorageMixin {
     private Map<String, SavedData> cache;
 
     /**
-     * v0.7.1 修复 (M7): 历史落盘 size 跟踪, 替代 file.length() 守卫.
-     * 之前守卫 file.exists() && file.length() > maxBytes:
+     * 历史落盘 size 跟踪, 替代纯 file.length() 守卫.
+     * 纯 file.exists() && file.length() > maxBytes 守卫的缺陷:
      * - 文件不存在时短路 false → 第一次写大文件无保护
      * - NFS / SMB 远程 fs file.length() 缓存延迟可能误判
      *
-     * 改为 worker 完成 IO 后回写 size 到此 map. 守卫优先用历史 size,
-     * 没历史记录退化为 file.length() (跟之前等价, 只覆盖第一次写场景).
+     * worker 完成 IO 后回写 size 到此 map. 守卫优先用历史 size,
+     * 没历史记录退化为 file.length() (只覆盖第一次写场景).
      */
     @Unique
     private final ConcurrentHashMap<String, Long> betterautosave$lastWrittenSize = new ConcurrentHashMap<>();
@@ -103,8 +103,8 @@ public abstract class DimensionDataStorageMixin {
         if (metrics == null) {
             return;
         }
-        // v0.7.1 修复 (M9): 不再需要 server 引用 — SavedDataSaveTask 失败重试改为
-        // worker 直接 setDirty, 不走 server.execute 异步派回主线程.
+        // 无需 server 引用 — SavedDataSaveTask 失败重试由 worker 直接 setDirty,
+        // 不走 server.execute 异步派回主线程.
         DimensionDataStorageInvoker invoker = (DimensionDataStorageInvoker) (Object) this;
         long maxBytes = (long) BetterAutoSaveConfig.savedDataMaxFileSizeMB() * 1024L * 1024L;
 
@@ -116,9 +116,9 @@ public abstract class DimensionDataStorageMixin {
             }
             File file = invoker.betterautosave$getDataFile(name);
 
-            // Minor 修复 4 (a): 在途文件名去重. savedDataWorkerThreads 可配 1-4, 同名 .dat
-            // 被多 worker 并发写会交错损坏. 上轮该文件的 worker 还没写完 (in-flight) 就跳过
-            // 本轮 dispatch, 不清 dirty → 下个 autosave 周期自然重试. add 成功才往下走;
+            // 在途文件名去重. savedDataWorkerThreads 可配 1-4, 同名 .dat 被多 worker 并发写会交错损坏.
+            // 上个周期该文件的 worker 还没写完 (in-flight) 就跳过本周期 dispatch, 不清 dirty → 下个
+            // autosave 周期自然重试. add 成功才往下走;
             // 失败 (已在途) continue 且保持 dirty.
             if (!pipeline.savedDataInFlight().add(name)) {
                 continue;
@@ -126,28 +126,26 @@ public abstract class DimensionDataStorageMixin {
 
             // 大文件 fallback: 现存文件已超阈值, 走 vanilla 同步避免 worker queue
             // 被几十 MB 单文件堵死.
-            // v0.7.1 修复 (M7): 优先用历史 size (worker 上次写完回写), 兜底再用
+            // 优先用历史 size (worker 上次写完回写), 兜底再用
             // file.length(). 历史 size 在 NFS / SMB 远程 fs 上比 file.length() 可靠.
             // 首次写仍无保护 (没有历史也没有现存文件), 文档化为已知限制.
             Long historySize = betterautosave$lastWrittenSize.get(name);
             long sizeForGuard = historySize != null ? historySize : (file.exists() ? file.length() : 0L);
             if (sizeForGuard > maxBytes) {
                 metrics.recordSavedDataFallback();
-                // v0.10.2 修复 (M3): 同步 fallback 不入 worker, 占位释放责任在本地. 之前
-                // save(file) 无 finally, 抛 Throwable (vanilla SavedData.save(File) 仅 catch
-                // IOException, mod 的 save(CompoundTag) 抛 RuntimeException 会透出) 则 remove(name)
-                // 被跳过 → 该名称永久占位, 后续每周期 add 失败被跳过, 该 SavedData 失去 BAS 增量
-                // 保护仅剩关服兜底. 抽到 SavedDataSyncFallback.syncWrite 用 try-finally 释放占位 +
-                // 集中单测异常安全契约. 异常仍按 vanilla 等价语义透出.
+                // 同步 fallback 不入 worker, 占位释放责任在本地. 若 save(file) 无 finally, 抛 Throwable
+                // (vanilla SavedData.save(File) 仅 catch IOException, mod 的 save(CompoundTag) 抛
+                // RuntimeException 会透出) 则 remove(name) 被跳过 → 该名称永久占位, 后续每周期 add 失败被
+                // 跳过, 该 SavedData 失去 BAS 增量保护仅剩关服兜底. SavedDataSyncFallback.syncWrite 用
+                // try-finally 释放占位. 异常仍按 vanilla 等价语义透出.
                 SavedDataSyncFallback.syncWrite(savedData, file, pipeline.savedDataInFlight(), name);
                 continue;
             }
 
-            // v0.7.1 修复 (M8): 把 mod 序列化阶段 (savedData.save(CompoundTag)) 跟
-            // BAS dispatch 阶段分两个 try-catch. 之前合并 try 一旦 mod save(CompoundTag)
-            // 抛, fallback 走 savedData.save(file) 又调一次 save(CompoundTag) → mod
-            // 非幂等实现副作用双发, 同时 vanilla SavedData.save(File) 仅 catch IOException
-            // 不 catch RuntimeException, 异常透出导致 dataStorage.save forEach 中断.
+            // 把 mod 序列化阶段 (savedData.save(CompoundTag)) 跟 BAS dispatch 阶段分两个 try-catch.
+            // 若合并成一个 try, 一旦 mod save(CompoundTag) 抛, fallback 走 savedData.save(file) 又调一次
+            // save(CompoundTag) → mod 非幂等实现副作用双发, 同时 vanilla SavedData.save(File) 仅 catch
+            // IOException 不 catch RuntimeException, 异常透出导致 dataStorage.save forEach 中断.
             //
             // 拆分后:
             // - mod 序列化抛 → 跳过该条 + log + fallback 计数, 不影响其他 entry
@@ -171,22 +169,21 @@ public abstract class DimensionDataStorageMixin {
                 SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
                         betterautosave$lastWrittenSize, pipeline.savedDataInFlight());
                 metrics.recordSavedDataSubmitted();
-                // v0.10.2 修复 (M-saveddata-dirty-ordering): 乐观清 dirty 必须发生在 enqueue 之前。
-                // 旧序 (offer 后才 setDirty(false)) 是 lost-update: worker 是独立线程, offer 把 task 交给
-                // worker 后主线程还要再跑两行才清 dirty; 持续性 IO 故障下 worker 的 writeCompressed 同步快速
-                // 抛 IOException 走 SavedDataSaveTask setDirty(true), 这次 true 可能先于主线程的 setDirty(false)
-                // 发生, last-writer-wins 主线程 false 胜出 -> 下周期 isDirty() gate 跳过 -> M9 宣称的 "worker
-                // re-mark -> 下周期重试" 增强在 fast-fail 窗口内被自己抵消。上移后主线程的 false 必然
-                // happens-before worker 任何 setDirty(true), worker 失败置 true 成为最后写, 下周期正确重试。
-                // (volatile 镜像解决可见性, 与本顺序修复正交, 二者都需要。)
+                // 乐观清 dirty 必须发生在 enqueue 之前。若放在 offer 之后, 是 lost-update: worker 是独立线程,
+                // offer 把 task 交给 worker 后主线程还要再跑两行才清 dirty; 持续性 IO 故障下 worker 的
+                // writeCompressed 同步快速抛 IOException 走 SavedDataSaveTask setDirty(true), 这次 true 可能先于
+                // 主线程的 setDirty(false) 发生, last-writer-wins 主线程 false 胜出 -> 下周期 isDirty() gate 跳过
+                // -> "worker re-mark -> 下周期重试" 在 fast-fail 窗口内被自己抵消。清 dirty 上移后主线程的 false
+                // 必然 happens-before worker 任何 setDirty(true), worker 失败置 true 成为最后写, 下周期正确重试。
+                // (volatile 镜像解决可见性, 与本顺序正交, 二者都需要。)
                 savedData.setDirty(false);
-                // v0.10.2 修复 (M5): inc serializing + offer 的 gauge 配平不变式收口到 SavedDataDispatch。
+                // inc serializing + offer 的 gauge 配平不变式收口到 SavedDataDispatch。
                 // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask); inc 抵消
                 // 责任移交 worker execute 首行 dec。offer 阶段抛异常时 enqueue 内部已先补 dec 再上抛,
                 // 故下面 dispatch catch 不得再碰 serializing (已配平), 仅走同步兜底写。
                 SavedDataDispatch.enqueue(pipeline.savedDataWorkerQueue(),
                         new SavedDataSaveTask(snapshot, metrics), metrics);
-                // v0.10.2 修复 (M4): SavedData 队列深度入指标. 与 chunk/entity 不同, SavedData
+                // SavedData 队列深度入指标. 与 chunk/entity 不同, SavedData
                 // 不走 SaveScheduler 的 tick 节流队列 (无逐 tick drain 回写时机), 只能在 offer
                 // 后即时回写 queue.size() — worker 消费后的回落由下一周期 offer 重新采样.
                 metrics.setSavedDataQueueDepth(pipeline.savedDataWorkerQueue().size());
@@ -204,9 +201,8 @@ public abstract class DimensionDataStorageMixin {
                     // 兜底写成功: dirty 已在 enqueue 前清 false, 此处幂等保持 false (与上移前同终值)。
                     savedData.setDirty(false);
                 } catch (java.io.IOException ioe) {
-                    // v0.10.2 修复 (M-saveddata-dirty-ordering, 补偿): 上移后进入本 catch 时 dirty 已是 false,
-                    // 而 "offer 失败 + 兜底写也失败" 这条路径在上移前会留 dirty=true 下周期重试。必须显式 re-mark
-                    // 才与上移前终值等价, 否则丢这次重试 (回归)。
+                    // 因乐观清 dirty 已上移到 enqueue 前, 进入本 catch 时 dirty 已是 false。"offer 失败 + 兜底
+                    // 写也失败" 这条路径需要下周期重试, 故必须在此显式 re-mark, 否则丢这次重试。
                     savedData.setDirty();
                     LOGGER.error("[BetterAutoSave] SavedData {} sync fallback write failed, re-marked dirty for next cycle",
                             name, ioe);

@@ -139,7 +139,7 @@ public final class BetterAutoSaveCommand {
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
         SaveMetrics metrics = BetterAutoSaveCore.metrics();
         SaveMetrics.Snapshot snap0 = metrics.snapshot();
-        // v0.7.1 修复 (C3): 加 inFlightSerializing 检查防 assemble 期间误判 idle.
+        // 加 inFlightSerializing 检查防 assemble 期间误判 idle.
         if (pipeline.chunkWorkerQueue().isEmpty()
                 && pipeline.entityWorkerQueue().isEmpty()
                 && pipeline.savedDataWorkerQueue().isEmpty()
@@ -266,7 +266,7 @@ public final class BetterAutoSaveCommand {
                     fallback++;
                 }
             } catch (Throwable t) {
-                // 同 SaveDispatcher / ChunkMapSaveMixin 的 M3 修复: capture 抛后 chunk 停在
+                // 同 SaveDispatcher / ChunkMapSaveMixin 的 catch: capture 抛后 chunk 停在
                 // unsaved=false + phase=SERIALIZING, 不复位则永远走早 return 路径数据丢失.
                 // force-async 跑在命令线程 (server thread), setUnsaved 安全. 复用 SaveDispatcher
                 // 的复位 seam 保持单一来源.
@@ -308,7 +308,7 @@ public final class BetterAutoSaveCommand {
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
         SaveMetrics.Snapshot snap0 = metrics.snapshot();
         long initial = snap0.mustDrainPending();
-        // v0.7.1 修复 (C3): 加 inFlightSerializing 检查防 assemble 期间误判 idle.
+        // 加 inFlightSerializing 检查防 assemble 期间误判 idle.
         if (initial == 0L && pipeline.chunkWorkerQueue().isEmpty()
                 && snap0.inFlightSerializing() == 0L
                 && snap0.inFlightIoPending() == 0L) {
@@ -339,7 +339,7 @@ public final class BetterAutoSaveCommand {
             long deadline = t0 + timeoutMs;
             while (System.currentTimeMillis() < deadline) {
                 SaveMetrics.Snapshot s = metrics.snapshot();
-                // v0.7.1 修复 (C3): 加 inFlightSerializing 检查.
+                // 加 inFlightSerializing 检查.
                 if (s.mustDrainPending() == 0L
                         && pipeline.chunkWorkerQueue().isEmpty()
                         && s.inFlightSerializing() == 0L

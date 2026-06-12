@@ -17,18 +17,11 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 不变式: missed 标记绝不得跨保存周期存活触发幽灵自踢 (A4, 原第九轮 C-stale-missed-no-epoch)。
+ * 不变式: missed 标记绝不得跨保存周期存活触发幽灵自踢。
  *
- * <p>v0.11.0 REDESIGN 后机制变更 (本测试随之更新, 但断言强度一分不降): 第九轮靠 enterSerializing 末尾
- * compareAndSet(EMPTY_CONSUMER_PASSED, EMPTY) 的<b>时序性单 CAS 清理</b>防 stale 跨周期; 它挡得住
- * "清理时已存在的 stale" (本类 stale_missed_does_not_survive...) 却挡不住 "清理之后才写入的 stale"
- * (那正是第十轮 A5)。SlotWord 协议改用<b>周期序号代际 fence</b>: missed 携带它所属在飞周期的 inFlightCycleSeq,
- * beginPendingSnapshot / publishPendingSnapshot 仅在 missedCycle==inFlightCycleSeq 时认定同周期, stale
- * (旧周期序号) 自动丢弃 —— 更强, 同时覆盖 "清理前已存在" 与 "清理后才写入" 两种 stale。
- *
- * <p>判定标准 (删修复必挂): 把 beginPendingSnapshot 的继承条件 missedCycle==inFlightCycleSeq 改成无条件继承
- * (删代际 fence) -> gen2/gen3 周期继承上一周期 stale missed, publishPendingSnapshot 返非 null (提前自踢)
- * 而非 null (发 READY), 断言挂; 且 gen2 landAndTake 误判 CLEAN_LANDED 而非 REQUEUE_DIRTY, 断言挂。
+ * <p>SlotWord 协议用<b>周期序号代际 fence</b>守这条线: missed 携带它所属在飞周期的 inFlightCycleSeq,
+ * beginPendingSnapshot / publishPendingSnapshot 仅在 missedCycle==inFlightCycleSeq 时认定同周期, 旧周期
+ * 序号的 stale 自动丢弃 —— 同时覆盖 "清理前已存在的 stale" 与 "清理后才写入的 stale" 两种来源。
  */
 class StaleMissedCrossCycleTest {
 
@@ -50,8 +43,8 @@ class StaleMissedCrossCycleTest {
     }
 
     /**
-     * 直接复刻三代 ABA 序列 (核查报告 evidence 里 StaleMissedCrossCycleReproTest 的状态机层步骤), 修复后
-     * 断言全部翻转: gen3 不继承 stale missed -> publish 发布 READY 不提前自踢 -> gen2 回调正确判 REQUEUE_DIRTY。
+     * 三代 ABA 序列 (清理前已存在的 stale): gen3 不继承上一周期 stale missed -> publish 发布 READY 不提前自踢
+     * -> gen2 回调正确判 REQUEUE_DIRTY。
      */
     @Test
     void stale_missed_does_not_survive_into_next_save_cycle() {
@@ -103,16 +96,12 @@ class StaleMissedCrossCycleTest {
     }
 
     /**
-     * v0.11.0 REDESIGN 加强 (设计 regressionProtectionMap #4 要求): 新增 "清理之后才写入的 stale" 用例 ——
-     * 这正是第十轮 A5 的本体, 第九轮的时序性单 CAS 清理 (清理时已存在的 stale) 挡不住它, 代际 fence 挡得住。
+     * 清理之后才写入的 stale: 代际 fence 守得住 "晚写" 的 stale, 时序性单 CAS 清理守不住。
      *
      * <p>序: gen1 周期开 (cycleSeq=C1) -> 主线程<b>先</b>开 gen2 周期 (enterSerializing 把 cycleSeq 推到 C2) ->
-     * gen1 回调<b>之后</b>才在 EMPTY 槽标 missed。关键: 用 landAndTake 时 missed 在 land 同一 CAS 用<b>当时</b>的
-     * inFlightCycleSeq 标, 但本用例刻意用拆分序 (ioCompletedSuccessfully 先, 开 gen2 周期, 再 takeReadyPendingSnapshot)
-     * 复刻 "晚写" —— 此时 take 读到的是 C2, missed 被标成 C2 周期。下一次 gen3 碰撞 begin 在 C2 周期: missed(C2)==
-     * inFlightCycleSeq(C2) 同周期 -> 这是拆分序的危险点。但生产路径 (landAndTake) 已消除拆分; 本用例断言的是
-     * 代际 fence 对 "begin 所在周期与 missed 所标周期一致" 的正确处理: 若 missed 标的是<b>更早</b>周期 (C1), begin
-     * 必丢弃。把两种 missed 来源都覆盖。
+     * gen1 回调<b>之后</b>才在 EMPTY 槽标 missed。生产路径 landAndTake 在 land 同一 CAS 用<b>当时</b>的
+     * inFlightCycleSeq 标 missed, 故 missed 带 land 周期 C1。本用例断言代际 fence 对 "begin 所在周期与 missed
+     * 所标周期一致" 的正确处理: 若 missed 标的是<b>更早</b>周期 (C1), 在 C2 周期 begin 必丢弃它。
      */
     @Test
     void stale_missed_from_earlier_cycle_dropped_even_when_written_late() {

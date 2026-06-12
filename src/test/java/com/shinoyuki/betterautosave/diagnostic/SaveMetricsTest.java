@@ -113,7 +113,7 @@ class SaveMetricsTest {
 
         SaveMetrics.Snapshot snap = m.snapshot();
         // chunk / savedData 队列深度互不串线 (共用 set/get 模板, 易接错 AtomicLong).
-        // entity 不再有调度队列深度指标 (v0.10.2 删死调度链); entity 在途以 entityWorkerQueue 观测.
+        // entity 无调度队列深度指标, 在途以 entityWorkerQueue 观测.
         assertEquals(11, snap.workerQueueDepth());
         assertEquals(6, snap.savedDataQueueDepth());
 

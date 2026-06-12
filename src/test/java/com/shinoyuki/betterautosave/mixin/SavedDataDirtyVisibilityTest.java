@@ -8,12 +8,12 @@ import java.lang.reflect.Modifier;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SavedData dirty 跨线程可见性修复回归 (M-saveddata-dirty-visibility).
+ * SavedData dirty 跨线程可见性回归.
  *
  * <p>现场: vanilla {@code SavedData.dirty} 是普通非 volatile boolean。worker 线程在 IO 失败时
  * 调 {@code setDirty()} 写 true, 主线程裸读 {@code isDirty()}, 无 happens-before → 主线程可能
- * 读到陈旧值, 把失败文件的重投推迟。修复用 {@link SavedDataMixin} 的 {@code @Unique volatile}
- * 镜像收口读写, 跨线程可见性由 volatile 语义保证。
+ * 读到陈旧值, 把失败文件的重投推迟。{@link SavedDataMixin} 用 {@code @Unique volatile} 镜像收口
+ * dirty 读写, 跨线程可见性由 volatile 语义保证。
  *
  * <p><b>为何不在 JUnit 直接测真实 SavedData</b>: 本项目 test 任务是裸 JUnit Platform, 不挂 mixin
  * 转换 agent (见 build.gradle test 任务), mixin 注入仅在 Forge 运行期生效, 无法在单测里观测真实
@@ -45,7 +45,7 @@ class SavedDataDirtyVisibilityTest {
     void mixin_mirror_field_is_volatile() throws NoSuchFieldException {
         Field mirror = SavedDataMixin.class.getDeclaredField("betterautosave$dirtyMirror");
         assertTrue(Modifier.isVolatile(mirror.getModifiers()),
-                "dirty 镜像字段必须是 volatile — 否则 worker 写 / 主线程读无 happens-before, 修复失效");
+                "dirty 镜像字段必须是 volatile — 否则 worker 写 / 主线程读无 happens-before, 跨线程可见性无保证");
     }
 
     @Test

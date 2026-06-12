@@ -54,7 +54,7 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
     @Final
     private IOWorker worker;
 
-    // v0.10.2 修复 (M4): per-level 状态表收口到 EntityStateMap, 支持 CLEAN_LANDED 终态安全剔除,
+    // per-level 状态表收口到 EntityStateMap, 支持 CLEAN_LANDED 终态安全剔除,
     // 防 EntityStorage 单例的状态表随进程运行无界增长.
     @Unique
     private final EntityStateMap betterautosave$entityStates = new EntityStateMap();
@@ -117,10 +117,9 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             if (state.tryMarkMustDrain()) {
                 metrics.incMustDrainPending();
             }
-            // v0.10.2 修复 (C-entity-unload-collision): 这次 storeEntities 几乎必然来自 vanilla
-            // processChunkUnload —— 它 storeEntities 后立即把实体驱逐出内存且该坐标永不再 storeEntities,
-            // 故这份 chunkEntities 是最新实体列表的唯一副本。旧逻辑直接 ci.cancel 丢弃它, 信任在飞旧代快照,
-            // 实体增量 (新放的命名生物/盔甲架/展示框等) 永久静默丢失。
+            // 这次 storeEntities 几乎必然来自 vanilla processChunkUnload —— 它 storeEntities 后立即把实体驱逐
+            // 出内存且该坐标永不再 storeEntities, 故这份 chunkEntities 是最新实体列表的唯一副本。直接 ci.cancel
+            // 丢弃它信任在飞旧代快照不行: 实体增量 (新放的命名生物/盔甲架/展示框等) 会永久静默丢失。
             //
             // 关键非对称 (与 chunk 路径): entity 没有 setUnsaved->markDirty 这样的独立 generation 驱动源,
             // generation 只在 storeEntities 撞 CLEAN 时推进。故必须在此**显式 markDirty 推 generation**,
@@ -129,33 +128,31 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             state.markDirty();
             try {
                 EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
-                // v0.11.0 REDESIGN 裁决 (经对抗证伪, 勿"对齐" chunk 的 SlotWord 协议): entity 路径不迁 SlotWord,
-                // 对全攻击目录 A1-A7 结构免疫, 因为它的合法交错空间远小于 chunk —— 根因是 entity 在 capturePending
-                // 之后**没有 dispatchSaveEvent** (Forge 无 entity save 事件)。逐条:
-                // - A2 未就绪 tag 暴露 / A1 lost-wakeup: registerPendingSnapshot 是碰撞分支最后一个碰 tag 的主线程动作,
+                // entity 路径不迁 chunk 的 SlotWord 三态协议: entity 的合法交错空间远小于 chunk —— 根因是 entity
+                // 在 capturePending 之后没有 dispatchSaveEvent (Forge 无 entity save 事件)。逐项说明为何裸单槽充分:
+                // - 未就绪 tag 暴露 / lost-wakeup: registerPendingSnapshot 是碰撞分支最后一个碰 tag 的主线程动作,
                 //   登记后主线程不再触碰它, 回调 take 时 tag 已是终态。无 dispatch 窗口 -> 无 PREPARING/READY 两相之
                 //   分必要, 裸单槽 (登记即就绪) 充分。chunk 必须 begin(PREPARING)->dispatch->publish(READY) 三步正是
                 //   为隔离 dispatch 期间一个不可消费态; entity 无此窗口。
-                // - A4/A5 跨周期 stale: 无 PREPARING 窗口 -> 回调无需 "路过标 missed 离开" 的 sticky note 机制 ->
+                // - 跨周期 stale: 无 PREPARING 窗口 -> 回调无需 "路过标 missed 离开" 的 sticky note 机制 ->
                 //   无 missedCycle/cycleSeq 载体 -> 没有任何 note 能跨周期存活被误读。回调全态 getAndSet(null) 析构式
                 //   消费, 最坏只是被更新代 register 覆盖 (latest-wins, 正确)。reenterSerializingForPending 锁 pending
                 //   自己的 capturedGeneration 防错代接力 / 误判 CLEAN_LANDED。
-                // - A6 begin 前终态: 本分支程序序 tryMarkMustDrain(:117) **严格先于** registerPendingSnapshot(:139)
+                // - begin 前终态: 本分支程序序 tryMarkMustDrain(:117) 严格先于 registerPendingSnapshot(:148)
                 //   置 mustDrain; 终态回调把清 mustDrain 的 CAS 与 takePendingSnapshot 同址 (EntitySaveTask.onIoFailure)。
                 //   终态后于 register (槽已满): 同一终态 handler take 走 + ERROR + 清 mustDrain, gauge 配平, 无孤儿。
-                //   终态先于 register (真 A6 窗口): 终态 CAS 把 gauge 正确 dec 到 0, 随后 register 落进 phase=FAILED 的
-                //   死状态 (无在飞、无消费者), mustDrain=false 在此恰是正确的 (没有任何东西要等), 非 chunk-A6 的孤儿
-                //   drain 不变式破坏。chunk-A6 的危害 (gauge 正偏移泄漏 / 丢活消费者让关服 join 挂) 在 entity 不发生。
-                // 故迁 SlotWord 只引入无对应风险的复杂度 (YAGNI)。这是经证伪的非对称, 不是遗漏。
+                //   终态先于 register (窄窗口交错): 终态 CAS 把 gauge 正确 dec 到 0, 随后 register 落进 phase=FAILED 的
+                //   死状态 (无在飞、无消费者), mustDrain=false 在此恰是正确的 (没有任何东西要等), 不构成孤儿 drain 不
+                //   变式破坏。chunk 路径同位窗口的危害 (gauge 正偏移泄漏 / 丢活消费者让关服 join 挂) 在 entity 不发生。
+                // 故迁 SlotWord 只引入无对应风险的复杂度 (YAGNI)。这是结构性非对称, 不是遗漏。
                 state.registerPendingSnapshot(pending);
             } catch (Throwable t) {
                 // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 尚未登记 pending,
                 // 接力槽空。entity 路径无 dispatchSaveEvent, 故无 chunk 侧 register->dispatch 的 TOCTOU 窗口;
                 // 但 catch 的 gauge 配平与 chunk 同构: 上方 markDirty 已推 generation, 在飞旧代 IO 落地必判
                 // REQUEUE_DIRTY (EntitySaveState:118-129 恒不等) 永不清 mustDrain, 槽空回调取 null 不重投 ->
-                // 此后无路径清 mustDrain。故必须在此 compareAndClearMustDrain 亲自配平 (v0.11.0 修复
-                // C-dispatch-register-toctou 对称项: 撤销路径不留 mustDrain 正偏移)。退回信任在飞旧代
-                // (本次最新实体增量丢失), 记录可见。
+                // 此后无路径清 mustDrain。故必须在此 compareAndClearMustDrain 亲自配平 (撤销路径不留 mustDrain
+                // 正偏移)。退回信任在飞旧代 (本次最新实体增量丢失), 记录可见。
                 if (state.compareAndClearMustDrain()) {
                     metrics.decMustDrainPending();
                 }
@@ -163,8 +160,8 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                                 + "trusting in-flight snapshot (latest entity increment may be lost)",
                         chunkEntities.getPos(), dimensionId, t);
             }
-            // v0.10.2 修复 (m-pending-skips-poi-flush siblingGap): in-flight 碰撞分支也必须复刻 vanilla
-            // storeEntities 非空分支末尾的 emptyChunks.remove 副作用 (与常规 dispatch 路径 line ~174 同源)。
+            // in-flight 碰撞分支也必须复刻 vanilla storeEntities 非空分支末尾的 emptyChunks.remove 副作用
+            // (与常规 dispatch 路径 line ~174 同源)。
             // 该分支 ci.cancel() 短路前若漏 remove: 若该坐标在飞期间曾走过空 chunk 早返回路径 (vanilla 空分支
             // emptyChunks.add), 残留的 stale 条目使后续 unload->reload 时 vanilla loadEntities 命中 emptyChunks
             // 快速路径直接返空 chunk, 已落盘 entity 被忽略 -> 静默丢失 (entity 不可重建, 比 POI 更重)。
@@ -190,16 +187,14 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                 return;
             }
             EntitySnapshot snapshot = EntityCaptureProcedure.capture(chunkEntities, level, state);
-            // v0.10.2 修复 (M4): 传 this (EntitySaveStateAccess) 让 task 在 CLEAN_LANDED 终态剔除
-            // per-level 状态 map 条目, 防无界增长.
-            // v0.10.2 修复 (C-entity-unload-collision): 传接力重投 sink, 让 REQUEUE_DIRTY 落地时取
-            // pending 快照重投 (sink 绑 worker + stateOwner, 由 pipeline 构造)。
+            // 传 this (EntitySaveStateAccess) 让 task 在 CLEAN_LANDED 终态剔除 per-level 状态 map 条目, 防无界增长.
+            // 传接力重投 sink, 让 REQUEUE_DIRTY 落地时取 pending 快照重投 (sink 绑 worker + stateOwner, 由 pipeline 构造)。
             EntitySaveTask task = new EntitySaveTask(snapshot, worker, metrics, this,
                     pipeline.entityPendingReoffer(worker, this));
             metrics.incInFlightSerializing();
             metrics.recordEntitySubmitted();
             pipeline.entityWorkerQueue().offer(task);
-            // v0.7.1 修复: 复制 vanilla 在 storeEntities 非空分支末尾的副作用
+            // 复制 vanilla 在 storeEntities 非空分支末尾的副作用
             // (vanilla EntityStorage.java:108 emptyChunks.remove). 漏调会让该 chunk
             // 后续 unload→reload 时 vanilla loadEntities 命中 emptyChunks 快速路径
             // 直接返空 chunk, 实际已落盘的 entity 数据被忽略 → 静默丢失.
@@ -209,11 +204,10 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             if (state.compareAndClearMustDrain()) {
                 metrics.decMustDrainPending();
             }
-            // v0.7.1 修复 (M3): 同 ChunkMapSaveMixin, capture 抛后 phase 已推到
-            // SNAPSHOTTING/SERIALIZING. 不复位会让该 chunk entity 后续永远走早 return
-            // 路径既不入 BAS 也不走 vanilla, 数据永久丢失. resetAfterFallback 归零状态机.
+            // 同 ChunkMapSaveMixin, capture 抛后 phase 已推到 SNAPSHOTTING/SERIALIZING. 不复位会让该 chunk
+            // entity 后续永远走早 return 路径既不入 BAS 也不走 vanilla, 数据永久丢失. resetAfterFallback 归零状态机.
             //
-            // 与 ChunkMapSaveMixin C1 修复的非对称 (勿"补齐"): chunk 路径 catch 额外
+            // 与 ChunkMapSaveMixin 的非对称 (勿"补齐"): chunk 路径 catch 额外
             // setUnsaved(true) 是因为 vanilla ChunkMap.save 续跑时按 isUnsaved 门过滤,
             // 不还原门就跳过同步写. entity 路径无 isUnsaved 等价门 — storeEntities 续跑
             // 无条件序列化写盘 (vanilla EntityStorage 不看任何 dirty 标志), resetAfterFallback

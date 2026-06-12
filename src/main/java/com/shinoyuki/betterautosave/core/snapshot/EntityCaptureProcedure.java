@@ -12,7 +12,7 @@ import net.minecraft.world.level.entity.ChunkEntities;
 import org.slf4j.Logger;
 
 /**
- * v0.6 主线程 entity capture: 把一组 entities 在主线程内调 {@code entity.save}
+ * 主线程 entity capture: 把一组 entities 在主线程内调 {@code entity.save}
  * 序列化为 ListTag, 包装成 EntitySnapshot 投递到 worker queue.
  *
  * <p>与 {@link ChunkCaptureProcedure} 设计原则一致, 但实现简单得多 — 因为
@@ -38,10 +38,9 @@ public final class EntityCaptureProcedure {
     }
 
     /**
-     * v0.10.2 修复 (C-entity-unload-collision): 纯 capture 入口, 与
-     * {@link ChunkCaptureProcedure#capturePending} 对称 —— 只把最新 chunkEntities 固化为快照,
-     * 不碰 phase/inFlightGeneration (不调 enterSerializing), 不 offer。在途碰撞 + 卸载时由 mixin 调,
-     * 抓到的是 vanilla 即将驱逐出内存的最新实体列表 (唯一副本), 存进 pendingSnapshot 槽待接力重投。
+     * 纯 capture 入口, 与 {@link ChunkCaptureProcedure#capturePending} 对称 —— 只把最新 chunkEntities
+     * 固化为快照, 不碰 phase/inFlightGeneration (不调 enterSerializing), 不 offer。在途碰撞 + 卸载时由
+     * mixin 调, 抓到的是 vanilla 即将驱逐出内存的最新实体列表 (唯一副本), 存进 pendingSnapshot 槽待接力重投。
      */
     public static EntitySnapshot capturePending(
             ChunkEntities<Entity> chunkEntities,

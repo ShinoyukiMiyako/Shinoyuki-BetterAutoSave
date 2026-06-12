@@ -15,10 +15,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SerializationWorkerTest {
 
     /**
-     * 消费侧队列深度回写单测 (Minor 修复 M7).
+     * 消费侧队列深度回写单测.
      *
      * <p>现场: SavedData 深度 gauge 仅在主线程 offer 后写峰值, worker 排空后无回写 (SavedData 不走
-     * SaveScheduler 逐 tick drain 回写时机), gauge 长期停在峰值误导运维。修复: worker 每消费一个 task
+     * SaveScheduler 逐 tick drain 回写时机), gauge 长期停在峰值误导运维。因此 worker 每消费一个 task
      * 后经注入的 depthSink 回写 queue.size()。
      *
      * <p>判定标准: 删掉 run() 内 finally 的 depthSink.accept(queue.size()), drain 完成后 lastDepth

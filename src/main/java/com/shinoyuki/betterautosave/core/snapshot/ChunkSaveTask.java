@@ -20,7 +20,7 @@ public final class ChunkSaveTask implements SaveTask {
 
     /**
      * IO 提交 seam: 把"用给定 tag 提交一次 region file 写"抽象出来, 生产环境绑到
-     * {@code ioBridge.storeChunk(level, pos, tag)}. 抽出此接口让 M2 的失败重投循环可单测
+     * {@code ioBridge.storeChunk(level, pos, tag)}. 抽出此接口让失败重投循环可单测
      * (单测无法构造真实 ServerLevel / IOWorker), 注入返回受控 future 的 fake.
      */
     @FunctionalInterface
@@ -29,10 +29,9 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.10.2 修复 (C-chunk-unload-collision): 接力快照重投 seam。给定 pending 快照, 把它包成新的
-     * ChunkSaveTask 并 offer 回 chunkWorkerQueue (由序列化 worker 做 assemble, **不**在 IOWorker
-     * 邮箱线程内联拼装 —— 内联会堵全服写盘)。生产环境绑到 {@link SnapshotPipeline}; 单测注入
-     * 记录性 fake 以验证重投触发与代际接力。
+     * 接力快照重投 seam。给定 pending 快照, 把它包成新的 ChunkSaveTask 并 offer 回 chunkWorkerQueue
+     * (由序列化 worker 做 assemble, **不**在 IOWorker 邮箱线程内联拼装 —— 内联会堵全服写盘)。生产环境
+     * 绑到 {@link SnapshotPipeline}; 单测注入记录性 fake 以验证重投触发与代际接力。
      */
     @FunctionalInterface
     public interface PendingReoffer {
@@ -79,16 +78,15 @@ public final class ChunkSaveTask implements SaveTask {
 
     @Override
     public void execute() {
-        // v0.7.1 修复 (C2): execute 内同步异常路径必须复位 gauge.
+        // execute 内同步异常路径必须复位 gauge.
         // assemble 抛 → mixin 已 inc serializing 但本函数未 dec → 永久 +1.
         // serializingDec 标志记录"已 dec serializing", assemble 抛时 catch 补 dec, 然后 throw 让
         // SerializationWorker 走 onUnhandledError 处理 state.
-        // v0.11.0 修复 (C-callback-sync-throw-swallowed): ioPending 的同步抛补偿已下沉到 submitIo 内部
-        // (submitIo 自包 try 抵消 inc 并走 onIoFailure, 不再向上抛), 故此处不再需要 ioPendingIncWithoutFuture
-        // 守卫 —— submitIo 在 future 注册前已不会抛。
+        // ioPending 的同步抛补偿在 submitIo 内部 (submitIo 自包 try 抵消 inc 并走 onIoFailure, 不向上抛),
+        // 故此处无需 ioPending 守卫 —— submitIo 在 future 注册前不会抛到这里。
         boolean serializingDec = false;
         try {
-            // v0.9: 测 ChunkNbtAssembler.assemble 耗时回写 ChunkLatencyTracker.
+            // 测 ChunkNbtAssembler.assemble 耗时回写 ChunkLatencyTracker.
             // 这部分耗时跟 SerializationWorker 整体测的 worker time 几乎相等 —
             // 后续 ioBridge.storeChunk 仅提交 future 立即返回, 占比 < 0.1%.
             // 单独测这段而非复用 worker time, 避免改 SaveTask 接口加 onComplete 回调.
@@ -106,7 +104,7 @@ public final class ChunkSaveTask implements SaveTask {
             ChunkSaveState state = snapshot.state();
             submitIo(state, tag);
         } catch (Throwable t) {
-            // v0.7.1 修复 (C2): execute 同步异常路径 gauge 复位 (assemble 抛, submitIo 已自包补偿不会抛到此).
+            // execute 同步异常路径 gauge 复位 (assemble 抛, submitIo 已自包补偿不会抛到此).
             if (!serializingDec) {
                 metrics.decInFlightSerializing();
             }
@@ -115,13 +113,13 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.10.2 修复 (M2): 把 IO 提交 + 完成回调抽成可重入方法, 让 REQUEUE_DIRTY 失败直接用
-     * 已序列化的 tag 原地重投, 不依赖 chunk 对象是否仍加载.
+     * 把 IO 提交 + 完成回调抽成可重入方法, 让 REQUEUE_DIRTY 失败直接用已序列化的 tag 原地重投,
+     * 不依赖 chunk 对象是否仍加载.
      *
-     * <p><b>为何不再走坐标恢复队列</b>: 序列化早在 assemble 阶段完成, 失败回调里 snapshot/tag
-     * 都还活着. 重试 IO 根本不需要 chunk 对象 — 之前 REQUEUE_DIRTY 投坐标进 ChunkRecoveryQueue,
-     * 主线程 drain 时 getChunkNow 返 null (chunk 已 unload) 就 WARN 丢弃, 等于 unload 后弃疗.
-     * 直接用 tag 重投 IO 后, chunk 是否仍加载与重试成败无关.
+     * <p><b>为何不走坐标恢复队列</b>: 序列化早在 assemble 阶段完成, 失败回调里 snapshot/tag 都还活着.
+     * 重试 IO 根本不需要 chunk 对象 — 投坐标进 ChunkRecoveryQueue 时, 主线程 drain 若 getChunkNow 返 null
+     * (chunk 已 unload) 会 WARN 丢弃, 等于 unload 后增量丢失. 直接用 tag 重投 IO 后, chunk 是否仍加载与重试
+     * 成败无关.
      *
      * <p><b>线程安全</b>: 本方法首次由 SerializationWorker 线程调, 重投由 IOWorker 完成回调线程
      * (whenComplete) 调. ioBridge.storeChunk -> IOWorker.store -> submitTask -> mailbox.askEither,
@@ -141,18 +139,18 @@ public final class ChunkSaveTask implements SaveTask {
         try {
             future = ioSubmitter.submit(tag);
         } catch (Throwable submitError) {
-            // v0.11.0 修复 (C-callback-sync-throw-swallowed): submit 同步抛 (生产几乎仅 teardown-NPE / OOM,
-            // 但回调线程内递归 submitIo 时若漏防则 inc 已发生而无 future 可 dec —— 永久泄漏 + phase 卡 IO_PENDING)。
-            // 此处自包补偿: dec 抵消本行 inc, 走与 IO 失败 (future.completeExceptionally) 等同的 onIoFailure
-            // 终态/重投补偿, 不向 dependent future 漏抛 (whenComplete 回调内的递归调用也因此安全)。
+            // submit 同步抛 (生产几乎仅 teardown-NPE / OOM): 回调线程内递归 submitIo 时若漏防则 inc 已发生而无
+            // future 可 dec —— 永久泄漏 + phase 卡 IO_PENDING。此处自包补偿: dec 抵消本行 inc, 走与 IO 失败
+            // (future.completeExceptionally) 等同的 onIoFailure 终态/重投补偿, 不向 dependent future 漏抛
+            // (whenComplete 回调内的递归调用也因此安全)。
             // 不 recordIoStoreNs: submit 同步抛根本没发生 store, 记一个近零样本会污染 IO 延迟直方图。
             metrics.decInFlightIoPending();
             onIoFailure(state, tag, submitError);
             return;
         }
-        // v0.11.0 修复 (C-callback-sync-throw-swallowed, 备选 A 兜底网): whenComplete 回调返回的 dependent
-        // future 若被丢弃, 回调内任何同步抛 (含 onIoFailure/safeReoffer 自身再抛的 Error) 会静默落进无人 join
-        // 的 future。挂 exceptionally 兜底网, 保证"永不静默": 即便 B 路径补偿再抛, 至少 ERROR 可见。
+        // whenComplete 回调返回的 dependent future 若被丢弃, 回调内任何同步抛 (含 onIoFailure/safeReoffer
+        // 自身再抛的 Error) 会静默落进无人 join 的 future。挂 exceptionally 兜底网, 保证"永不静默": 即便回调内
+        // 精确补偿再抛, 至少 ERROR 可见。
         future.whenComplete((ignored, error) -> {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
@@ -164,7 +162,7 @@ public final class ChunkSaveTask implements SaveTask {
             }
             onIoSuccess(state, tag);
         }).exceptionally(callbackError -> {
-            // 回调体同步抛且未被 B 的精确补偿吸收 (多为 Error): 不静默, 明示 ERROR。
+            // 回调体同步抛且未被回调内精确补偿吸收 (多为 Error): 不静默, 明示 ERROR。
             LOGGER.error("[BetterAutoSave] IO completion callback threw for chunk {} dim={}; in-flight gauges may be "
                             + "left inconsistent for this task",
                     snapshot.pos(), snapshot.dimension().location(), callbackError);
@@ -173,8 +171,8 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.11.0 修复 (C-callback-sync-throw-swallowed): IO 失败 (future 异常完成 *或* submit 同步抛) 的统一
-     * 补偿路径。从原 whenComplete error 分支抽出, 供回调线程与同步 submit 抛共用同一终态/重投逻辑, 杜绝两处漂移。
+     * IO 失败 (future 异常完成 *或* submit 同步抛) 的统一补偿路径。供回调线程与同步 submit 抛共用同一终态/
+     * 重投逻辑, 杜绝两处漂移。
      */
     private void onIoFailure(ChunkSaveState state, CompoundTag tag, Throwable cause) {
         ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
@@ -189,8 +187,8 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.11.0 修复 (C-unhandled-drains-preparing): FAILED_TERMINAL (IO 重试耗尽) 后按接力槽三态分流处置,
-     * 关死旧 drainPendingSnapshot 全清 PREPARING 的"未就绪 tag 暴露"旁路。
+     * FAILED_TERMINAL (IO 重试耗尽) 后按接力槽三态分流处置。只对 EMPTY_DEAD 真终态走兜底, PREPARING
+     * 槽 (主线程仍在改写未就绪 tag) 绝不夺取, 杜绝跨线程读写同一 tag 的"未就绪 tag 暴露"。
      *
      * <p><b>前置状态</b>: ioFailed 已把 phase 推 FAILED 且 CAS 清了 mustDrain boolean
      * ({@code lastTransitionClearedMustDrain()} 记录是否真清)。下面按槽态决定是 honor 这次清除 (EMPTY_DEAD),
@@ -245,10 +243,10 @@ public final class ChunkSaveTask implements SaveTask {
                 // (不 dec gauge), 不走 enqueueRecovery —— 否则与主线程自踢接力链双重处置同一 state, 且会过早清
                 // mustDrain 让关服 join 不等接力。mustDrain (drainOwner) 由主线程自踢的接力链终态唯一清。
                 //
-                // v0.11.0 REDESIGN 加固: **不**再调 markMustDrain。drainOwner 已是 TERMINAL_HANDED (非 NONE,
-                // 满足 "槽非空 -> drainOwner != NONE" 不变式, gauge 维持), markMustDrain 会把它覆盖成 IN_FLIGHT,
-                // 让 publishPendingSnapshot 的 terminalHanded 触发点失活 (虽 sameCycleMissed 仍冗余兜底, 但保留
-                // TERMINAL_HANDED 让两个 publish 自踢触发点都活, 协议对未来改动更稳健)。
+                // **不**调 markMustDrain。drainOwner 已是 TERMINAL_HANDED (非 NONE, 满足 "槽非空 -> drainOwner
+                // != NONE" 不变式, gauge 维持), markMustDrain 会把它覆盖成 IN_FLIGHT, 让 publishPendingSnapshot
+                // 的 terminalHanded 触发点失活 (虽 sameCycleMissed 仍冗余兜底, 但保留 TERMINAL_HANDED 让两个
+                // publish 自踢触发点都活, 协议对未来改动更稳健)。
                 metrics.recordChunkRetried();
             }
             case EMPTY_DEAD -> {
@@ -264,12 +262,12 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.11.0 修复 (C-callback-sync-throw-swallowed): IO 成功落地的统一处置, 从原 whenComplete 成功分支抽出。
+     * IO 成功落地的统一处置。
      */
     private void onIoSuccess(ChunkSaveState state, CompoundTag tag) {
-        // v0.11.0 REDESIGN (A5 根治): land (置 phase) 与 take (取 READY 接力 / 标 missed) 合并成 landAndTake
-        // 单 CAS 线性化点, 消除旧两步 (ioCompletedSuccessfully + takeReadyPendingSnapshot) 之间的窗口本体 ——
-        // 主线程绝不会再观测到 "已 land DIRTY 但 take 未发生" 的中间态, 故 stale missed 不会被误标成新周期序号。
+        // land (置 phase) 与 take (取 READY 接力 / 标 missed) 合并成 landAndTake 单 CAS 线性化点, 消除两步
+        // (置 phase 与取槽) 之间的窗口 —— 主线程绝不会观测到 "已 land DIRTY 但 take 未发生" 的中间态, 故
+        // stale missed 不会被误标成新周期序号。
         // CLEAN_LANDED 时 landAndTake 内部 CAS 清 drainOwner, 用 lastTransitionClearedMustDrain 配平 gauge
         // (单一 CAS 既清 drainOwner 又驱动 dec, 无读快照拆分缝隙).
         ChunkSaveState.LandResult land = state.landAndTake();
@@ -281,17 +279,17 @@ public final class ChunkSaveTask implements SaveTask {
         } else {
             // 落盘成功但 chunk 期间 generation 前进 → REQUEUE_DIRTY. 本 tag 字节已写入 region file
             // (这一代已落盘), 但更新代的增量尚未落。
-            // v0.10.2 修复 (C-chunk-unload-collision): 优先用接力快照接力 —— 若 mixin 碰撞分支登记过
-            // pending (该 chunk 在飞期间被编辑且卸载), 取出它重投, 把最新内存代落盘, 不依赖 chunk 是否
-            // 仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已 setUnsaved(true), 下轮 mixin 接管。
-            // landAndTake 只取 READY 槽 (relayPending 非 null 仅当槽 READY); 见 PREPARING (dispatch 仍在跑,
+            // 优先用接力快照接力 —— 若 mixin 碰撞分支登记过 pending (该 chunk 在飞期间被编辑且卸载), 取出它
+            // 重投, 把最新内存代落盘, 不依赖 chunk 是否仍加载。无 pending 时退回原语义: chunk 仍加载则编辑已
+            // setUnsaved(true), 下轮 mixin 接管。
+            // landAndTake 只取 READY 槽 (relayPending 非 null 仅当槽 READY); 遇 PREPARING (dispatch 仍在跑,
             // tag 未就绪) 时不取走而原子标 missedCycle (在同一 land CAS 里), 把补踢交还主线程 (publish 时自踢)。
-            // 这关死"在飞回调取走 listener 仍在改写的未就绪 tag"门 (A2)。relayPending 为 null 时若槽仍非空
+            // 这关死"在飞回调取走 listener 仍在改写的未就绪 tag"。relayPending 为 null 时若槽仍非空
             // (PREPARING-missed), mustDrain 由主线程自踢的接力链终态清, 此处不碰。
             ChunkSnapshot pending = land.relayPending();
             if (pending != null && pendingReoffer != null) {
                 // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
-                // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A)。
+                // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代。
                 // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
                 state.reenterSerializingForPending(pending.capturedGeneration());
                 safeReoffer(state, pending);
@@ -305,9 +303,9 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.11.0 修复 (C-callback-sync-throw-swallowed): 接力重投的安全包装。reoffer sink 同步抛 (生产几乎仅
-     * teardown-NPE / OOM) 时不得静默丢 pending —— 此刻 pending 已被 takeReadyPendingSnapshot /
-     * takeReadyForTerminalConsumer 取走, 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
+     * 接力重投的安全包装。reoffer sink 同步抛 (生产几乎仅 teardown-NPE / OOM) 时不得静默丢 pending ——
+     * 此刻 pending 已从槽取出 (REQUEUE_DIRTY 路径来自 landAndTake().relayPending(), 两条终态路径来自
+     * takeReadyForTerminalConsumer), 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
      *
      * <p><b>补偿</b>: serializing gauge 由 sink 自身在 inc 与 offer 之间自包 try 配平 (见
      * {@link SnapshotPipeline} 的 reoffer sink, 抛前 dec 回); 本层只负责 mustDrain 终态配平 + ERROR ——
@@ -332,14 +330,13 @@ public final class ChunkSaveTask implements SaveTask {
         ChunkSaveState state = snapshot.state();
         LOGGER.error("[BetterAutoSave] worker uncaught for {}", taskName(), cause);
 
-        // v0.10.2 修复 (M-unhandled-abandons-pending): 接力槽前置消费, 与 whenComplete 终态路径对称。
-        // 接力槽存在的唯一场景就是"在飞碰撞 + 卸载", 此刻 pending 是卸载坐标最新代的唯一副本。旧逻辑
-        // onUnhandledError 无条件清 mustDrain 却不取 pending, 破坏不变式 (pendingSnapshot 非空 -> mustDrain
-        // 恒真): 槽永久泄漏 (AtomicReference 持快照 + NBT/section 副本), 关服 join 不再等这条接力链。
-        // v0.11.0 修复 (C-unhandled-drains-preparing): 改用 takeReadyForTerminalConsumer 只消费 READY,
-        // PREPARING 标 missed 交还主线程 —— 旧 drainPendingSnapshot 无条件夺 PREPARING 会把主线程 dispatch 仍在
-        // 原地改写的未就绪 tag 接力 assemble (跨线程读写同一 CompoundTag 的 HashMap, 静默数据损坏), 正是状态机
-        // 立项要消灭的"未就绪 tag 暴露"在 drain 出口复活。判别 + 取走是同一 CAS 原子结果, 无 TOCTOU。
+        // 接力槽前置消费, 与 whenComplete 终态路径对称。接力槽存在的唯一场景就是"在飞碰撞 + 卸载", 此刻
+        // pending 是卸载坐标最新代的唯一副本。若清 mustDrain 却不取 pending, 会破坏不变式 (pendingSnapshot
+        // 非空 -> mustDrain 恒真): 槽永久泄漏 (AtomicReference 持快照 + NBT/section 副本), 关服 join 不再等
+        // 这条接力链。
+        // takeReadyForTerminalConsumer 只消费 READY, PREPARING 标 missed 交还主线程 —— 无条件夺 PREPARING 会把
+        // 主线程 dispatch 仍在原地改写的未就绪 tag 接力 assemble (跨线程读写同一 CompoundTag 的 HashMap, 静默数据
+        // 损坏), 正是状态机要消灭的"未就绪 tag 暴露"在 drain 出口复活。判别 + 取走是同一 CAS 原子结果, 无 TOCTOU。
         ChunkSaveState.ReadyTake take = state.takeReadyForTerminalConsumer();
         switch (take.disposition()) {
             case CONSUMED -> {
@@ -374,10 +371,10 @@ public final class ChunkSaveTask implements SaveTask {
     }
 
     /**
-     * v0.11.0 修复 (C-unhandled-drains-preparing): onUnhandledError 无接力可投时的安全网 (EMPTY_DEAD, 或
-     * READY 但 sink 不可达)。无在途接力任务挂在 mustDrain 上, 故清 mustDrain —— 否则 REQUEUE_DIRTY 下
-     * mustDrain 永挂, 关服 join 死等且 gauge 泄漏。compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec
-     * (v0.10.2 修复 M6)。随后 ioFailed 推 phase + enqueueRecovery 还原 isUnsaved 让 vanilla 兜底。
+     * onUnhandledError 无接力可投时的安全网 (EMPTY_DEAD, 或 READY 但 sink 不可达)。无在途接力任务挂在
+     * mustDrain 上, 故清 mustDrain —— 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join 死等且 gauge 泄漏。
+     * compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec。随后 ioFailed 推 phase + enqueueRecovery
+     * 还原 isUnsaved 让 vanilla 兜底。
      */
     private void runUnhandledSafetyNet(ChunkSaveState state) {
         if (state.compareAndClearMustDrain()) {
@@ -397,10 +394,9 @@ public final class ChunkSaveTask implements SaveTask {
 
     /**
      * 重试耗尽 (FAILED_TERMINAL) 后投坐标恢复队列还原 isUnsaved, 让 vanilla 同步兜底.
-     * v0.10.2 修复 (M2) 起 REQUEUE_DIRTY 改为 tag 原地重投, 不再走此队列 — 这里只剩
-     * FAILED_TERMINAL 与 onUnhandledError 两个无 tag 可重投的入口. dimension 取
-     * location().toString() 与三条重入门口径一致. unloaded + terminal 由
-     * ChunkRecoveryQueue.drain 升级到 ERROR 日志 (带 dim+坐标), 明示本次增量丢失.
+     * REQUEUE_DIRTY 走 tag 原地重投不经此队列, 故这里只剩 FAILED_TERMINAL 与 onUnhandledError 两个
+     * 无 tag 可重投的入口. dimension 取 location().toString() 与三条重入门口径一致. unloaded + terminal
+     * 由 ChunkRecoveryQueue.drain 升级到 ERROR 日志 (带 dim+坐标), 明示本次增量丢失.
      */
     private void enqueueRecovery(ChunkSaveState.IoOutcome outcome) {
         boolean terminal = outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL;

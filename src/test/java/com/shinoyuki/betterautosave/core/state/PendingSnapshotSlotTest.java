@@ -21,12 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 接力快照槽 (pendingSnapshot) 状态机语义 + gauge 不变式回归
- * (C-chunk-unload-collision / C-entity-unload-collision).
+ * 接力快照槽 (pendingSnapshot) 状态机语义 + gauge 不变式回归.
  *
  * <p>覆盖:
- * - 隐角 B 覆盖语义: 槽已占用再登记 = 直接替换 (最新者胜), takePendingSnapshot 取走清空;
- * - reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (隐角 A 的代推进基元);
+ * - 覆盖语义 (最新者胜): 槽已占用再登记 = 直接替换, takePendingSnapshot 取走清空;
+ * - reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代 (接力落地的代推进基元);
  * - gauge 不变式: pendingSnapshot 非空 或 在途 IO 时 mustDrain 恒真 —— 逐条复刻碰撞登记/接力落地序列,
  *   断言任一时刻 (mustDrain==false) 蕴含 (pending==null 且 phase 非在途)。
  */
@@ -54,7 +53,7 @@ class PendingSnapshotSlotTest {
         return new EntitySnapshot(new ChunkPos(1, 1), DIM, 3700, entities, generation, state);
     }
 
-    // ===== 隐角 B: 覆盖语义 (最新者胜) =====
+    // ===== 覆盖语义: 最新者胜 =====
 
     @Test
     void chunk_register_pending_latest_wins() {
@@ -88,7 +87,7 @@ class PendingSnapshotSlotTest {
         assertNull(state.takePendingSnapshot());
     }
 
-    // ===== 隐角 A: reenterSerializingForPending 锁 pending 自己的代 =====
+    // ===== reenter 锁 pending 自身代: reenterSerializingForPending 锁 pending 自己的代 =====
 
     @Test
     void chunk_reenter_locks_pending_generation_not_current() {

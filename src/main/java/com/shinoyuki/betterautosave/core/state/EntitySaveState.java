@@ -46,11 +46,11 @@ public final class EntitySaveState {
     private final AtomicInteger retryCount = new AtomicInteger();
     private volatile long inFlightGeneration;
     private final AtomicBoolean mustDrain = new AtomicBoolean();
-    // v0.10.2 修复 (M6): 终态转换 (CLEAN_LANDED / FAILED_TERMINAL) 内部 CAS 清 mustDrain 的结果,
+    // 终态转换 (CLEAN_LANDED / FAILED_TERMINAL) 内部 CAS 清 mustDrain 的结果,
     // 供 IO 完成回调线程在调完转换后读取以驱动 gauge dec. 仅被同一回调线程写后即读 (whenComplete
     // 是 per-task 单线程序列), 无跨线程可见性需求, 故普通字段即可.
     private boolean lastTransitionClearedMustDrain;
-    // v0.10.2 修复 (C-entity-unload-collision): 与 ChunkSaveState 对称的"接力快照"槽位。
+    // 与 ChunkSaveState 对称的"接力快照"槽位。
     // entity 路径碰撞更致命 —— vanilla processChunkUnload 在 storeEntities 后立即驱逐实体内存,
     // 卸载后该坐标永不再被 storeEntities 调用, 被吞那次的最新实体列表是唯一副本。在途碰撞时 mixin
     // 对最新 chunkEntities 做纯 capture 存进本槽, 在途那代 IO 落地 REQUEUE_DIRTY 时回调取出重投接力。
@@ -107,12 +107,11 @@ public final class EntitySaveState {
         long captured = generation.get();
         inFlightGeneration = captured;
         phase.set(Phase.SERIALIZING);
-        // v0.11.0 REDESIGN (A4/A5 对 entity 免疫): chunk 侧已退役 enterSerializing 的时序清理, 改由
-        // SlotWord 的 missedCycle==inFlightCycleSeq 代际 fence 防 stale 跨周期继承 (ChunkSaveState A4/A5)。
-        // entity 路径连这个 fence 都不需要: 槽是裸 AtomicReference<EntitySnapshot> (无 missedCycle/cycleSeq 概念,
+        // chunk 侧用 SlotWord 的 missedCycle==inFlightCycleSeq 代际 fence 防 stale missed 跨周期继承;
+        // entity 路径不需要这个 fence: 槽是裸 AtomicReference<EntitySnapshot> (无 missedCycle/cycleSeq 概念,
         // 见字段 57), 因为无 Forge entity save 事件即无 dispatch 窗口, 没有 "回调路过 PREPARING 标 missed 离开"
-        // 的 sticky 载体 —— 回调直接 getAndSet(null) 全态消费, 没有任何 note 会跨周期存活被误读。A5 的武器
-        // (晚写的 stale missed note 漏进新周期) 在 entity 路径不存在载体, 故结构免疫。不碰本字段。
+        // 的 sticky 载体 —— 回调直接 getAndSet(null) 全态消费, 没有任何 note 会跨周期存活被误读。"晚写的
+        // stale missed note 漏进新周期" 这种交错在 entity 路径不存在载体, 故结构免疫。不碰本字段。
         return captured;
     }
 
@@ -124,7 +123,7 @@ public final class EntitySaveState {
         if (generation.get() == inFlightGeneration) {
             phase.set(Phase.CLEAN);
             retryCount.set(0);
-            // v0.10.2 修复 (M6): 记录本次 CAS 是否真正清掉 mustDrain, 让调用方据此 dec gauge.
+            // 记录本次 CAS 是否真正清掉 mustDrain, 让调用方据此 dec gauge.
             // 终态 phase.set 在 CAS 之前完成, mixin 重入门只在 IO_PENDING 等在途 phase 才 inc;
             // 谁的 CAS 赢得 true->false 谁负责唯一一次 dec, 杜绝拆分读快照漏 dec.
             lastTransitionClearedMustDrain = mustDrain.compareAndSet(true, false);
@@ -148,7 +147,7 @@ public final class EntitySaveState {
     }
 
     /**
-     * v0.10.2 修复 (M6): 返回上一次终态转换 (ioCompletedSuccessfully / ioFailed) 内部 CAS
+     * 返回上一次终态转换 (ioCompletedSuccessfully / ioFailed) 内部 CAS
      * 是否真正把 mustDrain 由 true 清成 false. IO 完成回调据此决定是否 dec mustDrainPending gauge,
      * 保证 boolean 清零与 gauge dec 是同一次 CAS 的原子结果. 仅由同一回调线程在调完转换后立即读取.
      */
@@ -178,9 +177,8 @@ public final class EntitySaveState {
     }
 
     /**
-     * v0.10.2 修复 (C-entity-unload-collision): 登记一份接力快照, 与
-     * {@link ChunkSaveState#registerPendingSnapshot} 同语义 —— 覆盖语义最新者胜 (隐角 B),
-     * 槽非空蕴含 mustDrain 须保持置位 (gauge 不变式)。
+     * 登记一份接力快照, 与 {@link ChunkSaveState#registerPendingSnapshot} 同语义 ——
+     * 覆盖语义最新者胜, 槽非空蕴含 mustDrain 须保持置位 (gauge 不变式)。
      */
     public void registerPendingSnapshot(EntitySnapshot snapshot) {
         pendingSnapshot.set(snapshot);
@@ -197,8 +195,7 @@ public final class EntitySaveState {
     }
 
     /**
-     * v0.10.2 修复 (C-entity-unload-collision, 隐角 A): 重投接力快照前把 inFlightGeneration 锁到
-     * pending 快照 capture 时的代, phase 推回 SERIALIZING。与
+     * 重投接力快照前把 inFlightGeneration 锁到 pending 快照 capture 时的代, phase 推回 SERIALIZING。与
      * {@link ChunkSaveState#reenterSerializingForPending} 同理 —— 锁 pending 自己的代而非当前代,
      * 让接力 IO 落地正确判定 CLEAN_LANDED / REQUEUE_DIRTY。
      */

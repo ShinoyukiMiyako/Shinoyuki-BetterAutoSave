@@ -132,8 +132,8 @@ public final class BetterAutoSaveMod {
         long t0 = System.currentTimeMillis();
         // drained=false 表示超时内队列/在途未清空; 此时不能让后续 joined 日志暗示 IO 已落盘.
         // 残窗说明: drainPending 返回到 joinWorkers 之间, whenComplete 回调里的迟到失败重投仍可能
-        // 在途 — 这段微秒级残窗是已核查的不可经济修复边界 (要彻底消除需 worker 与本线程做带锁的
-        // 终态握手, 代价远超收益), 由其后的 drainChunkRecoveryQueue + vanilla 同步 flush 兜底.
+        // 在途 — 这段微秒级残窗的边界在于: 要彻底消除需 worker 与本线程做带锁的终态握手, 代价远超
+        // 收益, 故由其后的 drainChunkRecoveryQueue + vanilla 同步 flush 兜底.
         boolean drained = pipeline.drainPending(BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L);
         boolean joined = pipeline.joinWorkers(BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L);
         long elapsed = System.currentTimeMillis() - t0;

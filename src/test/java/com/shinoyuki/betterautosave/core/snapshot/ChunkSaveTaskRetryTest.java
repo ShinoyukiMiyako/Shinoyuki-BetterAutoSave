@@ -24,10 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ChunkSaveTask IO 失败 tag 原地重投单测 (Major 修复 M2).
+ * ChunkSaveTask IO 失败 tag 原地重投单测.
  *
- * <p>现场: 旧实现 IO 失败 REQUEUE_DIRTY 投坐标进 ChunkRecoveryQueue, 主线程 drain 时 chunk 已
- * unload (getChunkNow 返 null) 就 WARN 丢弃 → unload 后弃疗. 实际 snapshot/tag 序列化早已完成,
+ * <p>现场: IO 失败 REQUEUE_DIRTY 若只投坐标进 ChunkRecoveryQueue, 主线程 drain 时 chunk 已
+ * unload (getChunkNow 返 null) 就会 WARN 丢弃 → unload 后弃疗. 实际 snapshot/tag 序列化早已完成,
  * 重试 IO 不需要 chunk 对象, 直接用已序列化的 tag 重投即可, 与 chunk 是否仍加载无关.
  *
  * <p>本测试用测试构造注入 fake IoSubmitter (绕开 ServerLevel / IOWorker), 让前 N 次返回失败
@@ -183,7 +183,7 @@ class ChunkSaveTaskRetryTest {
     }
 
     /**
-     * C-callback-sync-throw-swallowed: submit 同步抛 (而非 future 异常完成) 必须走与 IO 失败等同的补偿,
+     * submit 同步抛 (而非 future 异常完成) 必须走与 IO 失败等同的补偿,
      * 不静默落进被丢弃的 dependent future。第一次 submit 同步抛 -> onIoFailure REQUEUE_DIRTY 重投,
      * 第二次 submit 成功落地。
      *
@@ -222,7 +222,7 @@ class ChunkSaveTaskRetryTest {
     }
 
     /**
-     * C-callback-sync-throw-swallowed: submit 持续同步抛, 重试耗尽走 FAILED_TERMINAL + 投坐标恢复队列,
+     * submit 持续同步抛, 重试耗尽走 FAILED_TERMINAL + 投坐标恢复队列,
      * 全程 gauge 配平 (回调线程内递归 submitIo 的同步抛也被自包补偿)。
      *
      * <p>判定标准: 删自包补偿 -> 每次递归 submitIo 的 inc 漏 dec, ioPending 累积泄漏, 本断言挂。
@@ -256,7 +256,7 @@ class ChunkSaveTaskRetryTest {
     }
 
     /**
-     * C-callback-sync-throw-swallowed: REQUEUE_DIRTY 落地接力时 reoffer sink 同步抛, 不得静默丢 pending ——
+     * REQUEUE_DIRTY 落地接力时 reoffer sink 同步抛, 不得静默丢 pending ——
      * safeReoffer 必须清 mustDrain + 配平 gauge (serializing 由 sink 自身配平)。
      *
      * <p>判定标准 (删 safeReoffer 必挂): 不包 try 则 reoffer 抛冒泡进被丢弃 dependent future,

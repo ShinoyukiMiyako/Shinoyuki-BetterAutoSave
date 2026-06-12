@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * in-flight 碰撞分支复刻 vanilla 副作用的字节码回归 (m-pending-skips-poi-flush + siblingGap).
+ * in-flight 碰撞分支复刻 vanilla 副作用的字节码回归.
  *
  * <p>现场: vanilla {@code ChunkMap.save} 首行无条件 {@code poiManager.flush(pos)}, vanilla
  * {@code EntityStorage.storeEntities} 非空分支末尾无条件 {@code emptyChunks.remove(pos)}。BAS 在 clean-bypass
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * 字节码断言: 统计目标 @Inject 方法内对 poiManager 字段 / emptyChunks accessor 的引用次数 —— 这是唯一既
  * deletion-sensitive 又不需 mixin 运行期的手段。
  *
- * <p>判定标准 (删修复必挂): 删 in-flight 分支的 poiManager.flush -> chunk 方法内 poiManager 字段读取从 3 降到 2,
+ * <p>判定标准: 删 in-flight 分支的 poiManager.flush -> chunk 方法内 poiManager 字段读取从 3 降到 2,
  * 断言挂; 删 in-flight 分支的 emptyChunks.remove -> entity 方法内 betterautosave$getEmptyChunks 调用从 2 降到 1。
  */
 class InFlightVanillaParityTest {
@@ -59,7 +59,7 @@ class InFlightVanillaParityTest {
 
     /**
      * chunk in-flight 分支必须复刻 poiManager.flush。统计 betterautosave$interceptSave 内对自身 poiManager
-     * 字段的 GETFIELD 次数: clean-bypass (1) + in-flight 修复 (1) + 常规 dispatch (1) = 3。
+     * 字段的 GETFIELD 次数: clean-bypass (1) + in-flight 碰撞 (1) + 常规 dispatch (1) = 3。
      */
     @Test
     void chunk_intercept_save_flushes_poi_in_all_takeover_paths() throws IOException {
@@ -81,7 +81,7 @@ class InFlightVanillaParityTest {
 
     /**
      * entity in-flight 分支必须复刻 emptyChunks.remove。统计 betterautosave$interceptStoreEntities 内对
-     * betterautosave$getEmptyChunks accessor 的调用次数: in-flight 修复 (1) + 常规 dispatch (1) = 2。
+     * betterautosave$getEmptyChunks accessor 的调用次数: in-flight 碰撞 (1) + 常规 dispatch (1) = 2。
      */
     @Test
     void entity_intercept_store_removes_empty_chunks_in_inflight_and_regular() throws IOException {

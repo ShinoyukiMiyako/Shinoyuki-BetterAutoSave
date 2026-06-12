@@ -229,7 +229,7 @@ class ChunkSaveStateTest {
     /**
      * isInFlight 必须恰好对在飞三态 (SNAPSHOTTING/SERIALIZING/IO_PENDING) 返 true, 对 CLEAN/DIRTY/FAILED
      * 返 false。autosave 通道 (ChunkMapMixin) 用它在途短路, 避免对在飞 chunk 入队注定 trySnapshot 失败的
-     * priority (gaps[1] Major)。删修复: 若 isInFlight 漏判 IO_PENDING, 在途 chunk 被错误 enqueue, 此测试挂。
+     * priority。判定标准: 若 isInFlight 漏判 IO_PENDING, 在途 chunk 被错误 enqueue, 此测试挂。
      */
     @Test
     void is_in_flight_true_exactly_for_pipeline_phases() {
@@ -254,7 +254,7 @@ class ChunkSaveStateTest {
     }
 
     /**
-     * autosave 通道在途短路决策回归 (gaps[1] Major): 复刻 ChunkMapMixin 在途分支 —— in-flight 时
+     * autosave 通道在途短路决策回归: 复刻 ChunkMapMixin 在途分支 —— in-flight 时
      * 只 tryMarkMustDrain (gauge inc 一次) 且**不**入队, 让关服 join 知情。断言 mustDrain 被标记且
      * 重复进入不重复 inc。删 mixin 的 tryMarkMustDrain -> 在途 chunk 关服 join 不等, 此契约失守。
      */

@@ -31,7 +31,7 @@ public abstract class MinecraftServerMixin {
             return;
         }
 
-        // Critical 修复 2 (M2): 恢复队列 drain 必须与 degraded 闸门解耦, 先于早返执行.
+        // 恢复队列 drain 必须与 degraded 闸门解耦, 先于早返执行.
         // 降级后存活的 chunk worker 与 vanilla IOWorker 回调线程上的在途 task 仍会执行, 其 IO 失败
         // 仍 enqueueRecovery 投进 ChunkRecoveryQueue。若 drain 跟随 degraded 早返一起停摆, 这些失败
         // chunk 的 vanilla isUnsaved 永远停在 false, vanilla autosave/unload 全部跳过, 整个降级会话

@@ -84,7 +84,7 @@ public abstract class ChunkMapSaveMixin {
             // 返 true 时才更新; 我们 return 不 cancel 让 vanilla 第二行返 false,
             // cooldown 不更新 -> 下 tick 又被检查 -> mixin bypass 暴涨 (生产 ~100k/s).
             //
-            // 修复: 手动 flush POI (与 vanilla 行为等价, vanilla save 第一行就 flush
+            // 手动 flush POI (与 vanilla 行为等价, vanilla save 第一行就 flush
             // POI 不论 isUnsaved), 然后 cancel + setReturnValue(true), 让
             // saveChunkIfNeeded 把 cooldown 设到 10s 后, 该 chunk 安静一段时间.
             //
@@ -113,12 +113,11 @@ public abstract class ChunkMapSaveMixin {
             if (state.tryMarkMustDrain()) {
                 metrics.incMustDrainPending();
             }
-            // v0.10.2 修复 (C-chunk-unload-collision): 在飞期间该 chunk 又被编辑 (generation 前进)
-            // 又触发 save (典型: 卸载序列调 ChunkMap.save)。旧逻辑只 setReturnValue(true) 信任在飞的旧代
-            // 快照, 而卸载随即把 chunk 驱逐出内存 —— 编辑后那代增量永久静默丢失。现在对最新内存做一次纯
-            // capture (不碰在飞那代的 phase/inFlightGeneration, 见 capturePending) 登记进接力槽; 在飞那代
-            // IO 落地判 REQUEUE_DIRTY 时回调取出重投, 把最新代落盘。隐角 A: 多代碰撞链每次命中都登记更新代
-            // (隐角 B 最新者胜, 旧 pending 作废), inFlightGeneration 随接力 dispatch 推进。
+            // 在飞期间该 chunk 又被编辑 (generation 前进) 又触发 save (典型: 卸载序列调 ChunkMap.save)。
+            // 仅 setReturnValue(true) 信任在飞旧代快照不行: 卸载随即把 chunk 驱逐出内存, 编辑后那代增量会
+            // 永久静默丢失。这里对最新内存做一次纯 capture (不碰在飞那代的 phase/inFlightGeneration, 见
+            // capturePending) 登记进接力槽; 在飞那代 IO 落地判 REQUEUE_DIRTY 时回调取出重投, 把最新代落盘。
+            // 多代碰撞链每次命中都登记更新代 (最新者胜, 旧 pending 作废), inFlightGeneration 随接力 dispatch 推进。
             if (state.generation() != state.inFlightGeneration()) {
                 ConfigSpec.EventCompatMode mode = BetterAutoSaveConfig.eventCompatMode();
                 ChunkSnapshot pending;
@@ -128,8 +127,8 @@ public abstract class ChunkMapSaveMixin {
                     // 纯 capture 抛 (OOM 等): 尚未登记 pending, 接力槽空。在飞旧代 IO 仍会落地, 但 generation 已前进
                     // 必判 REQUEUE_DIRTY (ChunkSaveState:122 恒不等), 而 REQUEUE_DIRTY 不清 mustDrain
                     // (ChunkSaveState:125-127), 槽空回调取 null 也不重投 -> 此后无任何路径清 mustDrain。故必须在此
-                    // 亲自配平 gauge (第六轮"在飞旧代正常落地清 mustDrain"的论证已被证伪: 碰撞分支落地恒为 REQUEUE_DIRTY
-                    // 永不清 mustDrain)。退回信任在飞旧代 (本次最新代增量丢失), 记录可见。
+                    // 亲自配平 gauge (碰撞分支落地恒为 REQUEUE_DIRTY, 永不清 mustDrain, 不能指望在飞旧代落地代为清)。
+                    // 退回信任在飞旧代 (本次最新代增量丢失), 记录可见。
                     if (state.compareAndClearMustDrain()) {
                         metrics.decMustDrainPending();
                     }
@@ -139,31 +138,29 @@ public abstract class ChunkMapSaveMixin {
                     pending = null;
                 }
                 if (pending != null) {
-                    // v0.11.0 修复 (C-dispatch-register-toctou 终局, 第八轮 Critical): 槽位三态协议 begin -> dispatch
-                    // -> publish, 取代第七轮的 register -> dispatch 裸双步。
-                    //
-                    // 第七轮把 registerPendingSnapshot 前置于 dispatchSaveEvent 是为关 lost-wakeup, 但它把"已登记"
-                    // 等同于"可消费": dispatchSaveEvent 同步跑第三方 Forge listener (耗时无上界) 期间, 在飞那代 IO 在
-                    // 并发 IOWorker 线程落地判 REQUEUE_DIRTY, 会把这份 listener 仍在原地改写的**未就绪可变 tag** 取走
-                    // reoffer 给序列化 worker assemble —— 三线程无栅栏共享同一 CompoundTag 的 HashMap, 静默数据损坏。
+                    // 槽位三态协议 begin -> dispatch -> publish。不能用 register -> dispatch 裸双步:
+                    // 若 registerPendingSnapshot 前置于 dispatchSaveEvent (为关 lost-wakeup), "已登记"会被等同于
+                    // "可消费"——dispatchSaveEvent 同步跑第三方 Forge listener (耗时无上界) 期间, 在飞那代 IO 在并发
+                    // IOWorker 线程落地判 REQUEUE_DIRTY, 会把这份 listener 仍在原地改写的未就绪可变 tag 取走 reoffer
+                    // 给序列化 worker assemble —— 三线程无栅栏共享同一 CompoundTag 的 HashMap, 静默数据损坏。
                     //
                     // 状态机拆"已登记"与"可消费"两个正交维度: beginPendingSnapshot 挂 PREPARING (回调能发现关
                     // lost-wakeup, 但 PREPARING 不可消费, 回调只标 missedCycle 离开关未就绪暴露); dispatch 跑完
                     // (listener 改写完成) 才 publishPendingSnapshot 发布 READY 让回调消费。若 dispatch 期间回调路过
                     // (publish 返回非 null), 补踢责任落到主线程自己 (合法 offer 方, 不引入 worker 阻塞)。
                     //
-                    // v0.11.0 REDESIGN (A6 gauge 配平): begin 返回 true 表示它发现 drainOwner 被清空 (A6 窗口: 终态消费者
-                    // 已先于本 begin 路过 EMPTY 并经 ioFailed 清掉 drainOwner 且 EMPTY_DEAD 分支 honor 了那次 dec) 而把
-                    // drainOwner 重新拉为 IN_FLIGHT —— 此时必须补 inc gauge 一次, 否则 "槽即将非空 (PREPARING) 但 gauge=0"
-                    // 重蹈 A6 不变式破坏。常规碰撞 (drainOwner 进入时已 IN_FLIGHT) begin 返 false, 不重复 inc。
+                    // begin 返回 true 表示它发现 drainOwner 被清空 (终态消费者已先于本 begin 路过 EMPTY 并经 ioFailed
+                    // 清掉 drainOwner 且 EMPTY_DEAD 分支 honor 了那次 dec) 而把 drainOwner 重新拉为 IN_FLIGHT —— 此时
+                    // 必须补 inc gauge 一次, 否则 "槽即将非空 (PREPARING) 但 gauge=0" 会破坏 drain 不变式。常规碰撞
+                    // (drainOwner 进入时已 IN_FLIGHT) begin 返 false, 不重复 inc。
                     if (state.beginPendingSnapshot(pending)) {
                         metrics.incMustDrainPending();
                     }
                     boolean dispatchThrew = false;
                     try {
-                        // v0.10.2 修复 (C-relay-skips-save-event): 接力链落盘的"碰撞后最新代" tag 也必须经过 Forge
-                        // ChunkDataEvent.Save listener —— 否则依赖该事件向 tag 写增量的第三方 mod (容量数据 ForgeCaps
-                        // 之外的监听者) 在最新代 tag 上从未经过其 listener, 增量永久静默丢失。在主线程 (mixin save 拦截在
+                        // 接力链落盘的"碰撞后最新代" tag 也必须经过 Forge ChunkDataEvent.Save listener —— 否则依赖
+                        // 该事件向 tag 写增量的第三方 mod (容量数据 ForgeCaps 之外的监听者) 在最新代 tag 上从未经过其
+                        // listener, 增量永久静默丢失。在主线程 (mixin save 拦截在
                         // 主线程) 用 pending 当代 tag 派发, 满足 Forge listener 线程契约, 与常规路径 capture 后即派发同序。
                         ChunkCaptureProcedure.dispatchSaveEvent(levelChunk, level, pending, mode, metrics);
                     } catch (Throwable t) {
@@ -193,8 +190,8 @@ public abstract class ChunkMapSaveMixin {
                     }
                 }
             }
-            // v0.10.2 修复 (m-pending-skips-poi-flush): in-flight 碰撞分支也必须复刻 vanilla ChunkMap.save
-            // 首行 poiManager.flush(pos) 副作用。该分支 setReturnValue(true) 短路返回前完全跳过 flush, 而
+            // in-flight 碰撞分支也必须复刻 vanilla ChunkMap.save 首行 poiManager.flush(pos) 副作用。
+            // 该分支 setReturnValue(true) 短路返回前完全跳过 flush, 而
             // generation 已前进 (gen2 含可能新增的 POI dirty section): 在飞那代 IO 落地与接力链重投都只写
             // chunk tag, 无任何路径把 gen2 的 POI 推进 IOWorker -> 崩溃窗口内 POI region 与 chunk region
             // 短暂不一致 (滞后一 cycle)。flush 幂等且廉价 (SectionStorage.flush 首行 hasWork 早退, 无 dirty
@@ -213,7 +210,7 @@ public abstract class ChunkMapSaveMixin {
             metrics.incMustDrainPending();
         }
 
-        // v0.7.1 修复 (M1): 复制 vanilla ChunkMap.save 第一行 poiManager.flush 副作用.
+        // 复制 vanilla ChunkMap.save 第一行 poiManager.flush 副作用.
         // vanilla ChunkMap.java:825 无条件在 save 第一行调 flush(pos) 把该 chunk pos
         // 上 dirty 的 PoiSection 推到 PoiManager IOWorker mailbox. v0.4 异步 dispatch
         // 路径漏掉这步, 破坏 vanilla "POI 不晚于 chunk 进 IOWorker" 顺序保证.
@@ -236,18 +233,16 @@ public abstract class ChunkMapSaveMixin {
             if (state.compareAndClearMustDrain()) {
                 metrics.decMustDrainPending();
             }
-            // v0.7.1 修复 (M3): capture 抛后 phase 已被 enterSerializing 推到 SERIALIZING,
-            // 或 trySnapshot 已推到 SNAPSHOTTING. catch 不复位 phase 会让该 chunk 后续永远走
-            // mixin line 104-115 早 return 路径 (phase 非 DIRTY/FAILED), 既不入 BAS worker 也不
-            // 走 vanilla 同步, 数据永久丢失而无 telemetry.
+            // capture 抛后 phase 已被 enterSerializing 推到 SERIALIZING, 或 trySnapshot 已推到 SNAPSHOTTING.
+            // catch 不复位 phase 会让该 chunk 后续永远走 mixin 在飞分支早 return 路径 (phase 非 DIRTY/FAILED),
+            // 既不入 BAS worker 也不走 vanilla 同步, 数据永久丢失而无 telemetry.
             //
-            // v0.10.2 修复 (C1): capture 第一行已 setUnsaved(false). 这里不 cancel cir,
-            // vanilla ChunkMap.save 方法体续跑会撞 isUnsaved 门 (此刻 false) -> 直接 return false
-            // 跳过本次同步序列化 -> 本次数据丢失; 该 chunk 此后不再编辑则 unload 与关服 flush
-            // 同样按 isUnsaved 门跳过, 永久丢失. 只 resetAfterFallback 归零 phase 不够 (vanilla
-            // 重入门看的是 isUnsaved 而非 phase). 改用 recoverAfterDispatchFailure 同时还原
-            // isUnsaved=true, 让续跑的 vanilla 方法体过门 -> 当场同步写盘救回本次数据. 与
-            // SaveDispatcher.onPriorityDrained catch 的修复同源 (v0.10.1 修 SaveDispatcher 时漏了这里).
+            // capture 第一行已 setUnsaved(false). 这里不 cancel cir, vanilla ChunkMap.save 方法体续跑会撞
+            // isUnsaved 门 (此刻 false) -> 直接 return false 跳过本次同步序列化 -> 本次数据丢失; 该 chunk 此后
+            // 不再编辑则 unload 与关服 flush 同样按 isUnsaved 门跳过, 永久丢失. 只 resetAfterFallback 归零
+            // phase 不够 (vanilla 重入门看的是 isUnsaved 而非 phase). 改用 recoverAfterDispatchFailure 同时
+            // 还原 isUnsaved=true, 让续跑的 vanilla 方法体过门 -> 当场同步写盘救回本次数据. 与
+            // SaveDispatcher.onPriorityDrained catch 同源.
             // catch 内已有的 compareAndClearMustDrain 保留: recoverAfterDispatchFailure 不碰 mustDrain, 无重复.
             SaveDispatcher.recoverAfterDispatchFailure(state, levelChunk::setUnsaved);
             metrics.recordChunkMapSaveFallback();

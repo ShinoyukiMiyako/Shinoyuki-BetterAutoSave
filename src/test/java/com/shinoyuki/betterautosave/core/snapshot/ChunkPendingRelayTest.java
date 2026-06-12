@@ -28,17 +28,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * chunk 在途碰撞 + 卸载的接力快照重投端到端回归 (C-chunk-unload-collision).
+ * chunk 在途碰撞 + 卸载的接力快照重投端到端回归.
  *
  * <p>现场: 某代 IO 在飞时该 chunk 又被编辑 (generation 前进) 又触发卸载 -> mixin 碰撞分支对最新内存做
- * 纯 capture 登记接力槽; 在飞那代落地判 REQUEUE_DIRTY 时回调取出接力快照重投, 把最新代落盘。旧逻辑直接
- * 信任在飞旧代快照, 卸载后编辑增量永久静默丢失。
+ * 纯 capture 登记接力槽; 在飞那代落地判 REQUEUE_DIRTY 时回调取出接力快照重投, 把最新代落盘。若不接力而直接
+ * 信任在飞旧代快照, 卸载后编辑增量将永久静默丢失。
  *
  * <p>测试技法: 注入 fake IoSubmitter (返回可控 future) + fake PendingReoffer (用同一 submitter 把 pending
  * 包成新 ChunkSaveTask 并立即 execute, 模拟序列化 worker 接力消费, 但不在真实 IOWorker 线程跑)。手动完成
  * future 精确控制"在飞落地"时机, 在落地前插入碰撞编辑, 复刻并发交错的确定性序列。
  *
- * <p>判定标准 (删修复必挂):
+ * <p>判定标准:
  * - 删 submitIo REQUEUE_DIRTY 分支的 takePendingSnapshot + reoffer -> 最终落盘 tag 恒为首代旧 tag, 接力断言挂;
  * - 删 reenterSerializingForPending 的代锁 -> 三代链最终判定错乱;
  * - 删 mixin 碰撞分支的 registerPendingSnapshot -> 槽空, 无接力, 旧代落盘。
@@ -77,7 +77,7 @@ class ChunkPendingRelayTest {
     }
 
     /**
-     * GPT 点名回归: 同坐标第一次 future 未完成时, 第二次 (卸载) save 撞在途登记接力, 第一次 future 完成后
+     * 同坐标第一次 future 未完成时, 第二次 (卸载) save 撞在途登记接力, 第一次 future 完成后
      * 接力把第二次的最新代落盘 —— 而不是把第二次增量丢掉。
      */
     @Test
@@ -143,7 +143,7 @@ class ChunkPendingRelayTest {
     }
 
     /**
-     * 隐角 A 三代链: capture G -> 编辑 G+1 碰撞登记 pending -> pending 在飞中再编辑 G+2 再碰撞 ->
+     * 三代链: capture G -> 编辑 G+1 碰撞登记 pending -> pending 在飞中再编辑 G+2 再碰撞 ->
      * 断言最终落盘为 G+2。
      */
     @Test
@@ -322,11 +322,11 @@ class ChunkPendingRelayTest {
     }
 
     /**
-     * M-unhandled-abandons-pending: onUnhandledError 撞上非空 pending 时必须接力重投最新代, 而非清 mustDrain
+     * onUnhandledError 撞上非空 pending 时必须接力重投最新代, 而非清 mustDrain
      * 丢弃 pending。复刻: gen=1 IO 在飞 -> 碰撞登记 pending(gen=2) -> 在飞 task 的 worker execute 抛非受控异常
      * (走 onUnhandledError) -> 接力把 gen=2 落盘。
      *
-     * <p>判定标准 (删修复必挂): 删 onUnhandledError 的 takePendingSnapshot + reoffer 分支 -> pending 不被接力,
+     * <p>判定标准: 删 onUnhandledError 的 takePendingSnapshot + reoffer 分支 -> pending 不被接力,
      * 最终未提交 gen=2, "接力落最新代"断言挂; 且 hasPendingSnapshot 残留 true (槽泄漏)。
      */
     @Test
@@ -369,9 +369,8 @@ class ChunkPendingRelayTest {
         ChunkSaveTask inFlightTask = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, submitter, reofferHolder[0]);
         inFlightTask.onUnhandledError(new RuntimeException("assemble boom"));
 
-        // 不变式断言点 (relay 在途, future 未完成): 这是上一轮不变式测试的盲区 —— 它只走 happy 状态机序列,
-        // 从不经 onUnhandledError。旧码 onUnhandledError 无条件清 mustDrain 且不取 pending, 回退到旧码则
-        // 此刻 mustDrain=false (下面第一断言挂) 且 pending 残留非空 (第二断言挂)。
+        // 不变式断言点 (relay 在途, future 未完成): onUnhandledError 接力取走 pending 并保持 mustDrain,
+        // 故此刻 mustDrain 仍为 true 且 pending 已被取走 (下面两断言)。
         assertEquals(1, submittedTags.size(), "接力必须提交一次最新代 IO");
         assertEquals(2L, submittedTags.get(0).getLong("gen"),
                 "onUnhandledError 必须接力把碰撞后最新代 (gen=2) 落盘, 而非丢弃 pending");
@@ -393,10 +392,10 @@ class ChunkPendingRelayTest {
     }
 
     /**
-     * M-unhandled-abandons-pending 安全网: onUnhandledError 有 pending 但 reoffer sink 不可达 (null) 时,
+     * onUnhandledError 安全网: onUnhandledError 有 pending 但 reoffer sink 不可达 (null) 时,
      * 必须取走 pending (不泄漏) + 清 mustDrain + 配平 gauge, 走 ERROR 安全网。
      *
-     * <p>判定标准 (删修复必挂): 删 onUnhandledError 的 takePendingSnapshot -> 槽残留 true, hasPendingSnapshot
+     * <p>判定标准: 删 onUnhandledError 的 takePendingSnapshot -> 槽残留 true, hasPendingSnapshot
      * 断言挂; 删 mustDrain 清除路径 -> mustDrain 永真, gauge 泄漏。
      */
     @Test
@@ -424,14 +423,14 @@ class ChunkPendingRelayTest {
     }
 
     /**
-     * C-dispatch-register-toctou 终局 (反序交错 1, 新协议): 在飞 IO 落地于 dispatch 窗口内 (PREPARING 态) ->
+     * 反序交错 1: 在飞 IO 落地于 dispatch 窗口内 (PREPARING 态) ->
      * 回调发现槽但**不可消费**, 标 consumerMissed 返 null 离开 (关"未就绪 tag 暴露"门); dispatch 成功 ->
      * 主线程 publishPendingSnapshot 检测到 missed -> 取回就绪 pending 自踢落盘 (补踢)。
      *
-     * <p>这正是修复前会损坏的交错: 旧协议 register==可消费, 回调会取走 listener 仍在改写的 gen=2 tag。新协议
-     * 把"已登记 (PREPARING 可发现)"与"可消费 (READY)"解耦, 回调路过 PREPARING 不取 tag, 补踢交还主线程。
+     * <p>协议把"已登记 (PREPARING 可发现)"与"可消费 (READY)"解耦: 回调路过 PREPARING 不取 tag (此刻 listener
+     * 仍在改写 gen=2 tag), 补踢交还主线程, 避免取走未就绪 tag。
      *
-     * <p>判定标准 (删修复必挂): 删 takeReadyPendingSnapshot 的 PREPARING-标-missed 分支 (退回直接消费) ->
+     * <p>判定标准: 删 takeReadyPendingSnapshot 的 PREPARING-标-missed 分支 (退回直接消费) ->
      * 回调取走未就绪 tag (违反协议); 删 publishPendingSnapshot 的 missed-自踢分支 -> gen=2 永不落盘 (槽残 READY 孤儿,
      * mustDrain 永挂)。
      */
@@ -467,7 +466,7 @@ class ChunkPendingRelayTest {
         ChunkSaveTask task = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, submitter, reofferHolder[0]);
         task.execute();             // gen=1 IO 在飞
 
-        // mixin 碰撞分支新协议: markDirty -> tryMark -> beginPending(gen=2, 挂 PREPARING) -> [dispatch 窗口].
+        // mixin 碰撞分支序列: markDirty -> tryMark -> beginPending(gen=2, 挂 PREPARING) -> [dispatch 窗口].
         state.markDirty();          // gen=2
         assertTrue(state.tryMarkMustDrain());
         ChunkSnapshot gen2Pending = snapshotForGeneration(state, 2L);
@@ -503,7 +502,7 @@ class ChunkPendingRelayTest {
     }
 
     /**
-     * C-dispatch-register-toctou 终局 (反序交错 2, 新协议): dispatch 抛 (第三方 listener 故障) ->
+     * 反序交错 2: dispatch 抛 (第三方 listener 故障) ->
      * abortPendingSnapshot 把 PREPARING 撤销归 EMPTY 取回非 null (恒成功, 因回调在 PREPARING 期间从不消费),
      * 主线程据此清 mustDrain + 配平 gauge。撤销后在飞旧代落地判 REQUEUE_DIRTY (generation 已前进永不相等),
      * takeReadyPendingSnapshot 见 EMPTY 取 null 不重投, 此后无路径清 mustDrain —— 故撤销时亲自清才不泄漏。
@@ -512,7 +511,7 @@ class ChunkPendingRelayTest {
      * missed 也是 EMPTY 终态 (撤销), 主线程不再 publish 自踢 (dispatch 已抛), missed 标志随撤销作废 —— 验证
      * abort 路径不会被残留 missed 误导去重复接力。
      *
-     * <p>判定标准 (删修复必挂): 删主线程 abort 后的 compareAndClearMustDrain -> 在飞旧代落地后 mustDrain 永真,
+     * <p>判定标准: 删主线程 abort 后的 compareAndClearMustDrain -> 在飞旧代落地后 mustDrain 永真,
      * gauge 永久正偏移 (本断言 mustDrainPending()==0 挂); 删 abortPendingSnapshot 的 PREPARING->EMPTY 撤销 ->
      * 槽残留 PREPARING, hasPendingSnapshot 断言挂。
      */
@@ -548,7 +547,7 @@ class ChunkPendingRelayTest {
         ChunkSaveTask task = new ChunkSaveTask(gen1, metrics, null, recoveryQueue, submitter, reofferHolder[0]);
         task.execute();             // gen=1 IO 在飞 (gen1Future 未完成)
 
-        // mixin 碰撞分支新协议: markDirty -> tryMark(inc gauge) -> beginPending(gen=2, PREPARING) -> [dispatch 抛].
+        // mixin 碰撞分支序列: markDirty -> tryMark(inc gauge) -> beginPending(gen=2, PREPARING) -> [dispatch 抛].
         state.markDirty();          // gen=2
         assertTrue(state.tryMarkMustDrain());
         metrics.incMustDrainPending();

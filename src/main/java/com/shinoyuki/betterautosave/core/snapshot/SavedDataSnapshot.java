@@ -8,7 +8,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * v0.7 SavedData 路径 snapshot. 主线程 capture 时已构好完整外层 tag
+ * SavedData 路径 snapshot. 主线程 capture 时已构好完整外层 tag
  * ({@code data} 子 tag + DataVersion), worker 线程仅做 NbtIo.writeCompressed
  * 写盘 + listener fire.
  *
@@ -24,11 +24,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * @param preBuiltTag     主线程构好的外层 tag, 含 {@code data} 子 tag + DataVersion
  * @param savedData       反引用, 失败时 worker 通过 server.execute 调
  *                        {@link SavedData#setDirty()} 重新 mark dirty 让下个周期重试
- * @param historySizeMap  v0.7.1 修复 (M7): mixin 实例共享的 fileName -> 上次落盘 size map.
+ * @param historySizeMap  mixin 实例共享的 fileName -> 上次落盘 size map.
  *                        worker 写盘成功后回写 size, 让 mixin 下次守卫优先用历史 size 而非
  *                        file.length() (后者在 NFS / SMB 不可靠, 且首次写无值). null 表示
  *                        未启用 (向后兼容).
- * @param inFlight        Minor 修复 4: pipeline 共享的在途文件名集合. mixin 入队前 add(fileName)
+ * @param inFlight        pipeline 共享的在途文件名集合. mixin 入队前 add(fileName)
  *                        成功才 dispatch, worker task finally remove(fileName). 防多 worker
  *                        并发写同名 .dat. null 表示未启用 (向后兼容).
  */

@@ -9,15 +9,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
- * mustDrainPending gauge 无竞态配平回归 (Minor-Major 修复 M6).
+ * mustDrainPending gauge 无竞态配平回归.
  *
- * <p>现场: IO 完成回调旧实现先读 wasDraining (普通读或独立 CAS), 再调 ioFailed/ioCompletedSuccessfully
- * (其内部 compareAndSet(true,false) 静默清 boolean), 最后按 wasDraining 决定 dec. 主线程 mixin 对仍处
+ * <p>现场: 若 IO 完成回调先读 wasDraining 快照 (普通读或独立 CAS), 再调 ioFailed/ioCompletedSuccessfully
+ * (其内部 compareAndSet(true,false) 静默清 boolean), 最后按快照决定 dec, 则主线程 mixin 对仍处
  * IO_PENDING 的同 state tryMarkMustDrain+inc 若落在"回调读快照之后 / 内部清零之前", 该 inc 被内部 CAS
  * 静默吞掉而永远等不到配对 dec → mustDrainPending gauge 永久泄漏正偏移, drain-unload 命令误报超时 +
  * DiagnosticLogger 空闲门失效 + Prometheus 指标失真.
  *
- * <p>修复: 终态转换内部 CAS 既清 boolean 又通过 lastTransitionClearedMustDrain() 报告结果, 调用方据此
+ * <p>故终态转换内部 CAS 既清 boolean 又通过 lastTransitionClearedMustDrain() 报告结果, 调用方据此
  * dec — boolean 清零与 dec 是同一次 CAS 的原子结果. 本测试用单线程精确复刻并发交错的"丢失序列",
  * 断言 gauge 真值与 boolean 真值恒等. 删掉 lastTransitionClearedMustDrain 驱动的 dec (退回读快照拆分)
  * 则该序列 gauge 泄漏 +1, 断言挂.
@@ -36,8 +36,8 @@ class MustDrainGaugeBalanceTest {
     @Test
     void interleaved_main_thread_mark_after_callback_terminal_does_not_leak_gauge() {
         // 丢失序列重放: 回调进入终态 ioFailed (清 boolean) 之前, 主线程刚 tryMarkMustDrain+inc.
-        // 旧实现: 回调先读 wasDraining=已是 true 还是 false 取决时刻, 内部 CAS 吞掉 inc → 漏 dec.
-        // 新实现: 终态 CAS 返回值唯一决定 dec, 无论主线程 inc 落在 CAS 前还是后都配平.
+        // 读快照拆分路径下: 回调先读 wasDraining (true/false 取决时刻), 内部 CAS 吞掉 inc → 漏 dec.
+        // 当前: 终态 CAS 返回值唯一决定 dec, 无论主线程 inc 落在 CAS 前还是后都配平.
         ChunkSaveState state = new ChunkSaveState(0L, "overworld", 1L);
         AtomicLong gauge = new AtomicLong();
 

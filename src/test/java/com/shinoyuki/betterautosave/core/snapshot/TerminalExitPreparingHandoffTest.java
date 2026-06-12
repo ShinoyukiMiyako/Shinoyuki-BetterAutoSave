@@ -27,22 +27,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 不变式: 终态死亡出口 (onUnhandledError / onIoFailure FAILED_TERMINAL) 绝不得消费 PREPARING 槽的未就绪 tag
- * (C-unhandled-drains-preparing, 第九轮 Critical)。
+ * 不变式: 终态死亡出口 (onUnhandledError / onIoFailure FAILED_TERMINAL) 绝不得消费 PREPARING 槽的未就绪 tag。
  *
- * <p>核查员的否决理由落地成测试约束 (与第八轮"未就绪 tag 暴露"门同级): 旧码两个终态出口走 drainPendingSnapshot
- * 无条件夺走 PREPARING, 把主线程 dispatch 仍在原地改写的可变 tag 接力 assemble = 跨线程读写同一 CompoundTag
- * 的 HashMap, 静默数据损坏。修复后这两个出口只消费 READY, PREPARING 标 missed 交还主线程 publish 自踢。
+ * <p>若终态出口走 drainPendingSnapshot 无条件夺走 PREPARING, 会把主线程 dispatch 仍在原地改写的可变 tag 接力
+ * assemble, 等于跨线程读写同一 CompoundTag 的 HashMap, 导致静默数据损坏。正确行为: 两个出口只消费 READY,
+ * PREPARING 标 missed 交还主线程 publish 自踢。
  *
- * <p>技法 (复刻 ChunkPendingStateMachineTest 的门控 dispatcher): 在 dispatch (PREPARING) 窗口内让在飞 task
- * 走终态出口 (onUnhandledError 同步抛 / FAILED_TERMINAL IO 失败), 断言:
+ * <p>技法 (门控 dispatcher): 在 dispatch (PREPARING) 窗口内让在飞 task 走终态出口 (onUnhandledError 同步抛 /
+ * FAILED_TERMINAL IO 失败), 断言:
  * (a) 终态出口不消费未就绪 tag (sentinel: 落盘 relay tag 必含 dispatch 后才写的 sentinel);
  * (b) 主线程 publish 见 missed 自踢落盘最新代;
  * (c) mustDrain/serializing/ioPending 终值归零, 最新代恰落一次 (无双投)。
- *
- * <p>判定标准 (删修复必挂): 把终态出口退回 drainPendingSnapshot 全清 -> 终态 task 在门内 (sentinel 未写) 就
- * assemble 了 gen=2 tag -> 落盘 tag 缺 sentinel + 最新代提前落一次, 断言挂; 主线程随后 publish 在 EMPTY 上
- * 空转不自踢, gen=2 又被主线程自踢落一次 = 双投, 计数断言也挂。
  */
 class TerminalExitPreparingHandoffTest {
 
@@ -265,10 +260,7 @@ class TerminalExitPreparingHandoffTest {
 
     /**
      * FAILED_TERMINAL 出口对 READY 槽: 旧代 IO 终态失败但碰撞最新代已 READY -> 接力它 (接力优先于 vanilla 兜底),
-     * 而非旧码那样 drain 丢弃。验证 fixSketch step 2 的 READY 接力语义。
-     *
-     * <p>判定标准 (删修复必挂): 删 handleTerminalFailure 的 CONSUMED 接力分支 (退回 drain 丢弃) -> gen=2 不落盘,
-     * "接力落最新代"断言挂; 且 mustDrain 被提前清, 终值断言挂。
+     * 而非 drain 丢弃。验证终态失败遇 READY 槽时的接力语义。
      */
     @Test
     void terminal_failure_with_ready_slot_relays_latest_generation() throws Exception {

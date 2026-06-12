@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * AtomicNbtWriter 原子写单测 (Minor 修复 4 第二层).
+ * AtomicNbtWriter 原子写单测.
  *
  * <p>判定标准: 把 writeCompressed 里的 ATOMIC_MOVE 改成直接 NbtIo.writeCompressed(tag, target),
  * "无 tmp 残留" 断言挂 (临时文件路径不再产生但 round-trip 仍过 — 因此关键断言是 tmp 残留 +

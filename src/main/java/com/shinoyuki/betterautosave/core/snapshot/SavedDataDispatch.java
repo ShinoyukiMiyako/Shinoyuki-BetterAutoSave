@@ -6,14 +6,14 @@ import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import java.util.concurrent.BlockingQueue;
 
 /**
- * v0.10.2 修复 (M5): SavedData 入队的 inFlightSerializing gauge 配平不变式的单一归属点.
+ * SavedData 入队的 inFlightSerializing gauge 配平不变式的单一归属点.
  *
- * <p><b>背景</b>: DimensionDataStorageMixin 的 SavedData dispatch 旧实现把 incInFlightSerializing
- * 放在 offer 之前的 try 内, 但 dispatch catch 只 recordSavedDataFallback + remove 占位 + 同步兜底写,
- * 从不补 decInFlightSerializing. 一旦 offer 节点分配 (OOM) 或 task 构造抛, task 未入 worker, 其
- * execute 内的 decInFlightSerializing 永不触发 -> serializing gauge 永久 +1. SnapshotPipeline.drainPending
- * 退出条件含 inFlightSerializing()==0, 泄漏后该条件永假, 每次关服空耗满 shutdownTimeoutSeconds 并误报
- * "pending IO 未在超时内全部落盘", 运维误判有数据未落盘; Prometheus in_flight_serializing 永久虚高。
+ * <p><b>为何收口到此</b>: incInFlightSerializing 必须紧贴 offer, 由 offer 成败决定 inc 去留。若把 inc
+ * 放在调用方 try 内而调用方 catch 只 recordSavedDataFallback + remove 占位 + 同步兜底写, 则 offer 节点
+ * 分配 (OOM) 或 task 构造抛时 task 未入 worker, 其 execute 内的 decInFlightSerializing 永不触发 ->
+ * serializing gauge 永久 +1. SnapshotPipeline.drainPending 退出条件含 inFlightSerializing()==0, 泄漏后
+ * 该条件永假, 每次关服空耗满 shutdownTimeoutSeconds 并误报 "pending IO 未在超时内全部落盘", 运维误判有
+ * 数据未落盘; Prometheus in_flight_serializing 永久虚高。
  *
  * <p><b>不变式</b>: 一个 SavedData task 的 inFlightSerializing 由"成功入队"建立, 由 worker task 的
  * {@code execute()} 首行 decInFlightSerializing 抵消。本方法保证: 仅当 offer 成功 (task 确实交给 worker)
@@ -32,7 +32,7 @@ public final class SavedDataDispatch {
      * inc serializing 后入队. offer 前任何环节抛异常 (含 offer 自身) 都先补 dec 抵消本次 inc, 再原样
      * 上抛供调用方兜底; offer 成功则 inc 保留, 抵消责任移交 worker task execute。
      *
-     * <p>v0.10.2 修复 (m-offer-false-contract): {@link BlockingQueue#offer} 有两种非入队信号 ——
+     * <p>{@link BlockingQueue#offer} 有两种非入队信号 ——
      * 抛异常 (容量分配 OOM 等) 与返 false (有界队列已满)。生产队列当前是无界 LinkedBlockingQueue,
      * offer 永不返 false, 故无 live defect; 但本方法刻意写在抽象 BlockingQueue 接口上 (可注入桩供
      * 单测), 一旦未来换成有界队列 (ArrayBlockingQueue / 带容量的 LinkedBlockingQueue) 而本方法把

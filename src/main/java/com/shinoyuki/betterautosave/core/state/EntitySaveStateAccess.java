@@ -13,7 +13,7 @@ public interface EntitySaveStateAccess {
     EntitySaveState betterautosave$getEntityState(long packedPos);
 
     /**
-     * v0.10.2 修复 (M4): 在 CLEAN_LANDED 终态后尝试从 per-level 状态 map 剔除该条目, 防止
+     * 在 CLEAN_LANDED 终态后尝试从 per-level 状态 map 剔除该条目, 防止
      * betterautosave$entityStates 随服务器运行无界增长 (EntityStorage 是 per-level 单例, map
      * 生命周期 = level 生命周期 = 整个进程)。
      *

@@ -10,14 +10,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * SavedData 入队 inFlightSerializing gauge 配平单测 (Major 修复 M5).
+ * SavedData 入队 inFlightSerializing gauge 配平单测.
  *
  * <p>现场: DimensionDataStorageMixin 旧 dispatch 把 incInFlightSerializing 放在 offer 之前的 try 内,
  * 但 dispatch catch 只 fallback 写 + remove 占位, 从不补 decInFlightSerializing. offer 节点分配 (OOM)
  * 或 task 构造抛异常时, task 未入 worker, 其 execute 内的 dec 永不触发 -> serializing gauge 永久 +1,
  * SnapshotPipeline.drainPending 退出条件 inFlightSerializing==0 永假, 每次关服空耗满超时误报未落盘。
  *
- * <p>判定标准 (删修复必挂): 把 SavedDataDispatch.enqueue 的 offer-失败补 dec (finally 内 decInFlightSerializing)
+ * <p>判定标准: 把 SavedDataDispatch.enqueue 的 offer-失败补 dec (finally 内 decInFlightSerializing)
  * 删掉, offer 抛异常后 inFlightSerializing 停在 1, 第一个测试的归零断言挂。
  */
 class SavedDataDispatchTest {
@@ -71,7 +71,7 @@ class SavedDataDispatchTest {
 
     /**
      * offer 返 false (有界队列已满, 不抛) 必须与抛异常同路: 把 false 转成 IllegalStateException,
-     * 由 finally 配平 gauge, 由调用方 catch 走兜底。判定标准 (删修复必挂): 把 enqueue 里
+     * 由 finally 配平 gauge, 由调用方 catch 走兜底。判定标准: 把 enqueue 里
      * {@code if (!offer) throw} 改回裸 {@code offer; enqueued=true} -> 本测试不再抛异常 + gauge 停在 1。
      */
     @Test

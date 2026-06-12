@@ -11,11 +11,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SaveDispatcher.onPriorityDrained 的 catch 复位逻辑单测 (Critical 修复 1).
+ * SaveDispatcher.onPriorityDrained 的 catch 复位逻辑单测.
  *
  * <p>现场: captureAndDispatchChunk 先 setUnsaved(false) 再 enterSerializing 把 phase
- * 推到 SERIALIZING, capture 抛异常冒泡到 onPriorityDrained 的 catch. 旧版本 catch 只
- * recordChunkFailed + log, chunk 停在 unsaved=false + phase=SERIALIZING:
+ * 推到 SERIALIZING, capture 抛异常冒泡到 onPriorityDrained 的 catch. 若 catch 只
+ * recordChunkFailed + log, chunk 会停在 unsaved=false + phase=SERIALIZING:
  * vanilla isUnsaved 重入门跳过 + BAS 非 DIRTY/FAILED phase 重入门跳过, 永久丢失.
  *
  * <p>本测试不构造真实 LevelChunk (MC 类单测无法实例化), 而是把 LevelChunk.setUnsaved

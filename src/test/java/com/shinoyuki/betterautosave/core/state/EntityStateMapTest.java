@@ -7,12 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 /**
- * EntityStateMap 安全剔除单测 (Major 修复 M4).
+ * EntityStateMap 安全剔除单测.
  *
- * <p>现场: EntityStorage 是 per-level 单例, 旧实现状态 map computeIfAbsent 只增不删, 跑图数日累积
+ * <p>现场: EntityStorage 是 per-level 单例, 状态 map 若 computeIfAbsent 只增不删, 跑图数日会累积
  * 所有曾保存过的 entity chunk 坐标条目 -> 数十~数百 MB 常驻堆线性增长甚至 OOM。
  *
- * <p>判定标准 (删修复必挂): 把 evictIfClean 的 computeIfPresent 剔除逻辑删掉 (改为 no-op), 第一个
+ * <p>判定标准: 把 evictIfClean 的 computeIfPresent 剔除逻辑删掉 (改为 no-op), 第一个
  * 测试的 "N 轮 save->clean 后 size 收敛到 1" 断言挂 (退回线性增长)。
  */
 class EntityStateMapTest {

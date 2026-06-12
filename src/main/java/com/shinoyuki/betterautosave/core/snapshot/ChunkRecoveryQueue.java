@@ -6,7 +6,7 @@ import org.slf4j.Logger;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * IO 失败后的主线程待恢复队列 (Critical 修复 2).
+ * IO 失败后的主线程待恢复队列.
  *
  * <p><b>背景</b>: ChunkSaveTask 的 IO 失败回调 (whenComplete 错误分支 /
  * onUnhandledError) 跑在 IOWorker 线程, 调 {@code ChunkSaveState.ioFailed} 把 phase
@@ -16,8 +16,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * IO 失败后 vanilla isUnsaved 仍是 false → 三条门全跳过 → 失败 chunk 除非玩家再次编辑
  * 否则永久丢失本次快照, 关服 vanilla flush 同样按 isUnsaved 过滤救不回.
  *
- * <p><b>v0.10.2 修复 (M2) 后职责收窄</b>: REQUEUE_DIRTY (未超 maxRetries) 已改为在
- * ChunkSaveTask.submitIo 内用已序列化的 tag 原地重投 IO, 不依赖 chunk 仍加载, 不再经本队列.
+ * <p><b>职责边界</b>: REQUEUE_DIRTY (未超 maxRetries) 在 ChunkSaveTask.submitIo 内用已序列化的
+ * tag 原地重投 IO, 不依赖 chunk 仍加载, 不经本队列.
  * 本队列现仅服务两个无 tag 可重投的入口: FAILED_TERMINAL (重试耗尽) 与 onUnhandledError
  * (assemble 抛 / storeChunk 同步抛, tag 不在回调作用域). 还原 isUnsaved 让 vanilla 同步兜底.
  *
@@ -82,7 +82,7 @@ public final class ChunkRecoveryQueue {
         while ((e = pending.poll()) != null) {
             UnsavedSetter chunk = resolver.resolve(e.dimensionId(), e.packedPos());
             if (chunk == null) {
-                // v0.10.2 修复 (M2): unloaded + terminal 升级到 ERROR 并带 dim+坐标 — 重试已耗尽
+                // unloaded + terminal 升级到 ERROR 并带 dim+坐标 — 重试已耗尽
                 // 且 chunk 已卸载, 本次增量确定丢失, 不再是可由 unload 路径兜底的轻微情形.
                 // 非终态 unloaded (仅 onUnhandledError 的 REQUEUE_DIRTY 可达) 维持 WARN.
                 if (e.terminal()) {

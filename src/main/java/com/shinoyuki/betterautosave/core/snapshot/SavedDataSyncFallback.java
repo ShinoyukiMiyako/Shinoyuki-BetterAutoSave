@@ -6,13 +6,13 @@ import java.io.File;
 import java.util.Set;
 
 /**
- * v0.10.2 修复 (M3): SavedData 大文件同步 fallback 的在途占位释放抽到此处, 把
+ * SavedData 大文件同步 fallback 的在途占位释放抽到此处, 把
  * "save(file) 包 try-finally 释放占位" 的异常安全契约从 mixin 体里提出来单测.
  *
- * <p>背景: DimensionDataStorageMixin 大文件 fallback 先 savedDataInFlight.add(name)
- * 再 savedData.save(file). 之前 save(file) 无 finally, 抛 Throwable (vanilla
+ * <p>DimensionDataStorageMixin 大文件 fallback 先 savedDataInFlight.add(name)
+ * 再 savedData.save(file). save(file) 必须包 finally: 它抛 Throwable (vanilla
  * SavedData.save(File) 仅 catch IOException, mod 的 save(CompoundTag) 抛 RuntimeException
- * 会透出) 则 remove(name) 被跳过 → 该名称永久占位, 后续每周期 add 失败被跳过, 该
+ * 会透出) 时若漏掉 remove(name), 该名称永久占位, 后续每周期 add 失败被跳过, 该
  * SavedData 失去 BAS 增量保护仅剩关服兜底.
  *
  * <p>finally 保证无论 save 是否抛都释放占位; 异常仍按 vanilla 等价语义透出

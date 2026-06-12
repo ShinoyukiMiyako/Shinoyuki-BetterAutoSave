@@ -21,21 +21,21 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * pending 接力链补派发 ChunkDataEvent.Save 回归 (C-relay-skips-save-event).
+ * pending 接力链补派发 ChunkDataEvent.Save 回归.
  *
  * <p>现场: BAS 把 Forge 注入在 vanilla {@code ChunkMap.save} 体内的 {@code ChunkDataEvent.Save} 显式
  * 复刻到 {@link SnapshotPipeline#captureAndDispatchChunk}, 这是唯一派发点。在飞碰撞 + 卸载触发的 pending
  * 接力链 (mixin 碰撞分支登记 pending -> 在飞代落地 REQUEUE_DIRTY -> worker 重投) 完全绕开该派发点, 故接力
  * 落盘的"碰撞后最新代" tag 从未经过 Forge listener, 依赖该事件向 tag 写增量的第三方 mod 增量永久静默丢失。
  *
- * <p>修复: 派发逻辑收口到 {@link ChunkCaptureProcedure#dispatchSaveEvent}, mixin 碰撞分支在 capturePending
+ * <p>派发逻辑收口到 {@link ChunkCaptureProcedure#dispatchSaveEvent}, mixin 碰撞分支在 capturePending
  * 成功后、registerPendingSnapshot 前用 pending 当代 tag 在主线程派发一次, 与常规路径同序。
  *
  * <p>测试技法: bare JUnit 下 Forge eventbus 注册 listener 需事件类无参构造 (ModLauncher 字节码变换才补),
  * 无法直接 post 真总线。故用 {@link ChunkCaptureProcedure#swapSaveEventDispatcher} 注入记录性 dispatcher,
  * 验证 mode 守卫 + tag 选择 + 派发次数 (这些正是 dispatchSaveEvent 内、真总线之外的全部业务逻辑)。
  *
- * <p>判定标准 (删修复必挂): 删 mixin 碰撞分支的 dispatchSaveEvent 调用 -> 接力代 tag 不再被派发 ->
+ * <p>判定标准: 删 mixin 碰撞分支的 dispatchSaveEvent 调用 -> 接力代 tag 不再被派发 ->
  * relay_dispatches_latest_generation_tag 的"最新代被派发"断言挂。删 DISABLED 守卫 -> disabled 用例挂。
  */
 class ChunkRelaySaveEventTest {
@@ -87,7 +87,7 @@ class ChunkRelaySaveEventTest {
         ChunkSnapshot gen1 = snapshotForGeneration(state, 1L, ConfigSpec.EventCompatMode.FULL);
         ChunkCaptureProcedure.dispatchSaveEvent(null, null, gen1, ConfigSpec.EventCompatMode.FULL, metrics);
 
-        // mixin 碰撞分支: 对最新代 (gen=2) 派发 (这正是修复补的那一次).
+        // mixin 碰撞分支: 对最新代 (gen=2) 派发.
         ChunkSnapshot gen2 = snapshotForGeneration(state, 2L, ConfigSpec.EventCompatMode.FULL);
         ChunkCaptureProcedure.dispatchSaveEvent(null, null, gen2, ConfigSpec.EventCompatMode.FULL, metrics);
 

@@ -21,9 +21,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * EntitySaveTask IO 失败 tag 原地重投单测 (Critical 修复 C1).
+ * EntitySaveTask IO 失败 tag 原地重投单测.
  *
- * <p>现场: 旧实现 entity IO 失败 REQUEUE_DIRTY 仅 recordEntityRetried 后 return, FAILED_TERMINAL
+ * <p>现场: 若 entity IO 失败 REQUEUE_DIRTY 仅 recordEntityRetried 后 return, FAILED_TERMINAL
  * 仅 recordEntityFailed 后 return — 两者皆不重投已序列化的 tag, 也无坐标恢复队列. 而 vanilla
  * processChunkUnload 先 storeEntities (BAS 同步 capture 完成 tag) 后立即驱逐实体内存 +
  * chunkLoadStatuses.remove, 卸载后该坐标永不再被 autoSave/saveAll 调 storeEntities. 此时 BAS 持有
@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * <p>本测试用测试构造注入 fake IoSubmitter (绕开 IOWorker), 让前 N 次返回失败 future, 第 N+1 次
  * 成功. fake 返回已完成 future, whenComplete 同步内联在测试线程跑, 整条重投链确定性执行.
  *
- * <p>判定标准 (删修复必挂):
+ * <p>判定标准:
  * - 删掉 submitIo 失败分支的 submitIo(state, tag) 重投 → 提交次数恒为 1, 第一个断言挂.
  * - 重投复用同一 tag (不重新 assemble): fake 记录每次入参 tag, 断言引用恒等.
  */

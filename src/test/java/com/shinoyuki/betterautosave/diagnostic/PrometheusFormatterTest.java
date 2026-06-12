@@ -61,9 +61,9 @@ class PrometheusFormatterTest {
         assertTrue(out.contains("\nbas_in_flight_io_pending 1\n"));
         assertTrue(out.contains("\nbas_worker_queue_depth 7\n"));
         assertTrue(out.contains("\nbas_saved_data_queue_depth 5\n"));
-        // v0.10.2 删死调度链后不再导出 bas_entity_queue_depth.
+        // entity 无调度队列深度指标, 在途以 entityWorkerQueue 观测, 故不导出 bas_entity_queue_depth.
         org.junit.jupiter.api.Assertions.assertFalse(out.contains("bas_entity_queue_depth"),
-                "entity 调度队列深度指标已随死调度链删除, 不应再导出");
+                "entity 无调度队列深度指标, 不应导出 bas_entity_queue_depth");
         assertTrue(out.contains("\nbas_must_drain_pending 1\n"));
     }
 
@@ -124,8 +124,8 @@ class PrometheusFormatterTest {
                         "所有 metric 名必须以 bas_ 开头, 违反: " + name);
             }
         }
-        // 17 counter + 5 gauge + 4 histogram = 26 个 # TYPE 声明, 防漏报
-        // (v0.10.2 删死调度链移除 bas_entity_queue_depth gauge, 6 -> 5)
+        // 17 counter + 5 gauge + 4 histogram = 26 个 # TYPE 声明, 防漏报.
+        // entity 无调度队列深度指标 (无 bas_entity_queue_depth gauge), gauge 数为 5.
         assertEquals(26, typeCount,
                 "应输出 17+5+4=26 个 # TYPE 行, actual=" + typeCount);
     }

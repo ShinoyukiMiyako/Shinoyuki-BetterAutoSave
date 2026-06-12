@@ -75,7 +75,7 @@ public final class ChunkCaptureProcedure {
     }
 
     /**
-     * v0.10.2 修复 (C-chunk-unload-collision): 纯 capture 入口 —— 只固化最新内存为快照, **不**碰
+     * 纯 capture 入口 —— 只固化最新内存为快照, **不**碰
      * phase 也**不**碰 inFlightGeneration (不调 enterSerializing), 不 offer。
      *
      * <p><b>为何不复用 {@link #capture}</b>: 在途碰撞发生时, 该 chunk 已有某代 IO 在飞
@@ -119,7 +119,7 @@ public final class ChunkCaptureProcedure {
     /**
      * 在主线程派发 Forge {@code ChunkDataEvent.Save}, 复刻 vanilla 在 {@code ChunkMap.save} 体内注入的
      * 事件 (Forge 把它注入到 ChunkSerializer.write 之后、IOWorker.store 之前)。常规 dispatch 路径与
-     * pending 接力登记路径共用本入口, 杜绝两处派发逻辑漂移 (C-relay-skips-save-event 修复)。
+     * pending 接力登记路径共用本入口, 杜绝两处派发逻辑漂移。
      *
      * <p><b>线程契约</b>: Forge listener 假定在主线程同步执行。两个调用点均在主线程: 常规路径在
      * {@link SnapshotPipeline#captureAndDispatchChunk} (mixin 拦截 save 在主线程), pending 路径在

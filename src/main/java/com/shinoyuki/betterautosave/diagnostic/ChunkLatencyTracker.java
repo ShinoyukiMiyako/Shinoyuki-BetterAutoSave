@@ -30,10 +30,10 @@ public final class ChunkLatencyTracker {
 
     private final int windowSize;
     private final int trackLimit;
-    // v0.10.2 修复 (M8): key 纳入 dimension. 之前以纯 packedPos (ChunkPos.toLong, 零维度位) 为 key,
-    // overworld/nether/end 同坐标 chunk (尤其 spawn 区 (0,0)) 落入同一 key, 后到维度的样本被叠加进
-    // 先到维度的 record (dimensionId 构造时冻结), hottest-chunks 输出维度标签错 + 跨维度 p99/max/count
-    // 混算. 复合 String key (dimensionId + ":" + packedPos) 与 ChunkSavePriority 既有约定一致.
+    // key 纳入 dimension. 纯 packedPos (ChunkPos.toLong, 零维度位) 作 key 时, overworld/nether/end
+    // 同坐标 chunk (尤其 spawn 区 (0,0)) 落入同一 key, 后到维度的样本被叠加进先到维度的 record
+    // (dimensionId 构造时冻结), hottest-chunks 输出维度标签错 + 跨维度 p99/max/count 混算.
+    // 复合 String key (dimensionId + ":" + packedPos) 与 ChunkSavePriority 既有约定一致.
     private final Map<String, ChunkLatencyRecord> records;
 
     public ChunkLatencyTracker(int windowSize, int trackLimit) {

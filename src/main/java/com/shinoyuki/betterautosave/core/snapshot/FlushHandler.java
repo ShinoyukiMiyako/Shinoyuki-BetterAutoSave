@@ -1,7 +1,7 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
 /**
- * saveAllChunks(flush=true) 拦截的处理策略 (Major 修复).
+ * saveAllChunks(flush=true) 拦截的处理策略.
  *
  * <p>vanilla saveAllChunks(true) 同时服务两个场景:
  * <ol>

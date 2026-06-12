@@ -20,9 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 调 triggerDegraded. scheduler / ioBridge 传 null: triggerDegraded 路径只动
  * degraded 闩锁与 fire, 不触碰这两个协作者 (SaveScheduler 在单测环境构造会因
  * 未初始化的 config 抛 IllegalArgumentException, 故不能 new 它).
- *
- * <p>判定标准: 删掉 triggerDegraded 里的 firePipelineDegraded 调用, 第一个断言挂;
- * 把 compareAndSet 换成无条件 set + fire, 第二个 "只 fire 一次" 断言挂.
  */
 class SnapshotPipelineDegradedTest {
 
@@ -72,13 +69,10 @@ class SnapshotPipelineDegradedTest {
     }
 
     /**
-     * Major 修复 M2: 恢复队列 drain 必须与 degraded 闸门解耦。降级后存活 worker 与 IOWorker 回调
-     * 仍在 enqueueRecovery, 若 drain 跟随 degraded 停摆则失败 chunk 的 isUnsaved 永不还原, 降级会话
-     * 期间不落盘, 进程被 kill 即静默丢失。本测试断言: 即便 pipeline 已 degraded, 其 ChunkRecoveryQueue
-     * 仍能 drain 并还原 isUnsaved (恢复队列对象不持有 pipeline 引用, 零 degraded 耦合)。
-     *
-     * <p>判定标准: 把恢复 drain 退回 degraded 闸门之后 (即降级时跳过 drain), 降级期投递的恢复条目
-     * 不会被处理, 此处断言 recovered==2 与 resolver 被调用挂。
+     * 恢复队列 drain 必须与 degraded 闸门解耦。降级后存活 worker 与 IOWorker 回调仍在 enqueueRecovery,
+     * 若 drain 跟随 degraded 停摆则失败 chunk 的 isUnsaved 永不还原, 降级会话期间不落盘, 进程被 kill 即静默
+     * 丢失。本测试断言: 即便 pipeline 已 degraded, 其 ChunkRecoveryQueue 仍能 drain 并还原 isUnsaved
+     * (恢复队列对象不持有 pipeline 引用, 零 degraded 耦合)。
      */
     @Test
     void recovery_queue_drains_while_degraded() {
@@ -110,13 +104,9 @@ class SnapshotPipelineDegradedTest {
     }
 
     /**
-     * Minor 修复 M9: 全 chunk worker 死亡触发 degraded 后, 在队 task 已 incInFlightSerializing 但
-     * 永不 execute -> inFlightSerializing 永久 >0, drainPending 轮询条件永假, 旧实现必空耗满
-     * shutdownTimeoutSeconds (默认 60s) 才返 false, 平白拖慢关服。修复: degraded 下提前明示返回 false。
-     *
-     * <p>判定标准: 制造 inFlightSerializing>0 (模拟死 worker 的孤儿在队 task) + degraded, 给一个大
-     * timeout 调 drainPending, 断言立即返 false 且耗时远小于 timeout。删 degraded 提前返回则空耗满
-     * timeout, 耗时断言挂。
+     * 全 chunk worker 死亡触发 degraded 后, 在队 task 已 incInFlightSerializing 但永不 execute ->
+     * inFlightSerializing 永久 >0, drainPending 轮询条件永假, 若不短路就会空耗满 shutdownTimeoutSeconds
+     * (默认 60s) 才返 false, 平白拖慢关服。degraded 下必须提前明示返回 false。
      */
     @Test
     void degraded_drain_pending_returns_immediately_without_spinning_timeout() {

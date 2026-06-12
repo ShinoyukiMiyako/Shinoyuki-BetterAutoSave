@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ChunkRecoveryQueue 行为单测 (Critical 修复 2).
+ * ChunkRecoveryQueue 行为单测.
  *
  * <p>现场: ChunkSaveTask IO 失败回调 (worker 线程) 调 ioFailed 把 phase 置回 DIRTY/FAILED,
  * 但 vanilla isUnsaved 仍是 capture 时清的 false, 三条重入门全跳过 → 永久丢失. 本队列让

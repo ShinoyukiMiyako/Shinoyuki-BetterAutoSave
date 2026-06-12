@@ -20,13 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SavedData 乐观清 dirty 的顺序确定性回归 (M-saveddata-dirty-ordering).
+ * SavedData 乐观清 dirty 的顺序确定性回归.
  *
- * <p>现场: mixin 旧序把 {@code savedData.setDirty(false)} 放在 {@code SavedDataDispatch.enqueue} 之后。
- * worker 是独立线程, offer 把 task 交给 worker 后主线程还要再跑两行才清 dirty; 持续性 IO 故障下 worker 的
+ * <p>现场: worker 是独立线程。若 mixin 把 {@code savedData.setDirty(false)} 放在
+ * {@code SavedDataDispatch.enqueue} 之后, offer 把 task 交给 worker 后主线程还要再跑两行才清 dirty; 持续性 IO 故障下 worker 的
  * writeCompressed 同步快速抛 IOException 走 {@code SavedDataSaveTask} setDirty(true), 这次 true 可能先于
  * 主线程的 setDirty(false) 发生, last-writer-wins 主线程 false 胜出 -> 下周期 isDirty() gate 跳过 -> 丢一次
- * 重试。修复: 把 setDirty(false) 上移到 enqueue 之前 + offer-fail 兜底写也失败时补 re-mark。
+ * 重试。故 setDirty(false) 必须排在 enqueue 之前, 且 offer-fail 兜底写也失败时补 re-mark。
  *
  * <p>测试技法: 裸 JUnit 无 mixin agent (mixin 时序无法直测)。用自定义 queue 在 offer 内同步执行 failing
  * task (复刻 "worker 在主线程清 dirty 之前就失败置 dirty" 的最坏时序), 按 mixin 的真实两语句顺序驱动,
@@ -62,7 +62,7 @@ class SavedDataDirtyOrderingTest {
 
     /**
      * 复刻 mixin 的真实两语句顺序 (setDirty(false) 先于 enqueue), 配 offer 内同步执行的 failing worker task,
-     * 断言返回后 dirty 仍 true。判定标准 (删修复必挂): 把两语句换回旧序 (enqueue 先, setDirty(false) 后),
+     * 断言返回后 dirty 仍 true。判定标准: 把两语句换成 enqueue 先、setDirty(false) 后的次序,
      * worker 的 setDirty(true) 被随后的 setDirty(false) 覆盖, 最终 dirty=false, 末尾 isDirty 断言挂。
      */
     @Test
@@ -96,20 +96,20 @@ class SavedDataDirtyOrderingTest {
             }
         };
 
-        // mixin 真实顺序 (修复后): 先乐观清 dirty, 再 enqueue (offer 内 worker 同步失败 re-mark dirty).
+        // mixin 真实顺序: 先乐观清 dirty, 再 enqueue (offer 内 worker 同步失败 re-mark dirty).
         data.setDirty(false);
         SavedDataDispatch.enqueue(syncFailingQueue, task, metrics);
 
         assertTrue(data.isDirty(),
-                "修复后顺序: 主线程 setDirty(false) 先于 worker setDirty(true), worker 失败置脏成为最后写 -> "
+                "顺序: 主线程 setDirty(false) 先于 worker setDirty(true), worker 失败置脏成为最后写 -> "
                         + "dirty 必须维持 true, 下周期 isDirty() gate 正确重试");
         assertEquals(1L, metrics.snapshot().savedDataFailed(), "worker IO 失败计数");
         assertFalse(inFlight.contains(name), "task finally 释放在途占位");
     }
 
     /**
-     * 反向锚定: 显式跑旧序 (enqueue 先, setDirty(false) 后) 必得 dirty=false (复现 bug)。本测试钉死
-     * "顺序是因果" —— 证明修复不是无关紧要的代码搬家, 颠倒顺序确实丢重试。
+     * 反向锚定: 显式跑相反序 (enqueue 先, setDirty(false) 后) 必得 dirty=false。本测试钉死
+     * "顺序是因果" —— 颠倒两语句次序确实丢重试, 故这两行的相对顺序是 deletion-sensitive 的语义本体。
      */
     @Test
     void old_order_loses_retry_demonstrating_bug(@TempDir Path dir) throws Exception {
@@ -136,11 +136,11 @@ class SavedDataDirtyOrderingTest {
             }
         };
 
-        // 旧序: enqueue 先 (offer 内 worker 失败置 dirty=true), 主线程随后 setDirty(false) 覆盖。
+        // 相反序: enqueue 先 (offer 内 worker 失败置 dirty=true), 主线程随后 setDirty(false) 覆盖。
         SavedDataDispatch.enqueue(syncFailingQueue, task, metrics);
         data.setDirty(false);
 
         assertFalse(data.isDirty(),
-                "旧序下 worker setDirty(true) 被主线程随后的 setDirty(false) 覆盖 -> dirty=false 丢重试 (bug 复现)");
+                "相反序下 worker setDirty(true) 被主线程随后的 setDirty(false) 覆盖 -> dirty=false 丢重试");
     }
 }

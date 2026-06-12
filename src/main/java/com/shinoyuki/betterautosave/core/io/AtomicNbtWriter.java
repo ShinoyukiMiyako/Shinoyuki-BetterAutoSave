@@ -14,7 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * SavedData .dat 文件原子写 (Minor 修复 4 第二层).
+ * SavedData .dat 文件原子写.
  *
  * <p>vanilla {@code SavedData.save(File)} 直接 {@code NbtIo.writeCompressed(tag, file)}:
  * 写到一半崩溃 (掉电 / OOM kill) 会留下截断的 .dat, 下次加载 gzip 解压失败 → SavedData

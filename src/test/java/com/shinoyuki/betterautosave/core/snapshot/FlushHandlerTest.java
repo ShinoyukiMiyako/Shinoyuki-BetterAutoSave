@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * FlushHandler.handleFlush 决策单测 (Major 修复).
+ * FlushHandler.handleFlush 决策单测.
  *
  * <p>现场: ChunkMapMixin 对 saveAllChunks(true) 不区分关服与运营中 /save-all flush,
  * 一律 drainPending 同步等待, drainPending 内 Thread.sleep(50) 轮询卡死主线程.

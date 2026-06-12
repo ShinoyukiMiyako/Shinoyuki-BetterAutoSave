@@ -27,11 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * entity 在途碰撞 + 卸载的接力快照重投端到端回归 (C-entity-unload-collision).
+ * entity 在途碰撞 + 卸载的接力快照重投端到端回归.
  *
  * <p>现场: vanilla processChunkUnload 在 storeEntities 后立即把实体驱逐出内存且该坐标永不再 storeEntities,
- * 故碰撞那次 chunkEntities 是最新实体列表的唯一副本。旧逻辑 ci.cancel 丢弃它信任在飞旧代, 实体增量
- * (新放的命名生物/盔甲架等) 永久静默丢失。修复: mixin 碰撞分支显式 markDirty 推 generation (entity 无
+ * 故碰撞那次 chunkEntities 是最新实体列表的唯一副本。若 ci.cancel 丢弃它而信任在飞旧代, 实体增量
+ * (新放的命名生物/盔甲架等) 将永久静默丢失。因此 mixin 碰撞分支显式 markDirty 推 generation (entity 无
  * setUnsaved 等价驱动源) + 纯 capture 登记接力槽, 在飞那代落地 REQUEUE_DIRTY 时回调取出重投。
  *
  * <p>关键非对称回归点: 若碰撞分支不 markDirty, 在飞那代落地 generation==inFlightGeneration 误判
@@ -155,7 +155,7 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * 隐角 A 三代链 (entity): capture G -> 碰撞 G+1 登记 pending -> pending 在飞中再碰撞 G+2 覆盖 ->
+     * 三代链 (entity): capture G -> 碰撞 G+1 登记 pending -> pending 在飞中再碰撞 G+2 覆盖 ->
      * 最终落盘 G+2。
      */
     @Test
@@ -218,10 +218,10 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * M-unhandled-abandons-pending (entity 侧, 与 chunk 对称): onUnhandledError 撞上非空 pending 必须接力
+     * entity 侧 (与 chunk 对称): onUnhandledError 撞上非空 pending 必须接力
      * 重投最新代。entity 侧更严重 (无坐标恢复队列), 漏接力即静默永久丢失。
      *
-     * <p>判定标准 (删修复必挂): 删 onUnhandledError 的 takePendingSnapshot + reoffer 分支 -> gen=2 未提交,
+     * <p>判定标准: 删 onUnhandledError 的 takePendingSnapshot + reoffer 分支 -> gen=2 未提交,
      * 接力断言挂; hasPendingSnapshot 残留 true。
      */
     @Test
@@ -259,7 +259,7 @@ class EntityPendingRelayTest {
         EntitySaveTask inFlightTask = new EntitySaveTask(gen1, metrics, submitter, null, reofferHolder[0]);
         inFlightTask.onUnhandledError(new RuntimeException("assemble boom"));
 
-        // 不变式断言点 (relay 在途): entity 侧旧码同样无条件清 mustDrain 不取 pending; 回退则两断言挂.
+        // 不变式断言点 (relay 在途): onUnhandledError 接力取走 pending 并维持 mustDrain, 故下面两断言成立.
         assertEquals(1, submittedTags.size(), "接力必须提交一次最新代 IO");
         assertEquals(2L, submittedGeneration(submittedTags.get(0)),
                 "entity onUnhandledError 必须接力把碰撞后最新代 (gen=2) 落盘, 而非静默丢弃");
@@ -278,7 +278,7 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * M-unhandled-abandons-pending 安全网 (entity): 有 pending 但 sink 不可达 (null) 时取走 pending 清槽
+     * onUnhandledError 安全网 (entity): 有 pending 但 sink 不可达 (null) 时取走 pending 清槽
      * + 清 mustDrain + 配平 gauge。
      */
     @Test
@@ -305,12 +305,12 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * C-dispatch-register-toctou (entity 对称项): 碰撞分支 markDirty 后 capturePending 抛 (OOM 等), 尚未登记
+     * entity 对称项: 碰撞分支 markDirty 后 capturePending 抛 (OOM 等), 尚未登记
      * pending。在飞旧代落地必判 REQUEUE_DIRTY (markDirty 已推 generation) 永不清 mustDrain, 槽空回调取 null
      * 不重投 -> 此后无路径清 mustDrain。故 capture-throw 的 catch 必须亲自 compareAndClearMustDrain 配平 gauge,
      * 与 chunk 路径同构。
      *
-     * <p>判定标准 (删修复必挂): 删 entity mixin catch 的 compareAndClearMustDrain -> 在飞旧代落地后 mustDrain
+     * <p>判定标准: 删 entity mixin catch 的 compareAndClearMustDrain -> 在飞旧代落地后 mustDrain
      * 永真, mustDrainPending gauge 永久正偏移 (本断言 mustDrainPending()==0 挂)。
      */
     @Test
@@ -368,7 +368,7 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * C-callback-sync-throw-swallowed (entity): store 同步抛必须走 onIoFailure 补偿, 不静默落进被丢弃的
+     * store 同步抛 (entity): store 同步抛必须走 onIoFailure 补偿, 不静默落进被丢弃的
      * dependent future。第一次 store 同步抛 -> REQUEUE_DIRTY 重投, 第二次成功。
      *
      * <p>判定标准 (删 submitIo 自包 try 必挂): ioPending gauge 永久 +1, phase 卡 IO_PENDING。
@@ -403,7 +403,7 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * C-callback-sync-throw-swallowed (entity): REQUEUE_DIRTY 接力时 reoffer sink 同步抛, safeReoffer 必须清
+     * reoffer 同步抛 (entity): REQUEUE_DIRTY 接力时 reoffer sink 同步抛, safeReoffer 必须清
      * mustDrain + 配平 gauge (serializing 由 sink 自身 inc/offer 自包 try 配平)。entity 无坐标恢复, 漏防即静默丢失。
      *
      * <p>判定标准 (删 safeReoffer 必挂): mustDrain 永真 + mustDrainPending gauge 泄漏。
@@ -455,14 +455,13 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * 隐角 C 关服残窗 ERROR 安全网: worker 已停 (joinWorkers 置 workersStopping) 后迟到的接力重投不得
+     * 关服残窗 ERROR 安全网: worker 已停 (joinWorkers 置 workersStopping) 后迟到的接力重投不得
      * 沉默 offer 进无人消费的死队列, 也不得泄漏 serializing gauge。本测试用真实 SnapshotPipeline 的公开
      * entityPendingReoffer sink: 先 joinWorkers(0) (无 worker, 仅置位 workersStopping), 再调 sink,
      * 断言队列保持空 + serializing gauge 不变 (走 ERROR 安全网而非 inc+offer)。
      *
-     * <p>v0.11.0 修复 (m-workersStopping-doc-mismatch): 补 mustDrain 维度 —— 复刻碰撞登记 (state markMustDrain
-     * + gauge inc), 断言迟到接力走 ERROR 安全网时真正清 mustDrain + 配平 gauge (实现向注释看齐, 不留孤儿
-     * 正偏移)。这正是旧"注释谎言"能存活的盲区 (原用例只断言 queue 空 + serializing, 从不触 mustDrain)。
+     * <p>同时覆盖 mustDrain 维度: 复刻碰撞登记 (state markMustDrain + gauge inc), 断言迟到接力走 ERROR
+     * 安全网时真正清 mustDrain + 配平 gauge, 不留孤儿正偏移。
      *
      * <p>判定标准: 删 sink 的 workersStopping ERROR 分支 -> sink 改 inc+offer, 队列非空 + serializing gauge=1
      * 挂; 删 sink 内新加的 compareAndClearMustDrain -> mustDrain()==false 与 mustDrainPending()==0 挂。
@@ -498,7 +497,7 @@ class EntityPendingRelayTest {
     }
 
     /**
-     * m-workersStopping-doc-mismatch (chunk 对称): chunk 接力 sink 的 workersStopping 残窗同样真正清
+     * chunk 对称: chunk 接力 sink 的 workersStopping 残窗同样真正清
      * mustDrain + 配平 gauge。chunk 路径需 ServerLevel 才能构 task, 但 workersStopping 分支在构 task 之前
      * 早返回, 故 level 传 null 不触发 NPE (与 entity 对称用例同技法)。
      *

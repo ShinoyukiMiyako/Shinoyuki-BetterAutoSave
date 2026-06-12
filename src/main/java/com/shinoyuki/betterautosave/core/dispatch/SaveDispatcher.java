@@ -83,7 +83,7 @@ public final class SaveDispatcher implements SnapshotPipeline.ChunkResolutionHoo
             // unsaved=false + phase=SERIALIZING. catch 不复位会让该 chunk 永远走
             // 三条重入门 (isUnsaved gate + 非 DIRTY/FAILED phase) 的早 return 路径,
             // 既不入 BAS worker 也不走 vanilla 同步, markDirty 的 CAS(CLEAN->DIRTY) 从
-            // SERIALIZING 无法自愈 — 数据永久丢失. 对齐 ChunkMapSaveMixin M3 修复:
+            // SERIALIZING 无法自愈 — 数据永久丢失. 与 ChunkMapSaveMixin catch 同源:
             // resetAfterFallback 归零状态机 + setUnsaved(true) 还原 vanilla 重入门,
             // 让下一轮 autosave / vanilla 同步路径接管. onPriorityDrained 跑在主线程
             // (SaveScheduler.onServerTick -> submitChunk -> 本回调), setUnsaved 安全.

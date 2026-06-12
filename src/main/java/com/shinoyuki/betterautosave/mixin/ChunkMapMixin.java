@@ -52,7 +52,7 @@ public abstract class ChunkMapMixin {
 
         SaveScheduler scheduler = BetterAutoSaveCore.scheduler();
         if (flush) {
-            // Major 修复: 区分关服 flush 与运营中 /save-all flush.
+            // 区分关服 flush 与运营中 /save-all flush.
             // - 关服 (isShutdownMode): 必须同步 drainPending 等 BAS in-flight 落盘,
             //   再 return 让 vanilla 同步 flush 兜底剩余, 语义要求不能丢.
             // - 运营中 (!isShutdownMode): drainPending 内 Thread.sleep(50) 循环最多卡主线程
@@ -89,7 +89,7 @@ public abstract class ChunkMapMixin {
             if (!chunk.isUnsaved()) {
                 continue;
             }
-            // v0.7.1 修复 (M11): 复刻 vanilla saveChunkIfNeeded 的 wasAccessibleSinceLastSave
+            // 复刻 vanilla saveChunkIfNeeded 的 wasAccessibleSinceLastSave
             // 守卫 (vanilla ChunkMap.java:799). 不可访问的 chunk (unload 后还在 visibleChunkMap)
             // 跳过 → 减少不必要的 capture + IO. vanilla 在 save 后调 refreshAccessibility 翻
             // 标志位, BAS 入队成功后同步调一次保持行为对齐.
@@ -102,13 +102,12 @@ public abstract class ChunkMapMixin {
             ChunkSaveState state = ((ChunkSaveStateAccess) chunk).betterautosave$getOrCreateState(
                     packed, dimensionId, sequence);
             ChunkSaveState.Phase phase = state.phase();
-            // v0.10.2 修复 (autosave 通道静默吞咽, gaps[1] Major): 在途 (SNAPSHOTTING/SERIALIZING/IO_PENDING)
-            // 的 chunk 已有某代 IO 在飞, 旧逻辑仍无条件 enqueue 一个 priority, drain 时 trySnapshot
-            // CAS(DIRTY->SNAPSHOTTING) 必失败 (phase 非 DIRTY) -> SaveDispatcher 静默 recordChunkFallback
-            // 丢弃, 既浪费 enqueue/drain/解析, 又虚高 fallback 计数掩盖真实 fallback 信号, 且连 mustDrain 都
-            // 不标 (关服 join 不为这种在途 chunk 多等)。改为与 eager 路径对齐: 在途短路跳过 enqueue, 只
-            // tryMarkMustDrain 让关服 join 知情。该 chunk 的最新代落盘由在飞 task 的 REQUEUE_DIRTY 接力
-            // (commit: 接力快照机制) + 卸载碰撞登记的 pending 共同保证, 不依赖本次 enqueue。
+            // 在途 (SNAPSHOTTING/SERIALIZING/IO_PENDING) 的 chunk 已有某代 IO 在飞。若仍无条件 enqueue 一个
+            // priority, drain 时 trySnapshot CAS(DIRTY->SNAPSHOTTING) 必失败 (phase 非 DIRTY) -> SaveDispatcher
+            // 静默 recordChunkFallback 丢弃, 既浪费 enqueue/drain/解析, 又虚高 fallback 计数掩盖真实 fallback 信号,
+            // 且连 mustDrain 都不标 (关服 join 不为这种在途 chunk 多等)。与 eager 路径对齐: 在途短路跳过 enqueue,
+            // 只 tryMarkMustDrain 让关服 join 知情。该 chunk 的最新代落盘由在飞 task 的 REQUEUE_DIRTY 接力
+            // + 卸载碰撞登记的 pending 共同保证, 不依赖本次 enqueue。
             if (state.isInFlight()) {
                 if (state.tryMarkMustDrain()) {
                     metrics.incMustDrainPending();

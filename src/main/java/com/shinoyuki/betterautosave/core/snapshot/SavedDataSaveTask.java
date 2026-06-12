@@ -10,14 +10,14 @@ import org.slf4j.Logger;
 import java.io.IOException;
 
 /**
- * v0.7 worker 端 SavedData 写盘任务. 与 {@link ChunkSaveTask} /
+ * worker 端 SavedData 写盘任务. 与 {@link ChunkSaveTask} /
  * {@link EntitySaveTask} 同结构, 但实现最简: 主线程已构好完整 tag, worker
  * 仅调 {@link NbtIo#writeCompressed} 写盘 + 触发 listener.
  *
- * <p><b>失败重试策略 (v0.7.1 修复 M9)</b>: vanilla {@code SavedData.save(File)} 失败时只
+ * <p><b>失败重试策略</b>: vanilla {@code SavedData.save(File)} 失败时只
  * {@code LOGGER.error} 不抛, 不重试. BAS 行为升级: 失败时**worker 线程直接调**
  * {@link net.minecraft.world.level.saveddata.SavedData#setDirty()}, 让下个 autosave
- * 周期重试. 之前用 {@code server.execute} 异步派回主线程; 关服阶段如果 IO 失败发生在
+ * 周期重试. 不经 {@code server.execute} 异步派回主线程 —— 关服阶段若 IO 失败发生在
  * stopServer 主循环退出后, server task queue 不再消费 → setDirty 永远不执行 →
  * vanilla 关服同步路径看 dirty=false 跳过 → 数据永久丢失. 直接 worker 线程 setDirty
  * 没这个边界 — vanilla 的 SavedData.dirty 是普通 boolean 字段, 跨线程写入无 race
@@ -52,13 +52,13 @@ public final class SavedDataSaveTask implements SaveTask {
         metrics.incInFlightIoPending();
         long submitNs = System.nanoTime();
         try {
-            // Minor 修复 4 (b): 原子写 (tmp + fsync + ATOMIC_MOVE) 替代 vanilla 的直接覆盖,
+            // 原子写 (tmp + fsync + ATOMIC_MOVE) 替代 vanilla 的直接覆盖,
             // 防写到一半崩溃留截断 .dat 导致下次加载 gzip 解压失败丢数据.
             AtomicNbtWriter.writeCompressed(snapshot.preBuiltTag(), snapshot.targetFile());
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             metrics.recordSavedDataCompleted();
-            // v0.7.1 修复 (M7): 回写历史 size, 让 mixin 守卫下次有可靠数据.
+            // 回写历史 size, 让 mixin 守卫下次有可靠数据.
             if (snapshot.historySizeMap() != null) {
                 snapshot.historySizeMap().put(snapshot.fileName(), snapshot.targetFile().length());
             }
@@ -75,7 +75,7 @@ public final class SavedDataSaveTask implements SaveTask {
             LOGGER.error("[BetterAutoSave] SavedData {} write failed, re-marked dirty for next cycle",
                     snapshot.fileName(), e);
         } finally {
-            // Minor 修复 4 (a): 释放在途文件名占位, 让下个周期可重新 dispatch 该文件.
+            // 释放在途文件名占位, 让下个周期可重新 dispatch 该文件.
             // finally 保证无论成功 / IOException 都释放; 非 IOException 逃到 onUnhandledError
             // 也另行释放 (该路径 execute 的 finally 已先跑).
             releaseInFlight();
@@ -84,7 +84,7 @@ public final class SavedDataSaveTask implements SaveTask {
 
     @Override
     public void onUnhandledError(Throwable cause) {
-        // v0.7.1 修复 (C2): execute 第一行已 dec serializing + inc ioPending,
+        // execute 第一行已 dec serializing + inc ioPending,
         // 然后 AtomicNbtWriter.writeCompressed 抛**非 IOException** (例如 OOM / NPE) 时 try-catch
         // 不接, 异常逃到 worker 走 onUnhandledError. 此时:
         // - serializing 已 dec, 不能再 dec (会变负)

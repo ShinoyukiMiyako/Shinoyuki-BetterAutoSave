@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SavedData 大文件同步 fallback 在途占位释放单测 (Major 修复 M3).
+ * SavedData 大文件同步 fallback 在途占位释放单测.
  *
  * <p>现场: DimensionDataStorageMixin 大文件 fallback 先 savedDataInFlight.add(name) 再
  * savedData.save(file). 之前 save(file) 无 finally, 抛 Throwable (vanilla SavedData.save(File)

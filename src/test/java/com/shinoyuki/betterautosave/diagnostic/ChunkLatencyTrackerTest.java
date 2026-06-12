@@ -195,7 +195,7 @@ class ChunkLatencyTrackerTest {
 
     @Test
     void same_packed_pos_across_dimensions_tracked_separately() {
-        // Minor 修复 M8: 跨维度同坐标 chunk 必须独立统计, 不能因纯 packedPos key 碰撞而把
+        // 跨维度同坐标 chunk 必须独立统计, 不能因纯 packedPos key 碰撞而把
         // nether/end 的样本叠加进 overworld 的 record (维度标签错 + 跨维度 p99/max/count 混算).
         ChunkLatencyTracker t = new ChunkLatencyTracker(100, 1000);
         long packed = 0L; // spawn 区 (0,0), 三维度都常驻且都被采样, 最易碰撞
