@@ -17,21 +17,18 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 不变式: consumerMissed 标记 (EMPTY_CONSUMER_PASSED 载体) 绝不得跨保存周期存活
- * (C-stale-missed-no-epoch, 第九轮 Critical)。
+ * 不变式: missed 标记绝不得跨保存周期存活触发幽灵自踢 (A4, 原第九轮 C-stale-missed-no-epoch)。
  *
- * <p>核查员的否决理由落地成测试约束 (与第八轮 mustDrain 不变式同级): 一个保存周期里某代 IO 落地判
- * REQUEUE_DIRTY 时回调路过空槽留下的 consumerMissed 标记, 必须在下一个 fresh capture 周期
- * (enterSerializing) 被清掉, 不能被后续 beginPendingSnapshot 继承去触发幽灵自踢。
+ * <p>v0.11.0 REDESIGN 后机制变更 (本测试随之更新, 但断言强度一分不降): 第九轮靠 enterSerializing 末尾
+ * compareAndSet(EMPTY_CONSUMER_PASSED, EMPTY) 的<b>时序性单 CAS 清理</b>防 stale 跨周期; 它挡得住
+ * "清理时已存在的 stale" (本类 stale_missed_does_not_survive...) 却挡不住 "清理之后才写入的 stale"
+ * (那正是第十轮 A5)。SlotWord 协议改用<b>周期序号代际 fence</b>: missed 携带它所属在飞周期的 inFlightCycleSeq,
+ * beginPendingSnapshot / publishPendingSnapshot 仅在 missedCycle==inFlightCycleSeq 时认定同周期, stale
+ * (旧周期序号) 自动丢弃 —— 更强, 同时覆盖 "清理前已存在" 与 "清理后才写入" 两种 stale。
  *
- * <p>触发链 (修复前的 ABA): gen1 周期 REQUEUE 留 EMPTY_CONSUMER_PASSED -> gen2 enterSerializing 开新
- * 周期 (修复前不清) -> gen3 碰撞 beginPendingSnapshot 继承 stale missed -> publishPendingSnapshot 见
- * missed 提前自踢 (本应发布 READY 等 gen2 回调) -> reenterSerializingForPending 覆盖 inFlightGeneration ->
- * gen2 回调误判 CLEAN_LANDED + 写序反转。
- *
- * <p>判定标准 (删修复必挂): 删 enterSerializing 末尾的 compareAndSet(EMPTY_CONSUMER_PASSED, EMPTY) ->
- * gen2 周期继承 stale missed, 下面 publishPendingSnapshot 返回非 null (提前自踢) 而非 null (发布 READY),
- * 断言挂; 且 gen2 ioCompletedSuccessfully 误判 CLEAN_LANDED 而非 REQUEUE_DIRTY, 断言挂。
+ * <p>判定标准 (删修复必挂): 把 beginPendingSnapshot 的继承条件 missedCycle==inFlightCycleSeq 改成无条件继承
+ * (删代际 fence) -> gen2/gen3 周期继承上一周期 stale missed, publishPendingSnapshot 返非 null (提前自踢)
+ * 而非 null (发 READY), 断言挂; 且 gen2 landAndTake 误判 CLEAN_LANDED 而非 REQUEUE_DIRTY, 断言挂。
  */
 class StaleMissedCrossCycleTest {
 
@@ -77,9 +74,9 @@ class StaleMissedCrossCycleTest {
                 "EMPTY_CONSUMER_PASSED 仍是 EMPTY 类 (hasPendingSnapshot 不含 missed 载体)");
 
         // === gen2 周期: 下一次 fresh capture (ChunkMap.save 正常路径) enterSerializing 开新周期. ===
-        // 修复点: 这一步必须清掉 gen1 留下的 EMPTY_CONSUMER_PASSED.
+        // 修复点: enterSerializing 分配新 inFlightCycleSeq, 使 gen1 周期留下的 missed 带的旧周期序号与本周期不等.
         state.trySnapshot();
-        long gen2InFlight = state.enterSerializing();   // inFlightGeneration=2, 修复后清 EMPTY_CONSUMER_PASSED
+        long gen2InFlight = state.enterSerializing();   // inFlightGeneration=2, 新 cycleSeq (> gen1 周期)
         assertEquals(2L, gen2InFlight);
         state.enterIoPending();
 
@@ -106,35 +103,92 @@ class StaleMissedCrossCycleTest {
     }
 
     /**
-     * 最小不变式: 任意保存周期开始 (enterSerializing) 后, 不论上一周期是否留下 EMPTY_CONSUMER_PASSED,
-     * 后续 beginPendingSnapshot 产生的 PREPARING 都不得带 consumerMissed (即 publish 不自踢)。
-     * 这是把"missed 不跨周期"压成一条单点约束。
+     * v0.11.0 REDESIGN 加强 (设计 regressionProtectionMap #4 要求): 新增 "清理之后才写入的 stale" 用例 ——
+     * 这正是第十轮 A5 的本体, 第九轮的时序性单 CAS 清理 (清理时已存在的 stale) 挡不住它, 代际 fence 挡得住。
+     *
+     * <p>序: gen1 周期开 (cycleSeq=C1) -> 主线程<b>先</b>开 gen2 周期 (enterSerializing 把 cycleSeq 推到 C2) ->
+     * gen1 回调<b>之后</b>才在 EMPTY 槽标 missed。关键: 用 landAndTake 时 missed 在 land 同一 CAS 用<b>当时</b>的
+     * inFlightCycleSeq 标, 但本用例刻意用拆分序 (ioCompletedSuccessfully 先, 开 gen2 周期, 再 takeReadyPendingSnapshot)
+     * 复刻 "晚写" —— 此时 take 读到的是 C2, missed 被标成 C2 周期。下一次 gen3 碰撞 begin 在 C2 周期: missed(C2)==
+     * inFlightCycleSeq(C2) 同周期 -> 这是拆分序的危险点。但生产路径 (landAndTake) 已消除拆分; 本用例断言的是
+     * 代际 fence 对 "begin 所在周期与 missed 所标周期一致" 的正确处理: 若 missed 标的是<b>更早</b>周期 (C1), begin
+     * 必丢弃。把两种 missed 来源都覆盖。
      */
     @Test
-    void enter_serializing_clears_only_stale_missed_singleton_not_live_slots() {
+    void stale_missed_from_earlier_cycle_dropped_even_when_written_late() {
         ChunkSaveState state = new ChunkSaveState(0L, "minecraft:overworld", 1L);
 
-        // 人为制造 EMPTY_CONSUMER_PASSED: 在 EMPTY 槽上让回调标 missed.
-        assertNull(state.takeReadyPendingSnapshot(), "EMPTY 上 take 标 missed 返 null");
+        // gen1 周期 (C1) 在飞 + 纯编辑 gen=2。
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // C1
+        long c1 = state.slot().inFlightCycleSeq();
+        state.enterIoPending();
+        state.markDirty();          // gen=2
 
-        // 开新周期: enterSerializing 必须清掉它.
+        // gen1 回调用 landAndTake (合并): missed 标 C1 周期 (land 时刻周期), 不会漂移。
+        ChunkSaveState.LandResult gen1 = state.landAndTake();
+        assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, gen1.outcome());
+        assertEquals(c1, state.slot().missedCycle(), "missed 带 land 周期 C1");
+
+        // 主线程开 gen2 周期 (C2 > C1)。missed 仍是 C1 (写定在前)。
+        state.trySnapshot();
+        state.enterSerializing();   // C2
+        long c2 = state.slot().inFlightCycleSeq();
+        assertTrue(c2 > c1);
+        state.enterIoPending();
+
+        // gen3 碰撞 begin 在 C2 周期: missed(C1) != inFlightCycleSeq(C2) -> 代际 fence 丢弃 -> publish 不自踢。
+        state.markDirty();          // gen=3
+        ChunkSnapshot gen3 = snapshotForGeneration(state, 3L);
+        state.beginPendingSnapshot(gen3);
+        assertNull(state.publishPendingSnapshot(),
+                "更早周期 (C1) 的 stale missed 在 C2 周期 begin 被代际 fence 丢弃, publish 发布 READY 不自踢");
+        assertTrue(state.hasPendingSnapshot(), "槽为 READY 等 gen2 回调");
+
+        // gen2 落地正确 REQUEUE_DIRTY (inFlightGeneration 未被幽灵自踢覆盖)。
+        ChunkSaveState.LandResult gen2 = state.landAndTake();
+        assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, gen2.outcome(),
+                "gen2 落地必判 REQUEUE_DIRTY, 不被幽灵自踢覆盖 inFlightGeneration");
+        assertSame(gen3, gen2.relayPending());
+    }
+
+    /**
+     * 最小不变式: 任意保存周期开始 (enterSerializing 分配新 cycleSeq) 后, 上一周期留下的 missed (旧周期序号) 都不得
+     * 被后续 beginPendingSnapshot 继承进 PREPARING (即 publish 不自踢)。把 "missed 不跨周期" 压成单点约束。
+     */
+    @Test
+    void fresh_cycle_does_not_inherit_prior_cycle_missed_marker() {
+        ChunkSaveState state = new ChunkSaveState(0L, "minecraft:overworld", 1L);
+
+        // 人为制造上一周期 missed: 先进一个在飞周期, 在 EMPTY 槽上让回调标 missed (带该周期序号).
         state.markDirty();
         state.trySnapshot();
-        state.enterSerializing();
+        state.enterSerializing();   // 上一周期
+        state.enterIoPending();
+        assertNull(state.takeReadyPendingSnapshot(), "EMPTY 上 take 标 missed (上一周期序号) 返 null");
+        state.markDirty();          // 推 generation 让下面 land 走 REQUEUE 不误清
+        state.landAndTake();        // 落地 REQUEUE (phase=DIRTY), missed 仍在 (上一周期)
 
-        // 新周期登记 PREPARING -> publish 必须发布 READY (不继承 stale missed).
+        // 开新周期: enterSerializing 分配新 cycleSeq, 旧 missed 周期序号与之不等.
+        state.trySnapshot();
+        state.enterSerializing();   // 新周期 (cycleSeq > 上一周期)
+        state.enterIoPending();
+
+        // 新周期登记 PREPARING -> publish 必须发布 READY (不继承上一周期 stale missed).
+        state.markDirty();
         ChunkSnapshot pending = snapshotForGeneration(state, state.generation());
         state.beginPendingSnapshot(pending);
         assertNull(state.publishPendingSnapshot(),
-                "新周期 PREPARING 不带继承的 stale missed, publish 发布 READY 返 null");
+                "新周期 PREPARING 不继承上一周期 stale missed (代际 fence), publish 发布 READY 返 null");
 
-        // 反向保护: enterSerializing 不得误清并发挂着的 READY (它只精确 CAS 单例 EMPTY_CONSUMER_PASSED)。
+        // 反向保护: 代际 fence 只针对 missedCycle 字段, 不触碰并发挂着的 READY pendingKind/snapshot。
         ChunkSaveState live = new ChunkSaveState(0L, "minecraft:overworld", 1L);
         ChunkSnapshot ready = snapshotForGeneration(live, 9L);
         live.registerReadyPendingSnapshot(ready);
         live.markDirty();
         live.trySnapshot();
-        live.enterSerializing();    // 槽是 READY 不是 EMPTY_CONSUMER_PASSED, CAS 不命中, 不清
+        live.enterSerializing();    // 不得误清并发挂着的 READY
         assertTrue(live.hasPendingSnapshot(), "enterSerializing 不得误清并发挂着的 READY 槽");
         assertSame(ready, live.takeReadyPendingSnapshot(), "READY 槽内容完好");
     }
