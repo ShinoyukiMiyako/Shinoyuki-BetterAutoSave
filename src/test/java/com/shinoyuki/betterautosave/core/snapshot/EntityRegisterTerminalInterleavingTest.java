@@ -32,11 +32,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * entity 接力槽 "回调终态取槽" 与 "主线程登记" 双向交错的两个无主丢失窗口防御回归.
  *
  * <p>窗口一 (回调 CLEAN_LANDED 误 evict): 回调 stale 读旧代判 CLEAN_LANDED, 若 evict 前不取槽, 会把主线程刚
- * register 的更新代 pending 随状态对象送 GC 永久丢失 (entity 无恢复队列无 isUnsaved 门)。修复后回调 CLEAN_LANDED
+ * register 的更新代 pending 随状态对象送 GC 永久丢失 (entity 无恢复队列无 isUnsaved 门)。故回调 CLEAN_LANDED
  * 在 evict 前必取一次槽; 取到则接力重投不 evict。
  *
  * <p>窗口二 (主线程 register 落死状态): 回调 REQUEUE_DIRTY 取槽时主线程 register 尚未发生取到 null 跳过重投,
- * 主线程随后 register 落进 phase=DIRTY 死状态 -> 条目滞留 + mustDrainPending 永久 +1。修复后主线程 register 写槽
+ * 主线程随后 register 落进 phase=DIRTY 死状态 -> 条目滞留 + mustDrainPending 永久 +1。故主线程 register 写槽
  * 后重读 phase, 见不在在飞态即取回自己刚放的 pending 自踢重投。
  *
  * <p>两侧顺序对偶 (回调先写 phase 终态再 getAndSet 取槽; 主线程先写槽再重读 phase) 保证任一交错至少一方看见对方,
@@ -205,7 +205,7 @@ class EntityRegisterTerminalInterleavingTest {
 
     /**
      * 窗口二: 回调 REQUEUE_DIRTY 取槽时主线程 register 尚未发生 (取到 null 不重投), 主线程随后 register 落进
-     * phase=DIRTY 死状态。修复后主线程 register 写槽后重读 phase, 见 DIRTY (不在在飞态) -> 取回自己刚放的
+     * phase=DIRTY 死状态。主线程 register 写槽后必须重读 phase, 见 DIRTY (不在在飞态) -> 取回自己刚放的
      * pending 自踢重投, 把更新代落盘, 条目不滞留, mustDrainPending 配平归零。
      *
      * <p>复刻主线程侧纪律 (与 EntityStorageMixin 碰撞分支同序): tryMarkMustDrain -> markDirty -> capturePending ->

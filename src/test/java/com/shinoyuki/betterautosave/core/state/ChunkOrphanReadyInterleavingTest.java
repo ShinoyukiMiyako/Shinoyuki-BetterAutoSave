@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * (markDirty 在 phase != CLEAN 时只推 generation 不碰 word), 回调 CAS 仍命中落地 CLEAN_LANDED 干净退出
  * (phase=CLEAN, drainOwner=NONE, task 不再消费 READY); 主线程随后碰撞分支 capturePending(更新代) + begin + publish。
  * begin 看到 phase=CLEAN 在同一 CAS 立 noInFlightConsumer 标记; publish 据它把 pending 交还主线程自踢 (返回非 null),
- * 不发布一个永无消费者的 READY 孤儿。修复前: publish 发布 READY, 槽残孤儿 + mustDrainPending 永久 +1 + 卸载增量丢失。
+ * 不发布一个永无消费者的 READY 孤儿。若 publish 在此交错下发布 READY, 槽残孤儿 + mustDrainPending 永久 +1 + 卸载增量丢失。
  *
  * <p>begin 落在 phase==CLEAN 上是该交错的唯一判别点 (在飞回调干净退出后 phase 必为 CLEAN)。本测试确定性复刻
  * 这个输入态: 在飞回调 landAndTake 判 CLEAN_LANDED 干净退出后, 主线程碰撞分支 begin + publish 落在 phase==CLEAN,
@@ -54,7 +54,7 @@ class ChunkOrphanReadyInterleavingTest {
 
     /**
      * 协议契约 (确定性): 在飞回调已 CLEAN_LANDED 干净退出 (phase=CLEAN) 后, 主线程碰撞分支 begin(更新代) 落在
-     * phase==CLEAN 上 —— 无在飞消费者。修复后 begin 立 noInFlightConsumer 标记, publish 把 pending 交还主线程自踢
+     * phase==CLEAN 上 —— 无在飞消费者。begin 必须立 noInFlightConsumer 标记, publish 把 pending 交还主线程自踢
      * (返回非 null), 自踢 sink 落盘更新代, mustDrainPending 配平归零, 槽无 READY 残留。
      *
      * <p>为隔离协议本身, 直接构造 "phase==CLEAN 上 begin" 序: 不经 mixin 的 generation 守门 (那是 mixin 层职责,
