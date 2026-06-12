@@ -320,4 +320,47 @@ class AttackCatalogTest {
                     "不变式: pendingKind != NONE 必蕴含 drainOwner != NONE (A6 不变式破坏点)");
         }
     }
+
+    /**
+     * A3 加固 (终态消费者 PREPARING 交还): 终态消费者在 PREPARING 槽上判 HANDED_TO_MAIN 时, 把 drainOwner 拨成
+     * TERMINAL_HANDED 并标本周期 missedCycle —— 两个 publish 自踢触发点 (drainOwner==TERMINAL_HANDED 与
+     * missedCycle==inFlightCycleSeq) 都活, 协议对未来改动稳健。本测试锁定 drainOwner=TERMINAL_HANDED 不被
+     * 调用方 markMustDrain 覆盖成 IN_FLIGHT。
+     *
+     * <p>mutation (删加固必挂): 在 ChunkSaveTask.handleTerminalFailure 的 HANDED_TO_MAIN 分支恢复 markMustDrain()
+     * -> drainOwner 被覆盖成 IN_FLIGHT -> 下面 assertEquals(TERMINAL_HANDED) 挂。(此处直接在状态机层断言 take 后
+     * 的 drainOwner, 不经 task, 隔离协议本身。)
+     */
+    @Test
+    void a3_terminal_consumer_on_preparing_sets_terminal_handed_drain_owner() {
+        ChunkSaveState state = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
+
+        // 在飞 + 主线程 begin 挂 PREPARING (drainOwner=IN_FLIGHT)。
+        state.markDirty();
+        state.trySnapshot();
+        state.enterSerializing();
+        state.enterIoPending();
+        state.markMustDrain();
+        state.markDirty();
+        ChunkSnapshot pending = snapshotForGeneration(state, state.generation());
+        state.beginPendingSnapshot(pending);
+        assertEquals(ChunkSaveState.DrainOwner.IN_FLIGHT, state.drainOwner(), "begin 后 drainOwner=IN_FLIGHT");
+
+        // 终态消费者到达 PREPARING: ioFailed 清 drainOwner -> takeReadyForTerminalConsumer 判 HANDED_TO_MAIN
+        // 并把 drainOwner 拨 TERMINAL_HANDED + 标本周期 missed。
+        state.ioFailed(0);
+        long cycleBeforeTake = state.slot().inFlightCycleSeq();
+        ChunkSaveState.ReadyTake take = state.takeReadyForTerminalConsumer();
+        assertEquals(ChunkSaveState.ReadyTake.Disposition.HANDED_TO_MAIN, take.disposition());
+        assertEquals(ChunkSaveState.DrainOwner.TERMINAL_HANDED, state.drainOwner(),
+                "终态消费者把 PREPARING 的 drainOwner 拨 TERMINAL_HANDED (满足不变式 + 保留 publish 触发点)");
+        assertEquals(cycleBeforeTake, state.slot().missedCycle(), "同时标本周期 missedCycle (冗余触发点)");
+        assertTrue(state.hasPendingSnapshot(), "PREPARING 槽未被夺走 (READY-only, A3)");
+        assertTrue(state.mustDrain(), "TERMINAL_HANDED 非 NONE, 槽非空不变式成立");
+
+        // publish 经 terminalHanded 触发点自踢 (返回 pending), 不发 READY 孤儿。
+        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        assertSame(pending, toReoffer, "publish 经 TERMINAL_HANDED 触发自踢返回 pending");
+        assertFalse(state.hasPendingSnapshot(), "自踢后槽 NONE");
+    }
 }

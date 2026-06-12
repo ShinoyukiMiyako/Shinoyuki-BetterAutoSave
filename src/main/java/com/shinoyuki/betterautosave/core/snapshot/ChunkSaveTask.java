@@ -240,11 +240,15 @@ public final class ChunkSaveTask implements SaveTask {
             }
             case HANDED_TO_MAIN -> {
                 // 槽 PREPARING: 主线程仍在 dispatch 改写这份未就绪 tag, 终态 task 绝不能夺走它接力 (数据竞争)。
-                // takeReadyForTerminalConsumer 已标 missed, 补踢交还主线程 publish 自踢。本 task 必须 early-return:
-                // 不 honor ioFailed 的 mustDrain 清除 (恢复 boolean=true, 不 dec gauge), 不走 enqueueRecovery ——
-                // 否则与主线程自踢接力链双重处置同一 state, 且会过早把 mustDrain 清掉让关服 join 不等接力。
-                // mustDrain 由主线程自踢的接力链终态唯一清。
-                state.markMustDrain();
+                // takeReadyForTerminalConsumer 已标 missedCycle + 把 drainOwner 拨成 TERMINAL_HANDED (非 NONE),
+                // 补踢交还主线程 publish 自踢。本 task 必须 early-return: 不 honor ioFailed 的 mustDrain 清除
+                // (不 dec gauge), 不走 enqueueRecovery —— 否则与主线程自踢接力链双重处置同一 state, 且会过早清
+                // mustDrain 让关服 join 不等接力。mustDrain (drainOwner) 由主线程自踢的接力链终态唯一清。
+                //
+                // v0.11.0 REDESIGN 加固: **不**再调 markMustDrain。drainOwner 已是 TERMINAL_HANDED (非 NONE,
+                // 满足 "槽非空 -> drainOwner != NONE" 不变式, gauge 维持), markMustDrain 会把它覆盖成 IN_FLIGHT,
+                // 让 publishPendingSnapshot 的 terminalHanded 触发点失活 (虽 sameCycleMissed 仍冗余兜底, 但保留
+                // TERMINAL_HANDED 让两个 publish 自踢触发点都活, 协议对未来改动更稳健)。
                 metrics.recordChunkRetried();
             }
             case EMPTY_DEAD -> {
