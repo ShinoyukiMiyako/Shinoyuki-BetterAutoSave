@@ -148,10 +148,17 @@ public abstract class ChunkMapSaveMixin {
                     // reoffer 给序列化 worker assemble —— 三线程无栅栏共享同一 CompoundTag 的 HashMap, 静默数据损坏。
                     //
                     // 状态机拆"已登记"与"可消费"两个正交维度: beginPendingSnapshot 挂 PREPARING (回调能发现关
-                    // lost-wakeup, 但 PREPARING 不可消费, 回调只标 consumerMissed 离开关未就绪暴露); dispatch 跑完
+                    // lost-wakeup, 但 PREPARING 不可消费, 回调只标 missedCycle 离开关未就绪暴露); dispatch 跑完
                     // (listener 改写完成) 才 publishPendingSnapshot 发布 READY 让回调消费。若 dispatch 期间回调路过
                     // (publish 返回非 null), 补踢责任落到主线程自己 (合法 offer 方, 不引入 worker 阻塞)。
-                    state.beginPendingSnapshot(pending);
+                    //
+                    // v0.11.0 REDESIGN (A6 gauge 配平): begin 返回 true 表示它发现 drainOwner 被清空 (A6 窗口: 终态消费者
+                    // 已先于本 begin 路过 EMPTY 并经 ioFailed 清掉 drainOwner 且 EMPTY_DEAD 分支 honor 了那次 dec) 而把
+                    // drainOwner 重新拉为 IN_FLIGHT —— 此时必须补 inc gauge 一次, 否则 "槽即将非空 (PREPARING) 但 gauge=0"
+                    // 重蹈 A6 不变式破坏。常规碰撞 (drainOwner 进入时已 IN_FLIGHT) begin 返 false, 不重复 inc。
+                    if (state.beginPendingSnapshot(pending)) {
+                        metrics.incMustDrainPending();
+                    }
                     boolean dispatchThrew = false;
                     try {
                         // v0.10.2 修复 (C-relay-skips-save-event): 接力链落盘的"碰撞后最新代" tag 也必须经过 Forge
