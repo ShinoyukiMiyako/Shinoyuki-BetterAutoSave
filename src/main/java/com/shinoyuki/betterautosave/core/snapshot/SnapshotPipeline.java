@@ -215,7 +215,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
     /**
      * v0.11.0 修复 (C-dispatch-register-toctou 终局): 主线程在 publishPendingSnapshot 检测到"回调已路过 PREPARING"
-     * (consumerMissed) 时的自我补踢入口。那个路过的回调是本代在飞 IO 的唯一消费者, 走后不再来, 故补踢责任落到
+     * (本周期 missedCycle) 时的自我补踢入口。那个路过的回调是本代在飞 IO 的唯一消费者, 走后不再来, 故补踢责任落到
      * 主线程 —— 主线程是合法 offer 方 (与 dispatch 同线程), 不像 worker 阻塞那样有死锁面。
      *
      * <p>语义与 {@link ChunkSaveTask} 回调侧的 REQUEUE_DIRTY 接力一致: 先把 inFlightGeneration 锁到 pending 自己
