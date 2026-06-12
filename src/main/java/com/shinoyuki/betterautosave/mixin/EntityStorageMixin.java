@@ -5,6 +5,7 @@ import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.EntityCaptureProcedure;
+import com.shinoyuki.betterautosave.core.snapshot.EntityPendingRelayCoordinator;
 import com.shinoyuki.betterautosave.core.snapshot.EntitySaveTask;
 import com.shinoyuki.betterautosave.core.snapshot.EntitySnapshot;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
@@ -129,37 +130,11 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             try {
                 EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
                 // entity 路径不迁 chunk 的 SlotWord 三态协议 (无 dispatchSaveEvent 窗口, 不需要 PREPARING/READY
-                // 两相隔离一个不可消费态), 但接力槽与终态回调跑在两条线程上, 仍需一道顺序纪律杜绝 "回调终态取槽" 与
-                // "主线程登记" 互相看不见。用既有 atomic 建立写后读对偶 (Dekker 式双向检查):
-                //   主线程侧: 先写 pending 槽 (registerPendingSnapshot), 再重读 phase。
-                //   回调侧:   先写 phase 终态 (ioCompletedSuccessfully/ioFailed 内 phase.set), 再 getAndSet 取槽。
-                // 两侧各自先写后读, 故任一交错至少一方看见对方: 若回调取槽早于主线程写槽, 主线程重读 phase 必见
-                // 回调写定的终态 (CLEAN/DIRTY/FAILED) -> 主线程取回自己刚放的 pending 自踢; 若主线程写槽早于回调取槽,
-                // 回调 getAndSet 必见这份 pending -> 回调接力。双方都看见时以 getAndSet 析构语义裁定唯一消费者 (谁取到
-                // 谁负责接力, 另一方取回 null 不再动作), 防双投。这道纪律消除两个无主丢失窗口:
-                //   1) 回调 stale 读旧代判 CLEAN_LANDED 后, 若不取槽直接 evict, 会把主线程刚 register 的更新代 pending
-                //      随状态对象送 GC (entity 无恢复队列无 isUnsaved 门, 永久静默丢失);
-                //   2) 回调 REQUEUE_DIRTY 取槽时主线程 register 尚未发生, 取到 null 跳过重投, 主线程随后 register 落进
-                //      phase=DIRTY 死状态 -> 条目滞留 + mustDrainPending 永久 +1。
-                state.registerPendingSnapshot(pending);
-                // 重读 phase: 不在在飞态即说明回调已写定终态并可能已取槽。getAndSet 自取回自己刚放的 pending (防与
-                // 回调取槽双投): 取回非空 -> 主线程自踢接力; 取回 null -> 回调已接管, 主线程不再动作。
-                EntitySaveState.Phase recheck = state.phase();
-                boolean inFlight = recheck == EntitySaveState.Phase.SNAPSHOTTING
-                        || recheck == EntitySaveState.Phase.SERIALIZING
-                        || recheck == EntitySaveState.Phase.IO_PENDING;
-                if (!inFlight) {
-                    EntitySnapshot taken = state.takePendingSnapshot();
-                    if (taken != null) {
-                        // 回调已终态退出, 不会再消费这份 pending。主线程自踢接力把更新代落盘。回调终态若已清
-                        // mustDrain (CLEAN_LANDED/FAILED_TERMINAL), 接力在途须恢复并补 inc gauge (关服 join 继续等);
-                        // 若 mustDrain 仍真 (REQUEUE_DIRTY 不清), tryMark 返 false 不重复 inc。接力链终态唯一清+dec。
-                        if (state.tryMarkMustDrain()) {
-                            metrics.incMustDrainPending();
-                        }
-                        pipeline.reofferEntityPendingFromMainThread(worker, this, state, taken);
-                    }
-                }
+                // 两相隔离一个不可消费态), 但接力槽与终态回调跑在两条线程上, 仍需一道写后读对偶杜绝 "回调终态取槽"
+                // 与 "主线程登记" 互相看不见。该对偶 (登记 -> 重读 phase -> 自取 -> 自踢) 收口到
+                // EntityPendingRelayCoordinator, mixin 仅注入自踢 sink (绑 pipeline + worker + stateOwner)。
+                EntityPendingRelayCoordinator.registerAndSelfKick(state, pending, metrics,
+                        (st, taken) -> pipeline.reofferEntityPendingFromMainThread(worker, this, st, taken));
             } catch (Throwable t) {
                 // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 尚未登记 pending,
                 // 接力槽空。entity 路径无 dispatchSaveEvent, 故无 chunk 侧 register->dispatch 的 TOCTOU 窗口;

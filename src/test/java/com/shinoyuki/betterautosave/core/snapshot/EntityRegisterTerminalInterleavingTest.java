@@ -208,11 +208,12 @@ class EntityRegisterTerminalInterleavingTest {
      * phase=DIRTY 死状态。主线程 register 写槽后必须重读 phase, 见 DIRTY (不在在飞态) -> 取回自己刚放的
      * pending 自踢重投, 把更新代落盘, 条目不滞留, mustDrainPending 配平归零。
      *
-     * <p>复刻主线程侧纪律 (与 EntityStorageMixin 碰撞分支同序): tryMarkMustDrain -> markDirty -> capturePending ->
-     * registerPendingSnapshot -> 重读 phase -> 不在在飞态则 takePendingSnapshot 自取 + 自踢 reoffer。
+     * <p>直接驱动协调方法 {@link EntityPendingRelayCoordinator#registerAndSelfKick} (mixin 退化为对它的一行委托):
+     * 主线程 tryMarkMustDrain -> markDirty 后, 调 registerAndSelfKick 登记 pending + 重读 phase + 自取 + 自踢。
+     * 自踢 sink 复刻 reofferEntityPendingFromMainThread (reenter + 同步执行接力)。
      *
-     * <p>判定标准 (删 mixin register 后的重读 phase + 自取 + 自踢): 更新代不落盘, mustDrainPending 残 1,
-     * 条目滞留 phase=DIRTY —— 本测试 "更新代落盘" 与 "mustDrainPending==0" 断言挂。
+     * <p>判定标准 (删协调方法的重读 phase + 自取 + 自踢, 即删委托目标的逻辑): registerAndSelfKick 不自踢, 更新代
+     * 不落盘, mustDrainPending 残 1, 条目滞留 phase=DIRTY —— 本测试 "更新代落盘" 与 "mustDrainPending==0" 断言挂。
      */
     @Test
     void requeue_dirty_callback_takes_null_then_main_register_self_kicks() {
@@ -258,22 +259,17 @@ class EntityRegisterTerminalInterleavingTest {
         assertEquals(1, submittedTags.size(), "回调取 null 未重投 (只提交过在飞 gen=1)");
         assertTrue(state.mustDrain(), "REQUEUE_DIRTY 不清 mustDrain, 维持真");
 
-        // 主线程碰撞分支后半 (复刻 mixin register + 重读 phase + 自取 + 自踢):
+        // 主线程碰撞分支后半: 直接驱动协调方法 (mixin 委托目标). 自踢 sink 复刻 reofferEntityPendingFromMainThread.
         EntitySnapshot g2 = snapshotForGeneration(state, 2L);
-        state.registerPendingSnapshot(g2);
-        EntitySaveState.Phase recheck = state.phase();
-        boolean inFlight = recheck == EntitySaveState.Phase.SNAPSHOTTING
-                || recheck == EntitySaveState.Phase.SERIALIZING
-                || recheck == EntitySaveState.Phase.IO_PENDING;
-        assertFalse(inFlight, "register 重读 phase=DIRTY (回调已 REQUEUE_DIRTY 退出, 无在飞消费者)");
-        EntitySnapshot taken = state.takePendingSnapshot();
-        assertSame(g2, taken, "主线程取回自己刚放的 pending (回调未取走)");
-        if (state.tryMarkMustDrain()) {
-            metrics.incMustDrainPending();
-        }
-        // 自踢重投 (复刻 reofferEntityPendingFromMainThread): reenter + sink reoffer.
-        state.reenterSerializingForPending(taken.capturedGeneration());
-        reofferHolder[0].reoffer(taken);
+        EntitySnapshot[] selfKickTaken = new EntitySnapshot[1];
+        boolean selfKicked = EntityPendingRelayCoordinator.registerAndSelfKick(state, g2, metrics,
+                (st, taken) -> {
+                    selfKickTaken[0] = taken;
+                    st.reenterSerializingForPending(taken.capturedGeneration());
+                    reofferHolder[0].reoffer(taken);
+                });
+        assertTrue(selfKicked, "register 重读 phase=DIRTY (回调已退出无在飞消费者) -> 主线程自取自踢");
+        assertSame(g2, selfKickTaken[0], "主线程取回自己刚放的 pending (回调未取走)");
 
         assertEquals(2, submittedTags.size(), "主线程自踢必须把更新代重投一次");
         assertEquals(2L, submittedGeneration(submittedTags.get(1)),

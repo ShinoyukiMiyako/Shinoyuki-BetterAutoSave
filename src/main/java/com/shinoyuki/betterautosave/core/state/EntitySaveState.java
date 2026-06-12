@@ -79,6 +79,17 @@ public final class EntitySaveState {
         return phase.get();
     }
 
+    /**
+     * 是否处于 "某代 IO 已在管线在飞" 的三态之一 (SNAPSHOTTING / SERIALIZING / IO_PENDING)。与
+     * {@link ChunkSaveState#isInFlight()} 同义。in-place IO 重投 (REQUEUE) 全程保持 IO_PENDING 不发布
+     * 瞬态 DIRTY (见 {@link #ioFailed}), 故该三态判定即 "存在在飞消费者" 的严格充要: 非此三态
+     * (CLEAN/DIRTY/FAILED) 表示回调已写定终态退出, 无在飞消费者会再来取接力槽。
+     */
+    public boolean isInFlight() {
+        Phase p = phase.get();
+        return p == Phase.SNAPSHOTTING || p == Phase.SERIALIZING || p == Phase.IO_PENDING;
+    }
+
     public long generation() {
         return generation.get();
     }
