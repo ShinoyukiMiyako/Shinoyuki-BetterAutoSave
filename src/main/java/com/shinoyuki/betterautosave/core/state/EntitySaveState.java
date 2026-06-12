@@ -107,11 +107,12 @@ public final class EntitySaveState {
         long captured = generation.get();
         inFlightGeneration = captured;
         phase.set(Phase.SERIALIZING);
-        // v0.11.0 (C-stale-missed-no-epoch): entity 路径无对应清理。chunk 侧 enterSerializing 末尾要清
-        // EMPTY_CONSUMER_PASSED 单例防 stale consumerMissed 跨周期继承; entity 槽是裸 AtomicReference<EntitySnapshot>
-        // (无 consumerMissed 概念, 见字段 57), 不存在四态状态机也不存在"标 missed 不消费"的 sticky 载体 ——
-        // 无 Forge entity save 事件即无 dispatch 窗口, 回调直接 getAndSet(null) 全态消费, 故本指控对 entity 免疫,
-        // 无需任何 CAS 清理。
+        // v0.11.0 REDESIGN (A4/A5 对 entity 免疫): chunk 侧已退役 enterSerializing 的时序清理, 改由
+        // SlotWord 的 missedCycle==inFlightCycleSeq 代际 fence 防 stale 跨周期继承 (ChunkSaveState A4/A5)。
+        // entity 路径连这个 fence 都不需要: 槽是裸 AtomicReference<EntitySnapshot> (无 missedCycle/cycleSeq 概念,
+        // 见字段 57), 因为无 Forge entity save 事件即无 dispatch 窗口, 没有 "回调路过 PREPARING 标 missed 离开"
+        // 的 sticky 载体 —— 回调直接 getAndSet(null) 全态消费, 没有任何 note 会跨周期存活被误读。A5 的武器
+        // (晚写的 stale missed note 漏进新周期) 在 entity 路径不存在载体, 故结构免疫。不碰本字段。
         return captured;
     }
 

@@ -129,13 +129,24 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
             state.markDirty();
             try {
                 EntitySnapshot pending = EntityCaptureProcedure.capturePending(chunkEntities, level, state);
-                // v0.11.0 协议非对称 (勿"对齐" chunk 路径的 PREPARING/READY 状态机): entity 路径在 capturePending
-                // 之后**没有 dispatchSaveEvent** —— Forge 无 entity save 事件, 无第三方 listener 会在主线程原地改写
-                // 这份 pending tag。故 registerPendingSnapshot 是碰撞分支最后一个碰 tag 的主线程动作, 登记后主线程
-                // 不再触碰它, 在飞那代 IO 回调 take 走时 tag 已是终态, 不存在 chunk 路径第八轮的"未就绪 tag 暴露"
-                // 窗口。chunk 路径必须 begin(PREPARING)->dispatch->publish(READY) 三步, 正是为给 dispatch 期间隔离
-                // 一个不可消费态; entity 无此窗口, 裸 AtomicReference<EntitySnapshot> 单槽 (登记即就绪) 已充分且正确,
-                // 升级状态机只会引入无对应风险的复杂度 (YAGNI)。这是经证伪的非对称, 不是遗漏。
+                // v0.11.0 REDESIGN 裁决 (经对抗证伪, 勿"对齐" chunk 的 SlotWord 协议): entity 路径不迁 SlotWord,
+                // 对全攻击目录 A1-A7 结构免疫, 因为它的合法交错空间远小于 chunk —— 根因是 entity 在 capturePending
+                // 之后**没有 dispatchSaveEvent** (Forge 无 entity save 事件)。逐条:
+                // - A2 未就绪 tag 暴露 / A1 lost-wakeup: registerPendingSnapshot 是碰撞分支最后一个碰 tag 的主线程动作,
+                //   登记后主线程不再触碰它, 回调 take 时 tag 已是终态。无 dispatch 窗口 -> 无 PREPARING/READY 两相之
+                //   分必要, 裸单槽 (登记即就绪) 充分。chunk 必须 begin(PREPARING)->dispatch->publish(READY) 三步正是
+                //   为隔离 dispatch 期间一个不可消费态; entity 无此窗口。
+                // - A4/A5 跨周期 stale: 无 PREPARING 窗口 -> 回调无需 "路过标 missed 离开" 的 sticky note 机制 ->
+                //   无 missedCycle/cycleSeq 载体 -> 没有任何 note 能跨周期存活被误读。回调全态 getAndSet(null) 析构式
+                //   消费, 最坏只是被更新代 register 覆盖 (latest-wins, 正确)。reenterSerializingForPending 锁 pending
+                //   自己的 capturedGeneration 防错代接力 / 误判 CLEAN_LANDED。
+                // - A6 begin 前终态: 本分支程序序 tryMarkMustDrain(:117) **严格先于** registerPendingSnapshot(:139)
+                //   置 mustDrain; 终态回调把清 mustDrain 的 CAS 与 takePendingSnapshot 同址 (EntitySaveTask.onIoFailure)。
+                //   终态后于 register (槽已满): 同一终态 handler take 走 + ERROR + 清 mustDrain, gauge 配平, 无孤儿。
+                //   终态先于 register (真 A6 窗口): 终态 CAS 把 gauge 正确 dec 到 0, 随后 register 落进 phase=FAILED 的
+                //   死状态 (无在飞、无消费者), mustDrain=false 在此恰是正确的 (没有任何东西要等), 非 chunk-A6 的孤儿
+                //   drain 不变式破坏。chunk-A6 的危害 (gauge 正偏移泄漏 / 丢活消费者让关服 join 挂) 在 entity 不发生。
+                // 故迁 SlotWord 只引入无对应风险的复杂度 (YAGNI)。这是经证伪的非对称, 不是遗漏。
                 state.registerPendingSnapshot(pending);
             } catch (Throwable t) {
                 // 纯 capture 抛 (单个 entity.save 异常已在 capture 内吞, 这里多为 OOM 等): 尚未登记 pending,
