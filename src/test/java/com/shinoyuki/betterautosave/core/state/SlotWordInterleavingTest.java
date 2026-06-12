@@ -18,18 +18,16 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 攻击目录 A5/A6/A7 + 协议核心不变式 (cycleSeq 单调性 / drainOwner 不变式) 的受控复刻。
- * 每条对应攻击删除其防御 (mutation) 必挂; 每条 mutation 写在对应测试的 javadoc 末尾。
- *
- * <p>A1-A4 由既有测试覆盖 (标注复用):
+ * 受控交错回归测试: 枚举 SlotWord 状态机的窄窗口交错场景, 每条用例删掉对应防御即挂。
+ * 覆盖 cycleSeq 单调性、drainOwner 不变式, 以及三类跨线程交错:
  * <ul>
- *   <li>A1 丢唤醒 / A2 未就绪暴露: ChunkPendingStateMachineTest (begin 先于 dispatch + READY-only take 矩阵)。</li>
- *   <li>A3 drain 旁路: TerminalExitPreparingHandoffTest (终态消费者 READY-only, PREPARING 交还)。</li>
- *   <li>A4 跨周期 stale (清理前已存在的 stale): StaleMissedCrossCycleTest (三代 ABA)。</li>
+ *   <li>DIRTY 发布竞速: 回调 land 与 take 之间主线程开新周期, missed 必须带 land 周期而非 take 周期。</li>
+ *   <li>begin 前终态: 终态消费者夹在 tryMarkMustDrain 与 beginPendingSnapshot 之间到达 EMPTY 槽。</li>
+ *   <li>周期序号复用: 内容代相同的两个相邻在飞周期, cycleSeq 仍须严格不同。</li>
+ *   <li>终态消费者命中 PREPARING: READY-only, 槽交还主线程, drainOwner 拨 TERMINAL_HANDED。</li>
  * </ul>
- * 本文件补 A5 (清理之后才写入的 stale, A4 的进阶) / A6 (begin 前终态 + 孤儿跨周期复活) / A7 (周期序号复用)。
  */
-class AttackCatalogTest {
+class SlotWordInterleavingTest {
 
     private static ResourceKey<Level> DIM;
 
@@ -55,25 +53,22 @@ class AttackCatalogTest {
     }
 
     /**
-     * A5 (DIRTY 发布竞速, 第十轮) —— land+take 合并单 CAS 是根治。核心命题: 回调在 land(DIRTY) 那一刻就<b>原子</b>
-     * 把 stale missed 用<b>本周期</b> (land 时刻的 inFlightCycleSeq) 标好, 主线程随后开新周期推 cycleSeq 是在 missed
-     * 写定<b>之后</b>, 故那份 stale 带的永远是旧周期序号, 跨周期判据 (begin / publish 的 missedCycle==inFlightCycleSeq)
-     * 永不误判同周期。
+     * DIRTY 发布竞速: 回调在 land(DIRTY) 那一刻用同一 CAS 把 stale missed 标上<b>本周期</b> (land 时刻的
+     * inFlightCycleSeq)。主线程随后开新周期推 cycleSeq 发生在 missed 写定<b>之后</b>, 故那份 stale 永远带旧周期
+     * 序号, 跨周期判据 (begin / publish 的 missedCycle==inFlightCycleSeq) 不会误判同周期。
      *
-     * <p>本测试用两个独立 state 对照, 直接锁定 "missed 必须带 land 周期而非 take-时-当前周期" 这个唯一防御点:
+     * <p>两个独立 state 对照, 锁定 "missed 必须带 land 周期而非 take 时的当前周期" 这个唯一防御点:
      * <ul>
      *   <li><b>合并路径 (landAndTake, 生产路径)</b>: land 与标 missed 在同一 CAS, missed 带 land 周期 (gen1)。
      *       即便随后主线程开 gen2 周期, missed 仍是 gen1 周期 -> 跨周期, begin/publish 不自踢。</li>
-     *   <li><b>拆分路径 (ioCompletedSuccessfully 先, 主线程开新周期, 再 takeReadyPendingSnapshot) = A5 漏洞本体</b>:
+     *   <li><b>拆分路径 (ioCompletedSuccessfully 先, 主线程开新周期, 再 takeReadyPendingSnapshot)</b>:
      *       take 在主线程已推 cycleSeq 到 gen2 后才跑, 读当前 inFlightCycleSeq=gen2 把 missed 误标成 gen2 周期 ->
-     *       同周期, begin 继承 -> publish 自踢 (BUG)。本测试断言这条拆分路径确实把 missed 标成新周期 (证明窗口真实
-     *       存在), 从而证明合并路径消除了它。</li>
+     *       同周期, begin 继承 -> publish 误自踢。本用例断言拆分路径确实把 missed 标成新周期, 证明这个窄窗口真实
+     *       存在, 从而证明合并路径消除了它。</li>
      * </ul>
-     * mutation (删修复必挂): 把 onIoSuccess 从 landAndTake 改回 "ioCompletedSuccessfully 然后 takeReadyPendingSnapshot"
-     * 拆分两步 (即下面 SPLIT 段的序), 生产 A5 漏洞重现 —— 合并段断言 missedCycle 带旧周期 会因实际带新周期而挂。
      */
     @Test
-    void a5_landAndTake_tags_missed_with_land_cycle_not_advanced_cycle() {
+    void landAndTake_during_publish_window_tags_missed_with_land_cycle() {
         // ===== 合并路径 (生产 landAndTake): missed 带 land 周期, 跨周期被丢 =====
         ChunkSaveState merged = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
         merged.markDirty();          // gen=1
@@ -107,7 +102,7 @@ class AttackCatalogTest {
                 "gen2 落地正确 REQUEUE_DIRTY, inFlightGeneration 未被幽灵自踢覆盖");
         assertSame(gen3, gen2Land.relayPending());
 
-        // ===== 拆分路径 (A5 漏洞本体, 证明窗口真实存在): take 在主线程已开新周期后跑, missed 误标新周期 =====
+        // ===== 拆分路径 (证明窄窗口交错真实存在): take 在主线程已开新周期后跑, missed 误标新周期 =====
         ChunkSaveState split = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
         split.markDirty();           // gen=1
         split.trySnapshot();
@@ -120,30 +115,24 @@ class AttackCatalogTest {
         split.trySnapshot();
         long splitGen2Cycle = enterAndGetCycle(split);
         split.enterIoPending();
-        // 现在才 take: 读当前 inFlightCycleSeq=gen2 周期, 把 missed 误标成 gen2 周期 (A5 的错标本体)。
+        // 现在才 take: 读当前 inFlightCycleSeq=gen2 周期, 把 missed 误标成 gen2 周期。
         assertNull(split.takeReadyPendingSnapshot());
         assertEquals(splitGen2Cycle, split.slot().missedCycle(),
-                "拆分路径: take 晚于主线程开新周期, missed 被误标成 gen2 周期 (A5 窗口确实存在)");
+                "拆分路径: take 晚于主线程开新周期, missed 被误标成 gen2 周期 (窄窗口交错确实存在)");
         assertNotEquals(splitGen1Cycle, split.slot().missedCycle(),
                 "对照: 错标的不是 land 的 gen1 周期, 证明合并 landAndTake 才是消除该错标的根治");
     }
 
     /**
-     * A6 第一相 (begin 前终态, EMPTY 窗口): 终态消费者夹在主线程 tryMarkMustDrain 与 beginPendingSnapshot 之间到达,
-     * 在 EMPTY 槽上判 EMPTY_DEAD。修复前不对称 (不标 missed) -> 主线程随后 begin/publish 发布无人消费的 READY 孤儿 +
-     * mustDrain 已被终态清成 false (不变式破)。修复后: 终态 EMPTY 分支对称标 missedCycle=本周期; begin 同周期继承 ->
-     * publish 自踢不发孤儿; begin 发现 drainOwner 被终态清空 (ioFailed 路径) 重新获取并返 true 让调用方补 inc gauge。
+     * begin 前终态命中 EMPTY 窗口: 终态消费者夹在主线程 tryMarkMustDrain 与 beginPendingSnapshot 之间到达,
+     * 在 EMPTY 槽上判 EMPTY_DEAD。终态 EMPTY 分支对称标 missedCycle=本周期; 主线程随后 begin 同周期继承 ->
+     * publish 自踢, 不发布无人消费的 READY 孤儿。begin 发现 drainOwner 已被终态 (ioFailed 路径) 清空, 重新获取
+     * 并返 true, 让调用方补 inc gauge, 维持 "槽非空蕴含 drainOwner != NONE" 不变式。
      *
-     * <p>本测试直接在状态机层复刻 EMPTY 窗口序 (不经 ChunkSaveTask 以隔离协议本身), 用 maxRetries=0 让首次失败即终态。
-     *
-     * <p>mutation (删修复必挂):
-     * (1) takeReadyForTerminalConsumer 的 NONE 分支改回不标 missedCycle -> 下面断言 "publish 返非 null (自踢)" 翻转
-     *     成 publish 返 null (发 READY 孤儿), 断言 selfReoffer != null 挂, 且 hasPendingSnapshot 终态为 true (孤儿) 挂。
-     * (2) beginPendingSnapshot 改回不返回 reacquire 标志 (void) -> 编译期断 (调用方拿不到补 inc 信号); 若强行让它
-     *     恒返 false -> 下面 gauge 配平断言 (终值 0) 在 A6 路径变 -1 挂。
+     * <p>直接在状态机层复刻 EMPTY 窗口序 (不经 ChunkSaveTask, 隔离协议本身), 用 maxRetries=0 让首次失败即终态。
      */
     @Test
-    void a6_terminal_before_begin_empty_window_hands_off_no_orphan() {
+    void terminal_before_begin_on_empty_window_hands_off_no_orphan() {
         ChunkSaveState state = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
         int[] gauge = {0};
 
@@ -177,7 +166,7 @@ class AttackCatalogTest {
         // 返 true -> 补 inc gauge。同周期继承 missedCycle。
         ChunkSnapshot gen2Pending = snapshotForGeneration(state, 2L);
         boolean reacquired = state.beginPendingSnapshot(gen2Pending);
-        assertTrue(reacquired, "A6 窗口: begin 发现 drainOwner 被终态清空, 重新获取并通知调用方补 inc");
+        assertTrue(reacquired, "begin 发现 drainOwner 被终态清空, 重新获取并通知调用方补 inc");
         gauge[0]++;                 // 补 inc -> gauge=1
         assertEquals(1, gauge[0]);
         assertTrue(state.mustDrain(), "begin 后槽非空 -> drainOwner != NONE (不变式)");
@@ -185,7 +174,7 @@ class AttackCatalogTest {
         // dispatch 成功 publish: 同周期 missed -> 主线程自踢 (返非 null), 不发 READY 孤儿。
         ChunkSnapshot selfReoffer = state.publishPendingSnapshot();
         assertSame(gen2Pending, selfReoffer,
-                "A6 修复: 终态消费者标了同周期 missed, publish 自踢返回 pending 而非发布 READY 孤儿");
+                "终态消费者标了同周期 missed, publish 自踢返回 pending 而非发布 READY 孤儿");
         assertFalse(state.hasPendingSnapshot(), "自踢后槽 NONE, 无孤儿 READY");
 
         // 主线程自踢接力: reenter (drainOwner=RELAY) + 接力 IO 落地 CLEAN -> 清 drainOwner -> dec gauge。
@@ -197,21 +186,18 @@ class AttackCatalogTest {
         if (state.lastTransitionClearedMustDrain()) {
             gauge[0]--;             // 接力终态唯一清 -> gauge=0
         }
-        assertEquals(0, gauge[0], "A6 全程 gauge 配平归零, 无正偏移泄漏");
+        assertEquals(0, gauge[0], "全程 gauge 配平归零, 无正偏移泄漏");
         assertFalse(state.mustDrain(), "终局 drainOwner=NONE");
         assertFalse(state.hasPendingSnapshot(), "终局槽 NONE");
     }
 
     /**
-     * A6 第二相 (孤儿 READY 跨周期复活的二阶后果): 若一份 stale 处置后 missedCycle 残留, 它绝不得让 <b>下一个完整
-     * 保存周期</b> 的 begin 误继承触发自踢。这测的是 A6 EMPTY 分支标的 missedCycle 在 "主线程其实不再 begin (真死亡),
-     * 而是开了一个全新 fresh 周期" 时被正确丢弃。
-     *
-     * <p>mutation (删修复必挂): 把 begin 的 missedCycle 继承条件从 "==inFlightCycleSeq" 改成无条件继承 -> 下面新
-     * fresh 周期的 begin 会继承上一周期 EMPTY_DEAD 残留的 missedCycle -> publish 自踢 (返非 null) -> 断言挂。
+     * 终态 EMPTY 标记不得跨周期复活: 终态消费者在 EMPTY 槽标的 missedCycle 残留后, 绝不得让<b>下一个全新保存周期</b>
+     * 的 begin 误继承触发自踢。场景是 "主线程其实不再 begin 本周期 (真死亡), 而是开了一个全新 fresh 周期", 上一周期
+     * 残留的 missedCycle 因带旧周期序号被代际 fence 正确丢弃。
      */
     @Test
-    void a6_second_order_terminal_empty_marker_does_not_resurrect_into_fresh_cycle() {
+    void terminal_empty_marker_does_not_resurrect_into_fresh_cycle() {
         ChunkSaveState state = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
 
         // 周期 X 在飞 -> 终态消费者在 EMPTY 槽标 missedCycle=X 周期 (真死亡, 主线程不再 begin 本周期)。
@@ -240,19 +226,15 @@ class AttackCatalogTest {
     }
 
     /**
-     * A7 (周期序号复用, 架构师自找的新边缘): missedCycle==inFlightCycleSeq 当作 "同周期" 判据。若 inFlightCycleSeq
-     * 用内容代 generation 而非独立单调序号, 则 "两个不同在飞周期偶然复用同一 generation 数值" 会让跨周期 stale 被
-     * 误判同周期。本测试证明 inFlightCycleSeq 在 <b>内容代相同</b> 的两个相邻周期里 <b>严格不同</b> (单调递增),
-     * 故同周期判据不因内容代复用而误判。
+     * 周期序号与内容代解耦: missedCycle==inFlightCycleSeq 当作 "同周期" 判据。若 inFlightCycleSeq 用内容代
+     * generation 而非独立单调序号, 则 "两个不同在飞周期偶然复用同一 generation 数值" 会让跨周期 stale 被误判同
+     * 周期。本用例证明 inFlightCycleSeq 在<b>内容代相同</b>的两个相邻周期里<b>严格不同</b> (单调递增), 故同周期
+     * 判据不因内容代复用而误判。
      *
      * <p>构造: 两个周期锁定相同的 inFlightGeneration (接力 reenter 复用 pending 旧代是真实场景), 但 cycleSeq 必不同。
-     *
-     * <p>mutation (删修复必挂): 把 inFlightCycleSeq 的来源从 cycleSeqAllocator.incrementAndGet() 换成
-     * inFlightGeneration (即用内容代当周期身份) -> 下面 assertNotEquals(cycleSeq1, cycleSeq2) 在两周期同内容代时
-     * 退化成相等 -> 断言挂; 且 stale missed 跨周期判据失效 (A4/A5 用例随之挂)。
      */
     @Test
-    void a7_cycle_seq_is_monotonic_and_decoupled_from_generation() {
+    void cycle_seq_is_monotonic_and_decoupled_from_generation() {
         ChunkSaveState state = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
 
         // 周期 1: 锁内容代 5。
@@ -282,11 +264,8 @@ class AttackCatalogTest {
     }
 
     /**
-     * 协议核心不变式: 槽非空 (pendingKind != NONE) 蕴含 drainOwner != NONE (即 mustDrain 真)。这是 A6 升级后的硬
-     * 不变式 —— A6 的破坏点正是 "槽非空但 mustDrain 已被清成 false"。逐转移后断言。
-     *
-     * <p>mutation (删修复必挂): 把 beginPendingSnapshot 里 "drainOwner == NONE ? IN_FLIGHT : 原值" 改成不拉
-     * drainOwner (允许 PREPARING 时 drainOwner=NONE) -> 下面 begin 后的不变式断言挂。
+     * 协议核心不变式: 槽非空 (pendingKind != NONE) 蕴含 drainOwner != NONE (即 mustDrain 真)。破坏形态是
+     * "槽非空但 mustDrain 已被清成 false"。逐转移后断言这个单向蕴含始终成立。
      */
     @Test
     void invariant_non_empty_slot_implies_drain_owner_non_none() {
@@ -296,7 +275,7 @@ class AttackCatalogTest {
         state.trySnapshot();
         state.enterSerializing();
         state.enterIoPending();
-        // 不预先 markMustDrain: 模拟 A6 那种 drainOwner 被清空后 begin 必须自行重建不变式。
+        // 不预先 markMustDrain: 模拟 drainOwner 被终态清空后, begin 必须自行重建不变式。
         assertFalse(state.mustDrain(), "起始 drainOwner=NONE");
 
         ChunkSnapshot pending = snapshotForGeneration(state, state.generation());
@@ -317,22 +296,18 @@ class AttackCatalogTest {
     private void assertHasPendingImpliesDrain(ChunkSaveState state) {
         if (state.hasPendingSnapshot()) {
             assertTrue(state.mustDrain(),
-                    "不变式: pendingKind != NONE 必蕴含 drainOwner != NONE (A6 不变式破坏点)");
+                    "不变式: pendingKind != NONE 必蕴含 drainOwner != NONE");
         }
     }
 
     /**
-     * A3 加固 (终态消费者 PREPARING 交还): 终态消费者在 PREPARING 槽上判 HANDED_TO_MAIN 时, 把 drainOwner 拨成
+     * 终态消费者命中 PREPARING 交还主线程: 终态消费者在 PREPARING 槽上判 HANDED_TO_MAIN 时, 把 drainOwner 拨成
      * TERMINAL_HANDED 并标本周期 missedCycle —— 两个 publish 自踢触发点 (drainOwner==TERMINAL_HANDED 与
-     * missedCycle==inFlightCycleSeq) 都活, 协议对未来改动稳健。本测试锁定 drainOwner=TERMINAL_HANDED 不被
-     * 调用方 markMustDrain 覆盖成 IN_FLIGHT。
-     *
-     * <p>mutation (删加固必挂): 在 ChunkSaveTask.handleTerminalFailure 的 HANDED_TO_MAIN 分支恢复 markMustDrain()
-     * -> drainOwner 被覆盖成 IN_FLIGHT -> 下面 assertEquals(TERMINAL_HANDED) 挂。(此处直接在状态机层断言 take 后
-     * 的 drainOwner, 不经 task, 隔离协议本身。)
+     * missedCycle==inFlightCycleSeq) 同时活, 协议对未来改动稳健。本用例锁定 drainOwner=TERMINAL_HANDED 不被
+     * 调用方 markMustDrain 覆盖成 IN_FLIGHT。直接在状态机层断言 take 后的 drainOwner, 不经 task, 隔离协议本身。
      */
     @Test
-    void a3_terminal_consumer_on_preparing_sets_terminal_handed_drain_owner() {
+    void terminal_consumer_on_preparing_sets_terminal_handed_drain_owner() {
         ChunkSaveState state = new ChunkSaveState(new ChunkPos(7, -3).toLong(), "minecraft:overworld", 1L);
 
         // 在飞 + 主线程 begin 挂 PREPARING (drainOwner=IN_FLIGHT)。
@@ -355,7 +330,7 @@ class AttackCatalogTest {
         assertEquals(ChunkSaveState.DrainOwner.TERMINAL_HANDED, state.drainOwner(),
                 "终态消费者把 PREPARING 的 drainOwner 拨 TERMINAL_HANDED (满足不变式 + 保留 publish 触发点)");
         assertEquals(cycleBeforeTake, state.slot().missedCycle(), "同时标本周期 missedCycle (冗余触发点)");
-        assertTrue(state.hasPendingSnapshot(), "PREPARING 槽未被夺走 (READY-only, A3)");
+        assertTrue(state.hasPendingSnapshot(), "PREPARING 槽未被夺走 (READY-only)");
         assertTrue(state.mustDrain(), "TERMINAL_HANDED 非 NONE, 槽非空不变式成立");
 
         // publish 经 terminalHanded 触发点自踢 (返回 pending), 不发 READY 孤儿。
