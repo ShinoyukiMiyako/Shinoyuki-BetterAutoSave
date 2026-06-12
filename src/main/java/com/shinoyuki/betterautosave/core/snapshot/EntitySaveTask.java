@@ -304,6 +304,9 @@ public final class EntitySaveTask implements SaveTask {
         if (outcome == EntitySaveState.IoOutcome.FAILED_TERMINAL) {
             metrics.recordEntityFailed();
         } else {
+            // 该 task 已死, 无后续 submitIo 重建 phase。ioFailed 的 REQUEUE 不再写 phase (只让 in-place 重投
+            // 保持 IO_PENDING), 故安全网必须自行发布真终态 DIRTY, 否则 phase 停在 SERIALIZING 让 state 永卡在飞态。
+            state.markNoInFlightDirty();
             // entity 无坐标恢复队列 (实体已离开内存, 坐标恢复无意义); 非终态 unhandled error 仅记数.
             metrics.recordEntityRetried();
         }

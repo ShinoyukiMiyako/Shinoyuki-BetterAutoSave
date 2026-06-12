@@ -285,6 +285,106 @@ class EntityRegisterTerminalInterleavingTest {
         assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
     }
 
+    /**
+     * 窗口三 (REQUEUE in-place 重投瞬态): 回调 IO 失败判 REQUEUE_DIRTY 后、原地重投 (enterIoPending) 前, phase
+     * 必须保持 IO_PENDING 不发布瞬态 DIRTY。否则主线程碰撞分支重读 phase 命中该窗口误判 "无在飞消费者", 偷走
+     * pending 自踢, 与回调原地重投双在飞 (reenterSerializingForPending 覆盖唯一 inFlightGeneration -> 旧代落地
+     * 误判 CLEAN_LANDED + 误 evict + 误计 completed)。
+     *
+     * <p>确定性复刻窗口交错 (回调 ioFailed 与 enterIoPending 之间挂起, 主线程在窗口内 register+重读): 直接驱动
+     * 生产原语 state.ioFailed (开窗) -> registerAndSelfKick (主线程窗口内重读) -> enterIoPending (回调原地重投)
+     * -> ioCompletedSuccessfully (重投落地)。
+     *
+     * <p>判定标准 (把 ioFailed 的 REQUEUE 改回 phase.set(DIRTY)): 窗口内 registerAndSelfKick 重读得 DIRTY ->
+     * 误判非在飞偷槽自踢 (selfKicked==true, selfKick 重投 gen=2), 与回调原地重投双在飞; 重投落地 inFlightGeneration
+     * 已被覆盖成 2 误判 CLEAN_LANDED -> "回调原地重投落地仍 REQUEUE_DIRTY" 断言挂, "selfKicked==false" 断言挂。
+     */
+    @Test
+    void requeue_in_place_retry_keeps_io_pending_no_transient_dirty_window() {
+        EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+        RecordingStateOwner owner = new RecordingStateOwner();
+
+        // gen=1 IO 在飞 (推进到 IO_PENDING, inFlightGeneration=1).
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        state.enterIoPending();     // phase=IO_PENDING
+        metrics.incInFlightSerializing();
+        metrics.decInFlightSerializing();
+        metrics.incInFlightIoPending();
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+
+        // 主线程碰撞分支前半: markDirty 推 gen=2 (在飞分支显式).
+        state.markDirty();          // gen=2
+
+        // 回调 IO 失败. whenComplete 先 dec gen=1 的 ioPending inc, 再调 onIoFailure -> ioFailed REQUEUE_DIRTY.
+        // 这是窗口开点: 修复后 phase 保持 IO_PENDING (在飞).
+        metrics.decInFlightIoPending();
+        assertEquals(EntitySaveState.IoOutcome.REQUEUE_DIRTY, state.ioFailed(3),
+                "未超 maxRetries -> REQUEUE_DIRTY in-place 重投");
+        assertEquals(EntitySaveState.Phase.IO_PENDING, state.phase(),
+                "REQUEUE in-place 重投全程不发布瞬态 DIRTY, phase 保持 IO_PENDING");
+        assertTrue(state.isInFlight(),
+                "窗口内仍是在飞态 (回调正要原地重投, 它的下一个终态仍会取槽)");
+
+        // 主线程在窗口内 register + 重读 phase (碰撞分支后半). 修复后重读得 IO_PENDING -> 不偷槽.
+        EntitySnapshot g2 = snapshotForGeneration(state, 2L);
+        boolean[] selfKickInvoked = {false};
+        boolean selfKicked = EntityPendingRelayCoordinator.registerAndSelfKick(state, g2, metrics,
+                (st, taken) -> selfKickInvoked[0] = true);
+        assertFalse(selfKicked,
+                "窗口内重读 phase=IO_PENDING (在飞消费者存在) -> 主线程不偷槽自踢");
+        assertFalse(selfKickInvoked[0], "自踢 sink 不得被调用");
+        assertTrue(state.hasPendingSnapshot(), "pending 仍在槽, 等回调原地重投终态消费");
+
+        // 回调原地重投 (submitIo): enterIoPending 重建 IO_PENDING + inc ioPending.
+        state.enterIoPending();
+        metrics.incInFlightIoPending();
+        assertEquals(1L, state.inFlightGeneration(),
+                "in-place 重投复用同代 tag, inFlightGeneration 未被覆盖, 仍=1");
+
+        // 重投 IO 落地: generation(2) != inFlightGeneration(1) -> REQUEUE_DIRTY (而非误判 CLEAN_LANDED).
+        assertEquals(EntitySaveState.IoOutcome.REQUEUE_DIRTY, state.ioCompletedSuccessfully(),
+                "回调原地重投落地必判 REQUEUE_DIRTY (inFlightGeneration 未被偷槽自踢覆盖), 不误判 CLEAN_LANDED");
+
+        // 回调终态 (onIoSuccess REQUEUE_DIRTY) 取走 pending 接力: 复刻 reenter + 执行接力把 gen=2 落盘.
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            return CompletableFuture.completedFuture(null);
+        };
+        EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, owner, reofferHolder[0]);
+            relay.execute();
+        };
+        // 重投 IO 落地的 whenComplete 先 dec 重投的 ioPending inc, 再调 onIoSuccess.
+        metrics.decInFlightIoPending();
+        EntitySnapshot taken = state.takePendingSnapshot();
+        assertSame(g2, taken, "回调终态取走主线程在窗口内 register 的唯一 pending (无双投)");
+        state.reenterSerializingForPending(taken.capturedGeneration());
+        reofferHolder[0].reoffer(taken);
+
+        assertEquals(1, submittedTags.size(), "接力把唯一一份最新代落盘 (无双投)");
+        assertEquals(2L, submittedGeneration(submittedTags.get(0)),
+                "落盘的是窗口内 register 的更新代 (gen=2)");
+        assertEquals(1, owner.evictCalls.get(),
+                "唯一 evict 来自接力链终态 (gen=2 真落地槽空后); 窗口内在飞旧代未误判 CLEAN_LANDED 故未误 evict");
+        assertEquals(EntitySaveState.Phase.CLEAN, state.phase(), "接力落地后 phase 回 CLEAN");
+        assertFalse(state.mustDrain(), "接力链落地后 mustDrain 清零");
+        assertFalse(state.hasPendingSnapshot(), "pending 已被接力消费, 槽空");
+
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(1L, snap.entitiesCompleted(),
+                "仅接力链终态 (gen=2 真落地) 计一次 completed, 无窗口误判的多计");
+        assertEquals(0L, snap.mustDrainPending(), "mustDrainPending gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);

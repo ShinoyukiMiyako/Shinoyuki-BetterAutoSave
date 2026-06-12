@@ -146,6 +146,21 @@ public final class EntitySaveState {
         return IoOutcome.REQUEUE_DIRTY;
     }
 
+    /**
+     * IO 失败的 land 判定。超 maxRetries 走 FAILED_TERMINAL 写 phase=FAILED; 否则 REQUEUE_DIRTY。
+     *
+     * <p><b>REQUEUE 不发布瞬态 DIRTY</b>: in-place 重投场景下 (EntitySaveTask.onIoFailure) 回调并未终态退出,
+     * 它紧接着 submitIo 用已序列化旧代 tag 原地重投, 下一个终态仍会取槽。若此处把 phase 写成 DIRTY, 在 ioFailed
+     * 与 submitIo 的 enterIoPending 之间 phase 可观测为 DIRTY, 主线程碰撞分支重读 phase 会误判 "无在飞消费者"
+     * 而偷走接力槽自踢, 与回调的原地重投双在飞 (覆盖唯一 volatile inFlightGeneration, 旧代落地误判 CLEAN_LANDED)。
+     * 故 REQUEUE 全程不碰 phase: 进入本方法时 phase=IO_PENDING, 不写则保持 IO_PENDING (在飞), submitIo 再写回
+     * IO_PENDING, isInFlight 三态判定因此严格正确。DIRTY 信号语义收窄为 "无在飞消费者, 等下周期重新捕获" ——
+     * 仅 markDirty 的 CAS(CLEAN,DIRTY)、ioCompletedSuccessfully 的 REQUEUE_DIRTY (回调终态退出)、以及
+     * onUnhandledError 安全网的 {@link #markNoInFlightDirty} 这类真终态发布它。
+     *
+     * <p>onUnhandledError 安全网经本方法走 REQUEUE 时 (无后续 submitIo 重建 phase), 必须自行调
+     * {@link #markNoInFlightDirty} 把 phase 推到 DIRTY, 否则 phase 停在 SERIALIZING 让该 state 永卡在飞态。
+     */
     public IoOutcome ioFailed(int maxRetries) {
         int n = retryCount.incrementAndGet();
         if (n > maxRetries) {
@@ -153,9 +168,18 @@ public final class EntitySaveState {
             lastTransitionClearedMustDrain = mustDrain.compareAndSet(true, false);
             return IoOutcome.FAILED_TERMINAL;
         }
-        phase.set(Phase.DIRTY);
         lastTransitionClearedMustDrain = false;
         return IoOutcome.REQUEUE_DIRTY;
+    }
+
+    /**
+     * 发布 "无在飞消费者, 等下周期重新捕获" 的真终态 DIRTY (无条件, 不碰 generation / retryCount)。供
+     * onUnhandledError 安全网在 {@link #ioFailed} 返 REQUEUE_DIRTY 后调: 该 task 已死无后续重投, 必须把停在
+     * SERIALIZING/IO_PENDING 的 phase 推到 DIRTY, 让下次 storeEntities 走常规 trySnapshot 路径重新捕获,
+     * 否则 state 永卡在飞态 (evictIfClean 永不剔除, 后续碰撞误登记永无消费者的 pending)。
+     */
+    public void markNoInFlightDirty() {
+        phase.set(Phase.DIRTY);
     }
 
     /**

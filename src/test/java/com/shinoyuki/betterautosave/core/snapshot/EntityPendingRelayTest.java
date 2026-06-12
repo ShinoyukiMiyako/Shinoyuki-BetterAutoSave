@@ -302,6 +302,11 @@ class EntityPendingRelayTest {
         assertFalse(state.hasPendingSnapshot(), "sink 不可达也必须取走 pending 清空槽 (防永久泄漏)");
         assertFalse(state.mustDrain(), "无接力可投时必须清 mustDrain");
         assertEquals(0L, metrics.snapshot().mustDrainPending(), "mustDrain gauge 配平归零");
+        // 安全网 REQUEUE 无后续 submitIo 重建 phase。ioFailed 不再写 DIRTY, 故安全网必须自行
+        // markNoInFlightDirty 把 phase 从进入时的 SERIALIZING 推到 DIRTY, 否则 state 永卡在飞态。
+        // 删 markNoInFlightDirty -> phase 停 SERIALIZING, 本断言挂。
+        assertEquals(EntitySaveState.Phase.DIRTY, state.phase(),
+                "安全网 REQUEUE 必须发布真终态 DIRTY (无在飞消费者, 下周期重新捕获), 不得停在 SERIALIZING");
     }
 
     /**
