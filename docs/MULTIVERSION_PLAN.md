@@ -2,12 +2,37 @@
 
 | 字段 | 值 |
 |---|---|
-| 状态 | 已批准 (2026-06-11), 基于三路侦察取证 |
+| 状态 | 已完成 (2026-06-13): C1-C6 全部落地, bas139 真机验证 + 114 测试全绿, 全模块 build 绿 |
 | 目标 | 双线维护: Forge 1.20.1 (LTS 存量) + NeoForge 1.21.1 (整合包新锚点) |
-| 难度定级 | 低到中 -- 1.21.1 在 vanilla 序列化大重构 (SerializableChunkData, 1.21.2+) 之前 |
-| 估期 | 3-4 周 (侦察已完成) |
+| 难度定级 | 实测低到中 -- 1.21.1 在 vanilla 序列化大重构 (SerializableChunkData, 1.21.2+) 之前, 破坏点少且集中 |
+| 实际工期 | 约 1 工作日 (单会话, 反编译 1.21.1 真源驱动, 非签名推断) |
 
-## 一. 侦察结论 (三路取证, 2026-06-11)
+## 执行结果 (2026-06-13, 权威 -- 下方原始计划与侦察结论部分断言已被实现修正, 以本节为准)
+
+NeoForge 1.21.1 端口已完整落地并三重验证 (编译/打包 + 114 测试 + bas139 真机)。分支 `feat/multiversion-phase0`, 阶段 C1-C6。
+
+**实际仓库布局** (与下方 §二 设想不同):
+- 模块名 `common/` + `forge/` + `neoforge/` (非 `core/forge-1.20.1/neoforge-1.21.1`)。
+- 打包用 **source-merge** (jaredlll08/MultiLoader-Template 模式): forge/neoforge 各 `compileJava.source(common.allJava)` 把零-MC common 源重编进自身 reobf/jar; **未**用 AdvancedBackups 的 jar-by-path 二进制 fat-jar (那会 dev-vs-jar 分裂)。
+- `common/` = 纯 java-library 零-MC: core/scheduler+state+worker+diagnostic + CapturedSnapshot。其余 (snapshot/io/dispatch/mixin/accessor/config/command/api/util/Mod/Core) 因直引 MC 必须每 loader 一份。
+- 构建: 单 wrapper Gradle 8.8 同养 FG6 (forge, Java 17) + ModDevGradle 2.0.141 (neoforge, Java 21), 逐模块 toolchain 锁版本; NeoForge 21.1.233 / Parchment 2024.11.17。FG6 证书瞬态失败时加 `-Dnet.minecraftforge.gradle.check.certs=false`。
+
+**对侦察结论的修正**:
+- mixin 数 = **7** (非 §1.3 的 6): ChunkAccess / ChunkMap / ChunkMapSave / DimensionDataStorage / EntityStorage / MinecraftServer / SavedData。accessor = 6 (forge 5 + neoforge 新增 SimpleRegionStorageAccessor)。
+- 可进 common 的代码远少于 §1.3 "约大半个代码库": 仅 scheduler/state/worker/diagnostic (snapshot/io/dispatch 与 7 mixin 双向纠缠, 永留 loader)。
+- 测试 = **26 类 / 114 用例** (非 §1.3 "9 个测试中 8 个纯 Java"): common 68 (纯 Java, 已迁 common) + forge 114 + neoforge 114。neoforge 测试用 MDG unitTest fixture (testframework + `unitTest{enable;testedMod}`) 跑含 12 个需 MC bootstrap 的测试类 (各在 @BeforeAll 调 Bootstrap.bootStrap)。
+- **TickEvent 无关** (修正 §1.2): 本 mod 不用 TickEvent, tick 由 MinecraftServerMixin `tickServer` @At TAIL 驱动。
+- ServerThreadAssert 实拆为 WorkerThreadAssert (common) + ServerThreadAssert(MinecraftServer) (loader), 非 §1.3 的 "抽象为 Supplier<Boolean>"。
+
+**反编译 1.21.1 真源核实 / 真机揪出的破坏点** (签名推断会漏):
+- ChunkStatus 移包 `chunk.status.`; `getStatus`->`getPersistedStatus`; `getBlockEntityNbtForSaving` 加 HolderLookup.Provider; `DataResult.getOrThrow(boolean,Consumer)` 删除 -> `getOrThrow(Function)`; `SavedData.save` 加 HolderLookup.Provider; `NbtIo.writeCompressed(File)` 删除 -> Path 重载; ResourceLocation 构造器私有 -> `fromNamespaceAndPath`; `ChunkHolder.getLastAvailable` -> `GenerationChunkHolder.getLatestChunk`; `MinecraftServer.getAverageTickTime` 删除 -> `getCurrentSmoothedTickTime`。
+- codec 经真源核实仍用裸 `NbtOps.INSTANCE` (非 RegistryOps); ChunkSerializer 私有成员 (BLOCK_STATE_CODEC / makeBiomeCodec / packStructureData / saveTicks) 1.21.1 存活, invoker 直用。
+- **EntityStorage 重写** (意外震中): 1.21.1 EntityStorage 不再直接持 worker, region IO 下沉 SimpleRegionStorage; 经两跳 accessor 取内层 IOWorker, 皇冠 entity 接力管线零改动复用。
+- **NeoForge 新落盘字段**: ChunkCaptureProcedure 手拼 core tag 补 attachments (AttachmentHolder) + LevelChunk auxlight, 否则用 NeoForge 数据附件的 mod 异步存档丢数据。
+
+config watcher #1768: 本会话真机验证范围内 (config 加载/注入/热重载) 未观测到刷屏或写循环影响; 留作长期关注。1.21.2+ 的 SerializableChunkData 重构仍明确延后 (见 §四), 不影响 1.21.1。
+
+## 一. 侦察结论 (三路取证, 2026-06-11 -- 部分断言已被实现修正, 准确状态见上「执行结果」)
 
 ### 1.1 版本界碑 (javadoc 一手对证)
 
