@@ -52,18 +52,31 @@ public abstract class ChunkMapMixin {
 
         SaveScheduler scheduler = BetterAutoSaveCore.scheduler();
         if (flush) {
-            // 区分关服 flush 与运营中 /save-all flush.
-            // - 关服 (isShutdownMode): 必须同步 drainPending 等 BAS in-flight 落盘,
-            //   再 return 让 vanilla 同步 flush 兜底剩余, 语义要求不能丢.
-            // - 运营中 (!isShutdownMode): drainPending 内 Thread.sleep(50) 循环最多卡主线程
-            //   shutdownTimeoutSeconds 秒 ("Can't keep up" + 玩家卡顿). 不阻塞 — 直接 return
-            //   让 vanilla 自己的同步 flush 处理当前 dirty chunk (有界, 玩家显式 flush 可接受),
-            //   BAS 已 dispatch 的异步任务继续由 worker + tick drain 推进.
-            //   saveAllChunks 返回 void, vanilla 调用方不依赖 BAS 是否 drain 完, 立即 return 安全.
-            FlushHandler.handleFlush(scheduler.isShutdownMode(),
+            boolean blocked = FlushHandler.handleFlush(scheduler.isShutdownMode(),
                     () -> pipeline.drainPending(BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L),
-                    () -> LOGGER.info("[BetterAutoSave] /save-all flush during operation: not blocking main thread; "
-                            + "async saves continue in background (use /betterautosave status to watch progress)"));
+                    () -> LOGGER.info("[BetterAutoSave] /save-all flush during operation: dirty chunks queued to "
+                            + "async pipeline (use /betterautosave status to watch progress)"));
+            if (blocked) {
+                // 关服 flush: handleFlush 已同步 drainPending 等 BAS in-flight 落盘. 不 cancel,
+                // 让 vanilla saveAllChunks(true) 同步 flush 兜底剩余 dirty chunk. 此时
+                // ChunkMapSaveMixin 的 isShutdownMode 守卫放行 vanilla save(), 原版 isUnsaved 语义
+                // 自然收敛 do-while, 无死循环. 关服后已无后续 server tick, 入队的 ChunkSavePriority
+                // 无 onServerTick 消费即永不 submitChunk 落盘, 故关服绝不能改走 enqueue+cancel.
+                return;
+            }
+            // 运营中 /save-all flush: 不放行 vanilla. 运营态 ChunkMapSaveMixin 对 clean chunk
+            // 也 setReturnValue(true) (vanilla 原返 false), 使 vanilla saveAllChunks(true) 的
+            // do-while "本轮任一 save() 返 true 即再来一轮" 判据恒真 -> 主线程死循环 -> watchdog
+            // 60s 强杀. 改走与周期 autosave 同一入队路径把 dirty chunk 交给 BAS 异步管线, 再
+            // ci.cancel() 跳过 vanilla do-while. (不在 save 层改返回值: clean 分支
+            // setReturnValue(true) 是 saveChunkIfNeeded cooldown 推进的承重件, @Inject(HEAD)
+            // 无调用方上下文区分不开 saveAllChunks 与 saveChunkIfNeeded 两个来源.)
+            SaveMetrics flushMetrics = BetterAutoSaveCore.metrics();
+            if (flushMetrics == null) {
+                return;
+            }
+            betterautosave$enqueueDirtyChunks(scheduler, flushMetrics);
+            ci.cancel();
             return;
         }
 
@@ -76,6 +89,17 @@ public abstract class ChunkMapMixin {
             return;
         }
 
+        betterautosave$enqueueDirtyChunks(scheduler, metrics);
+        ci.cancel();
+    }
+
+    /**
+     * 把 visibleChunkMap 中 dirty 且本周期可访问的 LevelChunk 入队 BAS 异步管线.
+     * 周期 autosave (flush=false) 与运营中 /save-all flush 共用同一入队路径, 数据安全语义一致.
+     *
+     * @return 实际成功入队的 chunk 数
+     */
+    private int betterautosave$enqueueDirtyChunks(SaveScheduler scheduler, SaveMetrics metrics) {
         long deadlineMillis = System.currentTimeMillis()
                 + (long) BetterAutoSaveConfig.deadlineGuardSeconds() * 1000L;
         String dimensionId = level.dimension().location().toString();
@@ -131,6 +155,6 @@ public abstract class ChunkMapMixin {
         } else {
             LOGGER.debug("[BetterAutoSave] autosave intercepted @ {} (no dirty chunks)", dimensionId);
         }
-        ci.cancel();
+        return enqueued;
     }
 }
