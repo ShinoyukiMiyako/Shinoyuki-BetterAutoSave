@@ -15,7 +15,8 @@
     "accessor.ChunkSerializerInvoker",
     "accessor.ChunkStorageAccessor",
     "accessor.DimensionDataStorageInvoker",
-    "accessor.EntityStorageAccessor"
+    "accessor.EntityStorageAccessor",
+    "accessor.SimpleRegionStorageAccessor"
   ],
   "client": [],
   "server": [],
