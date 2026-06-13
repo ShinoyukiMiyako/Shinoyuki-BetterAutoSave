@@ -3,7 +3,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
+import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -60,14 +60,14 @@ class ChunkPendingStateMachineTest {
 
     @BeforeEach
     void setup() throws Exception {
-        ServerThreadAssert.markCurrentThreadAsWorker();
+        WorkerThreadAssert.markCurrentThreadAsWorker();
         savedMaxRetries = setMaxRetries(3);
     }
 
     @AfterEach
     void teardown() throws Exception {
         setMaxRetries(savedMaxRetries);
-        ServerThreadAssert.unmarkCurrentThreadAsWorker();
+        WorkerThreadAssert.unmarkCurrentThreadAsWorker();
     }
 
     /** 每代独立 tag, "gen" 标记代号; FULL 模式 (worker assemble 直接返回 preBuiltFullTag)。 */

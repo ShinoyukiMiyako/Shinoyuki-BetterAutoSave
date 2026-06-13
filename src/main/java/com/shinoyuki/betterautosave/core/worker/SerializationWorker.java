@@ -1,7 +1,6 @@
 package com.shinoyuki.betterautosave.core.worker;
 
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,7 +48,7 @@ public final class SerializationWorker implements Runnable {
 
     @Override
     public void run() {
-        ServerThreadAssert.markCurrentThreadAsWorker();
+        WorkerThreadAssert.markCurrentThreadAsWorker();
         LOGGER.info("[BetterAutoSave] worker started: {}", name);
         try {
             while (running || !queue.isEmpty()) {
@@ -84,7 +83,7 @@ public final class SerializationWorker implements Runnable {
             }
             drainedAfterStop = true;
         } finally {
-            ServerThreadAssert.unmarkCurrentThreadAsWorker();
+            WorkerThreadAssert.unmarkCurrentThreadAsWorker();
             LOGGER.info("[BetterAutoSave] worker stopped: {} (queue={})", name, queue.size());
         }
     }

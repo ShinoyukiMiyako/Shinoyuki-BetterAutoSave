@@ -3,7 +3,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
+import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -59,14 +59,14 @@ class ChunkSaveTaskRetryTest {
     @BeforeEach
     void markWorkerAndSetRetries() throws Exception {
         // assemble 内 assertOnWorkerThread; 把测试线程标记为 worker.
-        ServerThreadAssert.markCurrentThreadAsWorker();
+        WorkerThreadAssert.markCurrentThreadAsWorker();
         savedMaxRetries = setMaxRetries(3);
     }
 
     @AfterEach
     void restore() throws Exception {
         setMaxRetries(savedMaxRetries);
-        ServerThreadAssert.unmarkCurrentThreadAsWorker();
+        WorkerThreadAssert.unmarkCurrentThreadAsWorker();
     }
 
     private ChunkSnapshot prebuiltSnapshot(ChunkSaveState state) {

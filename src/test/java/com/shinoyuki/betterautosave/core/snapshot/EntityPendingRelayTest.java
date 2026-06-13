@@ -2,7 +2,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
+import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.ResourceKey;
@@ -55,14 +55,14 @@ class EntityPendingRelayTest {
 
     @BeforeEach
     void setup() throws Exception {
-        ServerThreadAssert.markCurrentThreadAsWorker();
+        WorkerThreadAssert.markCurrentThreadAsWorker();
         savedMaxRetries = setMaxRetries(3);
     }
 
     @AfterEach
     void teardown() throws Exception {
         setMaxRetries(savedMaxRetries);
-        ServerThreadAssert.unmarkCurrentThreadAsWorker();
+        WorkerThreadAssert.unmarkCurrentThreadAsWorker();
     }
 
     /** 每代一个独立 tag (worker assemble 后), 这里直接构 snapshot, entitiesNbt 以 gen 标记代号。 */

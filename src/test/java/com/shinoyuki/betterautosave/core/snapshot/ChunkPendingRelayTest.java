@@ -3,7 +3,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
+import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -58,14 +58,14 @@ class ChunkPendingRelayTest {
 
     @BeforeEach
     void setup() throws Exception {
-        ServerThreadAssert.markCurrentThreadAsWorker();
+        WorkerThreadAssert.markCurrentThreadAsWorker();
         savedMaxRetries = setMaxRetries(3);
     }
 
     @AfterEach
     void teardown() throws Exception {
         setMaxRetries(savedMaxRetries);
-        ServerThreadAssert.unmarkCurrentThreadAsWorker();
+        WorkerThreadAssert.unmarkCurrentThreadAsWorker();
     }
 
     /** 每代一个独立的 tag 实例, 以 "gen" 字段标记代号, 用于断言最终落盘的是哪一代。 */

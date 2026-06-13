@@ -3,7 +3,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import com.shinoyuki.betterautosave.core.state.EntitySaveStateAccess;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
+import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.ResourceKey;
@@ -58,14 +58,14 @@ class EntityRegisterTerminalInterleavingTest {
 
     @BeforeEach
     void setup() throws Exception {
-        ServerThreadAssert.markCurrentThreadAsWorker();
+        WorkerThreadAssert.markCurrentThreadAsWorker();
         savedMaxRetries = setMaxRetries(3);
     }
 
     @AfterEach
     void teardown() throws Exception {
         setMaxRetries(savedMaxRetries);
-        ServerThreadAssert.unmarkCurrentThreadAsWorker();
+        WorkerThreadAssert.unmarkCurrentThreadAsWorker();
     }
 
     private EntitySnapshot snapshotForGeneration(EntitySaveState state, long generation) {

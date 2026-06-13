@@ -3,7 +3,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 import com.mojang.serialization.Codec;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.mixin.accessor.ChunkSerializerInvoker;
-import com.shinoyuki.betterautosave.util.ServerThreadAssert;
+import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
@@ -38,7 +38,7 @@ public final class ChunkNbtAssembler {
     }
 
     public static CompoundTag assemble(ChunkSnapshot snapshot) {
-        ServerThreadAssert.assertOnWorkerThread();
+        WorkerThreadAssert.assertOnWorkerThread();
 
         CompoundTag fullTag = snapshot.preBuiltFullTag();
         if (fullTag != null) {
