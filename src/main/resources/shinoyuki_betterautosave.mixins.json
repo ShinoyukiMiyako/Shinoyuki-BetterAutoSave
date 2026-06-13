@@ -13,7 +13,6 @@
     "MinecraftServerMixin",
     "SavedDataMixin",
     "accessor.ChunkMapAccessor",
-    "accessor.ChunkMapInvoker",
     "accessor.ChunkSerializerInvoker",
     "accessor.ChunkStorageAccessor",
     "accessor.DimensionDataStorageInvoker",
