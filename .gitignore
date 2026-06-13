@@ -28,7 +28,8 @@ run-data/
 Thumbs.db
 
 *.log
-/logs/
+*.log.gz
+logs/
 /crash-reports/
 
 /forge-*-changelog.txt
