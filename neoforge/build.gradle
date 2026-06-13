@@ -47,6 +47,13 @@ neoForge {
             sourceSet sourceSets.main
         }
     }
+
+    // MDG JUnit 集成: 把 NeoForge 1.21.1 运行期 + 本 mod 类注入 test classpath, 让测试可用
+    // MC 类与 Bootstrap.bootStrap (12 个 @BeforeAll bootstrap 用例需要)。testedMod 绑上面 mods 注册的本 mod。
+    unitTest {
+        enable()
+        testedMod = mods.getByName(mod_id)
+    }
 }
 
 // source-merge: 沿用 forge 同款直接引用 (common 是纯 java-library, 未暴露 capability 配置)。
@@ -62,6 +69,8 @@ repositories {
 dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testImplementation 'org.slf4j:slf4j-api:2.0.7'
+    // MDG JUnit-against-NeoForge 框架; 版本与 neoforge 一致。
+    testImplementation "net.neoforged:testframework:${neoforge_version}"
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.0'
 }
 
