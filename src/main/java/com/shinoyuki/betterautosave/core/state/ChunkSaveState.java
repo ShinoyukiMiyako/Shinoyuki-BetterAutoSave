@@ -1,7 +1,5 @@
 package com.shinoyuki.betterautosave.core.state;
 
-import com.shinoyuki.betterautosave.core.snapshot.ChunkSnapshot;
-
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -150,7 +148,7 @@ public final class ChunkSaveState {
         private final long inFlightGeneration;
         private final long inFlightCycleSeq;
         private final PendingKind pendingKind;
-        private final ChunkSnapshot pendingSnapshot;
+        private final CapturedSnapshot pendingSnapshot;
         private final long pendingEpoch;
         private final long missedCycle;
         private final DrainOwner drainOwner;
@@ -161,7 +159,7 @@ public final class ChunkSaveState {
         private final boolean pendingNoInFlightConsumer;
 
         private SlotWord(Phase phase, long inFlightGeneration, long inFlightCycleSeq, PendingKind pendingKind,
-                         ChunkSnapshot pendingSnapshot, long pendingEpoch, long missedCycle, DrainOwner drainOwner,
+                         CapturedSnapshot pendingSnapshot, long pendingEpoch, long missedCycle, DrainOwner drainOwner,
                          boolean pendingNoInFlightConsumer) {
             this.phase = phase;
             this.inFlightGeneration = inFlightGeneration;
@@ -193,7 +191,7 @@ public final class ChunkSaveState {
                     pendingEpoch, missedCycle, next, pendingNoInFlightConsumer);
         }
 
-        private SlotWord withPending(PendingKind kind, ChunkSnapshot snapshot, long epoch, long missed,
+        private SlotWord withPending(PendingKind kind, CapturedSnapshot snapshot, long epoch, long missed,
                                      DrainOwner owner) {
             // 槽变 NONE 时强制清 noInFlightConsumer (它只对在槽的 pending 有意义); 槽非空则保持原值。
             boolean noConsumer = kind == PendingKind.NONE ? false : pendingNoInFlightConsumer;
@@ -201,7 +199,7 @@ public final class ChunkSaveState {
                     noConsumer);
         }
 
-        private SlotWord withPending(PendingKind kind, ChunkSnapshot snapshot, long epoch, long missed,
+        private SlotWord withPending(PendingKind kind, CapturedSnapshot snapshot, long epoch, long missed,
                                      DrainOwner owner, boolean noInFlightConsumer) {
             return new SlotWord(phase, inFlightGeneration, inFlightCycleSeq, kind, snapshot, epoch, missed, owner,
                     noInFlightConsumer);
@@ -386,7 +384,7 @@ public final class ChunkSaveState {
         SlotWord cur;
         SlotWord next;
         IoOutcome outcome;
-        ChunkSnapshot relayPending;
+        CapturedSnapshot relayPending;
         do {
             cur = word.get();
             relayPending = null;
@@ -424,9 +422,9 @@ public final class ChunkSaveState {
     /** {@link #landAndTake} 的原子结果: land 判定 + REQUEUE_DIRTY 时取走的 READY 接力 (否则 null)。 */
     public static final class LandResult {
         private final IoOutcome outcome;
-        private final ChunkSnapshot relayPending;
+        private final CapturedSnapshot relayPending;
 
-        private LandResult(IoOutcome outcome, ChunkSnapshot relayPending) {
+        private LandResult(IoOutcome outcome, CapturedSnapshot relayPending) {
             this.outcome = outcome;
             this.relayPending = relayPending;
         }
@@ -436,7 +434,7 @@ public final class ChunkSaveState {
         }
 
         /** 仅 REQUEUE_DIRTY 且槽为 READY 时非 null (取走的就绪接力)。 */
-        public ChunkSnapshot relayPending() {
+        public CapturedSnapshot relayPending() {
             return relayPending;
         }
     }
@@ -552,7 +550,7 @@ public final class ChunkSaveState {
      * @return true 表示 begin 把 drainOwner 由 NONE 重新拉为 IN_FLIGHT (补配平), 调用方须 inc gauge 一次;
      *         false 表示 drainOwner 进入时已非 NONE (常规), 调用方无需配平
      */
-    public boolean beginPendingSnapshot(ChunkSnapshot snapshot) {
+    public boolean beginPendingSnapshot(CapturedSnapshot snapshot) {
         long epoch = snapshot.capturedGeneration();
         SlotWord cur;
         SlotWord next;
@@ -585,10 +583,10 @@ public final class ChunkSaveState {
      *
      * @return 非 null 表示主线程需自行 reoffer 这份 pending; null 表示已发布 READY 等回调消费
      */
-    public ChunkSnapshot publishPendingSnapshot() {
+    public CapturedSnapshot publishPendingSnapshot() {
         SlotWord cur;
         SlotWord next;
-        ChunkSnapshot toReoffer;
+        CapturedSnapshot toReoffer;
         do {
             cur = word.get();
             if (cur.pendingKind != PendingKind.PREPARING) {
@@ -616,9 +614,9 @@ public final class ChunkSaveState {
      *
      * @return 撤销取回的 pending (恒非 null 当槽确为 PREPARING); 槽非 PREPARING 时返 null (理论不可达, 防御性)
      */
-    public ChunkSnapshot abortPendingSnapshot() {
+    public CapturedSnapshot abortPendingSnapshot() {
         SlotWord cur;
-        ChunkSnapshot taken;
+        CapturedSnapshot taken;
         do {
             cur = word.get();
             if (cur.pendingKind != PendingKind.PREPARING) {
@@ -642,10 +640,10 @@ public final class ChunkSaveState {
      *
      * @return 非 null (仅 READY 时) 则回调重投它接力落盘; null 则回调走原 REQUEUE_DIRTY 语义不重投
      */
-    public ChunkSnapshot takeReadyPendingSnapshot() {
+    public CapturedSnapshot takeReadyPendingSnapshot() {
         SlotWord cur;
         SlotWord next;
-        ChunkSnapshot taken;
+        CapturedSnapshot taken;
         do {
             cur = word.get();
             switch (cur.pendingKind) {
@@ -683,7 +681,7 @@ public final class ChunkSaveState {
      * <p><b>注意</b>: chunk 主线程碰撞分支<b>不</b>走此入口 —— 它有 dispatchSaveEvent 窗口, 必须 begin(PREPARING)
      * -> dispatch -> publish(READY), 否则回调会取走 "未就绪 tag"。本入口仅供无窗口场景。
      */
-    public void registerReadyPendingSnapshot(ChunkSnapshot snapshot) {
+    public void registerReadyPendingSnapshot(CapturedSnapshot snapshot) {
         long epoch = snapshot.capturedGeneration();
         SlotWord cur;
         do {
@@ -763,9 +761,9 @@ public final class ChunkSaveState {
         private static final ReadyTake EMPTY_DEAD = new ReadyTake(Disposition.EMPTY_DEAD, null);
 
         private final Disposition disposition;
-        private final ChunkSnapshot snapshot;
+        private final CapturedSnapshot snapshot;
 
-        private ReadyTake(Disposition disposition, ChunkSnapshot snapshot) {
+        private ReadyTake(Disposition disposition, CapturedSnapshot snapshot) {
             this.disposition = disposition;
             this.snapshot = snapshot;
         }
@@ -783,7 +781,7 @@ public final class ChunkSaveState {
         }
 
         /** 仅 CONSUMED 时非 null (取走的就绪 READY pending)。 */
-        public ChunkSnapshot snapshot() {
+        public CapturedSnapshot snapshot() {
             return snapshot;
         }
     }
@@ -798,9 +796,9 @@ public final class ChunkSaveState {
      *
      * @return 曾停泊的 pending (PREPARING/READY); 槽本就 EMPTY 时返 null
      */
-    public ChunkSnapshot drainPendingSnapshot() {
+    public CapturedSnapshot drainPendingSnapshot() {
         SlotWord cur;
-        ChunkSnapshot prev;
+        CapturedSnapshot prev;
         do {
             cur = word.get();
             prev = cur.pendingSnapshot;

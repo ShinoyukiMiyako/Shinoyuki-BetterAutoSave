@@ -205,7 +205,7 @@ public final class EntitySaveTask implements SaveTask {
             // 双不见。CLEAN_LANDED 一般蕴含 generation 未推进 (无碰撞), 槽应空; 但回调读到的 generation 可能是
             // 碰撞编辑推进 generation 之前的 stale 值, 此刻主线程已 register 了一份更新代 pending —— 若不取槽
             // 直接 evict, 会把这份唯一副本随状态对象送 GC 永久丢失。故 evict 前必取一次。
-            EntitySnapshot pending = state.takePendingSnapshot();
+            EntitySnapshot pending = (EntitySnapshot) state.takePendingSnapshot();
             if (pending != null && pendingReoffer != null) {
                 // 取到主线程登记的更新代 pending: 它是 vanilla 即将驱逐内存的唯一副本, 必须接力落盘而非随
                 // 状态对象 evict 丢弃。CLEAN_LANDED 已清 mustDrain, 接力在途须恢复 (关服 join 继续等): markMustDrain
@@ -239,7 +239,7 @@ public final class EntitySaveTask implements SaveTask {
         // 优先用接力快照接力 —— mixin 碰撞分支登记的最新 entity 列表 (vanilla 即将驱逐的唯一副本) 取出重投,
         // 把最新代落盘, 不依赖实体是否仍在内存。reenterSerializingForPending 锁 pending 自己的代; mustDrain
         // 维持 (REQUEUE_DIRTY 不清)。
-        EntitySnapshot pending = state.takePendingSnapshot();
+        EntitySnapshot pending = (EntitySnapshot) state.takePendingSnapshot();
         if (pending != null && pendingReoffer != null) {
             // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
             state.reenterSerializingForPending(pending.capturedGeneration());
@@ -276,7 +276,7 @@ public final class EntitySaveTask implements SaveTask {
         // 与 ChunkSaveTask 对称, 接力槽前置消费。entity 侧更严重 —— 无坐标恢复队列, 实体已被 vanilla 驱逐出
         // 内存, 接力槽是最新实体增量 (命名生物/盔甲架/展示框等) 的唯一副本, 若清 mustDrain 不取 pending 则该坐标
         // 增量永久静默丢失且无 ERROR。
-        EntitySnapshot pending = state.takePendingSnapshot();
+        EntitySnapshot pending = (EntitySnapshot) state.takePendingSnapshot();
         if (pending != null && pendingReoffer != null) {
             // 接力链可达: 重投最新代, mustDrain 维持 (重投仍在途, 关服 join 须继续等)。reoffer sink 自身在
             // 真正 offer 时 inc serializing, workersStopping 关服残窗走 ERROR 安全网并在那里清 mustDrain+gauge。

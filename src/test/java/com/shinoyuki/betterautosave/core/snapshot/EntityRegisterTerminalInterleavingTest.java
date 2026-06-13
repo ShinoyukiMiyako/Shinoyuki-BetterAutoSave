@@ -363,7 +363,7 @@ class EntityRegisterTerminalInterleavingTest {
         };
         // 重投 IO 落地的 whenComplete 先 dec 重投的 ioPending inc, 再调 onIoSuccess.
         metrics.decInFlightIoPending();
-        EntitySnapshot taken = state.takePendingSnapshot();
+        EntitySnapshot taken = (EntitySnapshot) state.takePendingSnapshot();
         assertSame(g2, taken, "回调终态取走主线程在窗口内 register 的唯一 pending (无双投)");
         state.reenterSerializingForPending(taken.capturedGeneration());
         reofferHolder[0].reoffer(taken);

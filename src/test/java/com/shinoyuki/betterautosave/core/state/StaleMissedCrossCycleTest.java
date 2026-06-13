@@ -79,7 +79,7 @@ class StaleMissedCrossCycleTest {
         state.beginPendingSnapshot(gen3Pending);
 
         // 核心断言 1: gen3 PREPARING 不得继承 stale missed -> publish 发布 READY 等 gen2 回调, 不提前自踢.
-        ChunkSnapshot selfReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot selfReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertNull(selfReoffer,
                 "gen3 不得继承 gen1 周期的 stale missed; publish 必须发布 READY (返 null) 而非提前自踢 (返非 null)");
         assertTrue(state.hasPendingSnapshot(), "publish 后槽为 READY, 等 gen2 回调消费");
@@ -91,7 +91,7 @@ class StaleMissedCrossCycleTest {
                 "gen2 落地必须判 REQUEUE_DIRTY (inFlightGeneration 未被 phantom 自踢提前覆盖到 3)");
 
         // gen2 回调正常消费 READY 的 gen3 接力.
-        ChunkSnapshot taken = state.takeReadyPendingSnapshot();
+        ChunkSnapshot taken = (ChunkSnapshot) state.takeReadyPendingSnapshot();
         assertSame(gen3Pending, taken, "gen2 回调消费 READY 槽里的 gen3 接力");
     }
 

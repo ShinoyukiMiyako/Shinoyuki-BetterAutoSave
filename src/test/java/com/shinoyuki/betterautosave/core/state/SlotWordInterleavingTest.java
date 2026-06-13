@@ -172,7 +172,7 @@ class SlotWordInterleavingTest {
         assertTrue(state.mustDrain(), "begin 后槽非空 -> drainOwner != NONE (不变式)");
 
         // dispatch 成功 publish: 同周期 missed -> 主线程自踢 (返非 null), 不发 READY 孤儿。
-        ChunkSnapshot selfReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot selfReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(gen2Pending, selfReoffer,
                 "终态消费者标了同周期 missed, publish 自踢返回 pending 而非发布 READY 孤儿");
         assertFalse(state.hasPendingSnapshot(), "自踢后槽 NONE, 无孤儿 READY");
@@ -287,7 +287,7 @@ class SlotWordInterleavingTest {
         assertHasPendingImpliesDrain(state);
 
         // 回调取走 READY -> 槽 NONE; drainOwner 仍 IN_FLIGHT (在飞接力代未终态), 不变式 (单向蕴含) 不违反。
-        ChunkSnapshot taken = state.takeReadyPendingSnapshot();
+        ChunkSnapshot taken = (ChunkSnapshot) state.takeReadyPendingSnapshot();
         assertSame(pending, taken);
         assertHasPendingImpliesDrain(state);
     }
@@ -334,7 +334,7 @@ class SlotWordInterleavingTest {
         assertTrue(state.mustDrain(), "TERMINAL_HANDED 非 NONE, 槽非空不变式成立");
 
         // publish 经 terminalHanded 触发点自踢 (返回 pending), 不发 READY 孤儿。
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(pending, toReoffer, "publish 经 TERMINAL_HANDED 触发自踢返回 pending");
         assertFalse(state.hasPendingSnapshot(), "自踢后槽 NONE");
     }

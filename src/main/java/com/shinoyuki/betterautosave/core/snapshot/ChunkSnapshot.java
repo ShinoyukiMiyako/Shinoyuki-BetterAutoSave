@@ -1,6 +1,7 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.config.ConfigSpec;
+import com.shinoyuki.betterautosave.core.state.CapturedSnapshot;
 import com.shinoyuki.betterautosave.core.state.ChunkSaveState;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.shorts.ShortList;
@@ -56,7 +57,7 @@ public record ChunkSnapshot(
         CompoundTag preBuiltCoreTag,
         CompoundTag preBuiltFullTag,
         ConfigSpec.EventCompatMode mode
-) {
+) implements CapturedSnapshot {
 
     /**
      * v0.1 兼容入口: 主线程已经通过 ChunkSerializer.write 构好完整 tag,

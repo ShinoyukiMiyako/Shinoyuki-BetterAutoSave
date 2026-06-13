@@ -105,7 +105,7 @@ class ChunkOrphanReadyInterleavingTest {
                 "begin 落在 phase==CLEAN 必须立 noInFlightConsumer 标记 (无在飞消费者)");
         assertTrue(state.mustDrain(), "begin 后槽非空 -> drainOwner != NONE (不变式)");
 
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertNotNull(toReoffer,
                 "begin 落 CLEAN (无在飞消费者) 时 publish 必须把 pending 交还主线程自踢, 不发布 READY 孤儿");
         assertSame(pending, toReoffer, "自踢交还的是登记的 pending");
@@ -169,7 +169,7 @@ class ChunkOrphanReadyInterleavingTest {
         assertTrue(state.hasPendingSnapshot(), "PREPARING 仍挂在槽 (回调未消费)");
 
         // publish: 经 missedCycle==inFlightCycleSeq 自踢 (既有安全序触发点), 不依赖新 marker.
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(g2, toReoffer,
                 "begin 先序: publish 经既有 missedCycle 触发点自踢, 行为不变");
         assertFalse(state.hasPendingSnapshot(), "自踢后槽 NONE");

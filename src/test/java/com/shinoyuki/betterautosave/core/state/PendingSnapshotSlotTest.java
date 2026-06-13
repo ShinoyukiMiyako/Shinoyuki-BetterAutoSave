@@ -69,7 +69,7 @@ class PendingSnapshotSlotTest {
         ChunkSnapshot genB = chunkSnapshot(state, 7L);
         state.registerReadyPendingSnapshot(genB);
 
-        ChunkSnapshot taken = state.takeReadyPendingSnapshot();
+        ChunkSnapshot taken = (ChunkSnapshot) state.takeReadyPendingSnapshot();
         assertSame(genB, taken, "takeReadyPendingSnapshot 必须返回最新登记的那份 (最新者胜)");
         assertNull(state.takeReadyPendingSnapshot(), "取走后槽必须清空");
         assertFalse(state.hasPendingSnapshot());
@@ -157,7 +157,7 @@ class PendingSnapshotSlotTest {
         ChunkSaveState.IoOutcome landed = state.ioCompletedSuccessfully();
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, landed);
         assertFalse(state.lastTransitionClearedMustDrain(), "REQUEUE_DIRTY 不得清 mustDrain");
-        ChunkSnapshot pending = state.takeReadyPendingSnapshot();
+        ChunkSnapshot pending = (ChunkSnapshot) state.takeReadyPendingSnapshot();
         assertInvariant(state, "取走 pending 但即将重投 (phase 仍 DIRTY, 但 mustDrain 维持)");
 
         // 4) 接力重投: reenter 锁 pending 代 + ioPending. mustDrain 维持.
@@ -220,7 +220,7 @@ class PendingSnapshotSlotTest {
             gauge.decrementAndGet();
         }
         assertEquals(1L, gauge.get(), "REQUEUE_DIRTY 不得 dec gauge");
-        ChunkSnapshot pending = state.takeReadyPendingSnapshot();
+        ChunkSnapshot pending = (ChunkSnapshot) state.takeReadyPendingSnapshot();
         state.reenterSerializingForPending(pending.capturedGeneration());
         state.enterIoPending();
 

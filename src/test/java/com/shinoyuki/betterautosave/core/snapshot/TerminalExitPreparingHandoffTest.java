@@ -144,7 +144,7 @@ class TerminalExitPreparingHandoffTest {
         }
 
         // dispatch 返回 -> 主线程 publish 见 missed -> 取回 gen=2 自踢.
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(gen2Pending, toReoffer, "onUnhandledError 标了 missed, publish 必须取回 pending 交主线程自踢");
         state.reenterSerializingForPending(toReoffer.capturedGeneration());
         reofferHolder[0].reoffer(toReoffer);
@@ -236,7 +236,7 @@ class TerminalExitPreparingHandoffTest {
         }
 
         // dispatch 返回 -> 主线程 publish 见 missed -> 取回 gen=2 自踢.
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(gen2Pending, toReoffer, "FAILED_TERMINAL 标了 missed, publish 必须取回 pending 交主线程自踢");
         state.reenterSerializingForPending(toReoffer.capturedGeneration());
         reofferHolder[0].reoffer(toReoffer);

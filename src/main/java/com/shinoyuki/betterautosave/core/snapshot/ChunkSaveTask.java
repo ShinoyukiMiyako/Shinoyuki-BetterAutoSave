@@ -221,7 +221,7 @@ public final class ChunkSaveTask implements SaveTask {
                 if (pendingReoffer != null) {
                     state.markMustDrain();
                     state.reenterSerializingForPending(take.snapshot().capturedGeneration());
-                    safeReoffer(state, take.snapshot());
+                    safeReoffer(state, (ChunkSnapshot) take.snapshot());
                     metrics.recordChunkRetried();
                     return;
                 }
@@ -286,7 +286,7 @@ public final class ChunkSaveTask implements SaveTask {
             // tag 未就绪) 时不取走而原子标 missedCycle (在同一 land CAS 里), 把补踢交还主线程 (publish 时自踢)。
             // 这关死"在飞回调取走 listener 仍在改写的未就绪 tag"。relayPending 为 null 时若槽仍非空
             // (PREPARING-missed), mustDrain 由主线程自踢的接力链终态清, 此处不碰。
-            ChunkSnapshot pending = land.relayPending();
+            ChunkSnapshot pending = (ChunkSnapshot) land.relayPending();
             if (pending != null && pendingReoffer != null) {
                 // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
                 // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代。
@@ -345,7 +345,7 @@ public final class ChunkSaveTask implements SaveTask {
                 // enqueueRecovery —— 该轮 in-flight 由接力 task 接管 (与 whenComplete REQUEUE_DIRTY 重投同语义)。
                 if (pendingReoffer != null) {
                     state.reenterSerializingForPending(take.snapshot().capturedGeneration());
-                    safeReoffer(state, take.snapshot());
+                    safeReoffer(state, (ChunkSnapshot) take.snapshot());
                     return;
                 }
                 // sink 不可达 (单测未注入接力 / 关服后): 无法重投, READY 最新代增量随这次 unhandled 丢失。

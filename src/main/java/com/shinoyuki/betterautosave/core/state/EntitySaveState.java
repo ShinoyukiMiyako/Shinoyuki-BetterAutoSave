@@ -1,7 +1,5 @@
 package com.shinoyuki.betterautosave.core.state;
 
-import com.shinoyuki.betterautosave.core.snapshot.EntitySnapshot;
-
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -55,7 +53,7 @@ public final class EntitySaveState {
     // 卸载后该坐标永不再被 storeEntities 调用, 被吞那次的最新实体列表是唯一副本。在途碰撞时 mixin
     // 对最新 chunkEntities 做纯 capture 存进本槽。消费者: 在途那代 IO 落地的回调 (CLEAN_LANDED evict 前 / REQUEUE_DIRTY /
     // 终态 take 走), 或主线程 register 后重读 phase 发现回调已终态退出时自取回 (写后读对偶, getAndSet 防双投)。
-    private final AtomicReference<EntitySnapshot> pendingSnapshot = new AtomicReference<>();
+    private final AtomicReference<CapturedSnapshot> pendingSnapshot = new AtomicReference<>();
 
     public EntitySaveState(long packedPos, String dimensionId, long enqueueSequence) {
         this.packedPos = packedPos;
@@ -120,7 +118,7 @@ public final class EntitySaveState {
         inFlightGeneration = captured;
         phase.set(Phase.SERIALIZING);
         // 不碰 pendingSnapshot 槽: entity 无 dispatchSaveEvent 窗口, 故无 chunk 那种 "回调路过 PREPARING 标
-        // missed 离开" 的 sticky 载体, 槽是裸 AtomicReference<EntitySnapshot> (无 missedCycle/cycleSeq 概念),
+        // missed 离开" 的 sticky 载体, 槽是裸 AtomicReference<CapturedSnapshot> (无 missedCycle/cycleSeq 概念),
         // 开新周期无需清理跨周期 missed 标记。但 "回调终态取槽" 与 "主线程 registerPendingSnapshot" 仍跑在两条
         // 线程, 需要一道写后读对偶纪律杜绝双不见 (回调先写 phase 终态再 getAndSet 取槽; 主线程先写槽再重读
         // phase), 该纪律在 EntitySaveTask.onIoSuccess 与 EntityStorageMixin 碰撞分支实现, 不在本方法。
@@ -217,7 +215,7 @@ public final class EntitySaveState {
      * "写" 半 —— 调用方在本 set 之后必须重读 phase, 若回调已写定终态则自取回自己刚放的 pending 自踢
      * (见 EntityStorageMixin 碰撞分支), 否则会落进死状态 pending 滞留。
      */
-    public void registerPendingSnapshot(EntitySnapshot snapshot) {
+    public void registerPendingSnapshot(CapturedSnapshot snapshot) {
         pendingSnapshot.set(snapshot);
     }
 
@@ -225,7 +223,7 @@ public final class EntitySaveState {
      * 取出并清空接力快照槽 (getAndSet null)。回调终态分支与主线程自取共用此析构式读: getAndSet 保证同一份
      * pending 只被一方取走 (防双投), 是写后读对偶在 "双方都看见对方" 时裁定唯一消费者的原语。
      */
-    public EntitySnapshot takePendingSnapshot() {
+    public CapturedSnapshot takePendingSnapshot() {
         return pendingSnapshot.getAndSet(null);
     }
 

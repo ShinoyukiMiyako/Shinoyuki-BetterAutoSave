@@ -183,7 +183,7 @@ public abstract class ChunkMapSaveMixin {
                         // 路过 PREPARING (标了本周期 missedCycle) 后离开未消费 —— 那个回调是本代在飞 IO 的唯一消费者,
                         // 走后不再来, 补踢责任归主线程: 自己 reenterSerializing + reoffer 把就绪的 pending 接力落盘。
                         // 返回 null 表示已发布 READY, 等在飞回调消费, 主线程无需补踢。
-                        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+                        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
                         if (toReoffer != null) {
                             pipeline.reofferChunkPendingFromMainThread(level, state, toReoffer);
                         }

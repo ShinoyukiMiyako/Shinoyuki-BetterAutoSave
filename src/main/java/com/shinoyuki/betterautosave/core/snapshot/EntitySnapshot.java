@@ -1,5 +1,6 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
+import com.shinoyuki.betterautosave.core.state.CapturedSnapshot;
 import com.shinoyuki.betterautosave.core.state.EntitySaveState;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.ResourceKey;
@@ -35,5 +36,5 @@ public record EntitySnapshot(
         ListTag entitiesNbt,
         long capturedGeneration,
         EntitySaveState state
-) {
+) implements CapturedSnapshot {
 }

@@ -54,7 +54,7 @@ public final class EntityPendingRelayCoordinator {
         }
         // 非在飞态: 回调已写定终态并可能已取槽。getAndSet 自取回自己刚放的 pending (防与回调取槽双投):
         // 取回 null -> 回调已接管, 主线程不再动作; 取回非空 -> 回调已终态退出不会再消费, 主线程自踢。
-        EntitySnapshot taken = state.takePendingSnapshot();
+        EntitySnapshot taken = (EntitySnapshot) state.takePendingSnapshot();
         if (taken == null) {
             return false;
         }

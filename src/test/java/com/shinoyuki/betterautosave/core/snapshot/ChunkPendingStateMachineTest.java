@@ -153,7 +153,7 @@ class ChunkPendingStateMachineTest {
         }
 
         // dispatch 返回 -> publish 见 missed -> 取回 gen=2 主线程自踢.
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(gen2Pending, toReoffer, "回调已 missed, publish 必须取回 pending 交主线程自踢");
         state.reenterSerializingForPending(toReoffer.capturedGeneration());
         reofferHolder[0].reoffer(toReoffer);
@@ -267,7 +267,7 @@ class ChunkPendingStateMachineTest {
         boolean aborted = false;
         if (dispatchThrows) {
             // dispatch 抛 -> abort 撤销 PREPARING. 撤销取回非 null (回调从不消费 PREPARING).
-            ChunkSnapshot back = state.abortPendingSnapshot();
+            ChunkSnapshot back = (ChunkSnapshot) state.abortPendingSnapshot();
             assertSame(latestGenSnapshot(state, back, latestGen), back, "abort 取回的是最新代 pending");
             if (state.compareAndClearMustDrain()) {
                 metrics.decMustDrainPending();
@@ -275,7 +275,7 @@ class ChunkPendingStateMachineTest {
             aborted = true;
         } else {
             // dispatch 成功 -> publish. 若 missed (BEFORE/DURING) 主线程自踢; 否则发布 READY 等回调.
-            ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+            ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
             if (toReoffer != null) {
                 state.reenterSerializingForPending(toReoffer.capturedGeneration());
                 reofferHolder[0].reoffer(toReoffer);

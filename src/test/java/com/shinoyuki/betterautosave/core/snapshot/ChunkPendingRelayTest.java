@@ -481,7 +481,7 @@ class ChunkPendingRelayTest {
         assertTrue(state.hasPendingSnapshot(), "PREPARING 仍挂着 gen=2, 槽未空 (回调未消费)");
 
         // dispatch 成功返回 -> publishPendingSnapshot 见 missed -> 取回 gen=2 让主线程自踢.
-        ChunkSnapshot toReoffer = state.publishPendingSnapshot();
+        ChunkSnapshot toReoffer = (ChunkSnapshot) state.publishPendingSnapshot();
         assertSame(gen2Pending, toReoffer, "回调已 missed, publish 必须取回 pending 交主线程自踢");
         assertFalse(state.hasPendingSnapshot(), "publish 取走 pending 后槽归 EMPTY");
 
@@ -560,7 +560,7 @@ class ChunkPendingRelayTest {
         assertTrue(state.hasPendingSnapshot(), "PREPARING (带 missed) 仍在槽, 回调未取走");
 
         // dispatch 抛 -> abortPendingSnapshot 撤销 PREPARING->EMPTY, 取回非 null -> 主线程清 mustDrain.
-        ChunkSnapshot aborted = state.abortPendingSnapshot();
+        ChunkSnapshot aborted = (ChunkSnapshot) state.abortPendingSnapshot();
         assertNotNull(aborted, "dispatch 抛时 abort 必须取回 PREPARING 的 pending (恒非 null)");
         if (state.compareAndClearMustDrain()) {
             metrics.decMustDrainPending();
