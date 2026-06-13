@@ -1,9 +1,9 @@
 package com.shinoyuki.betterautosave.core.scheduler;
 
-import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 public final class SaveScheduler {
 
@@ -11,15 +11,16 @@ public final class SaveScheduler {
     private final AdaptiveThrottle chunkThrottle;
     private final SaveMetrics metrics;
     private final AtomicLong enqueueSequence = new AtomicLong();
+    private final BooleanSupplier adaptiveEnabled;
 
     private volatile ChunkSubmissionSink sink;
     private volatile boolean shutdownMode;
 
-    public SaveScheduler(SaveMetrics metrics) {
+    public SaveScheduler(SaveMetrics metrics, int chunksPerTickBase, int deadlineGuardSeconds,
+                         BooleanSupplier adaptiveEnabled) {
         this.metrics = metrics;
-        this.chunkThrottle = new AdaptiveThrottle(
-                BetterAutoSaveConfig.chunksPerTickBase(),
-                BetterAutoSaveConfig.deadlineGuardSeconds());
+        this.adaptiveEnabled = adaptiveEnabled;
+        this.chunkThrottle = new AdaptiveThrottle(chunksPerTickBase, deadlineGuardSeconds);
     }
 
     public void attachSink(ChunkSubmissionSink sink) {
@@ -41,7 +42,7 @@ public final class SaveScheduler {
         if (localSink == null) {
             return;
         }
-        boolean adaptive = BetterAutoSaveConfig.adaptiveEnabled();
+        boolean adaptive = adaptiveEnabled.getAsBoolean();
 
         int chunkBudget = chunkThrottle.adjust(avgTickMs, remainingSecondsInCycle, adaptive, shutdownMode);
         for (int i = 0; i < chunkBudget; i++) {

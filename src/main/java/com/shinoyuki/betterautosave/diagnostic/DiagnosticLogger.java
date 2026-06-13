@@ -1,30 +1,37 @@
 package com.shinoyuki.betterautosave.diagnostic;
 
-import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 
 public final class DiagnosticLogger {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("BetterAutoSave");
 
     private final SaveMetrics metrics;
+    private final BooleanSupplier diagnosticLogging;
+    private final IntSupplier diagnosticLogIntervalTicks;
     private int tickCounter;
     private long lastSubmittedSeen;
     private long lastChunkMapSaveAsyncSeen;
     private long lastEntitiesSubmittedSeen;
     private long lastSavedDataSubmittedSeen;
 
-    public DiagnosticLogger(SaveMetrics metrics) {
+    public DiagnosticLogger(SaveMetrics metrics, BooleanSupplier diagnosticLogging,
+                            IntSupplier diagnosticLogIntervalTicks) {
         this.metrics = metrics;
+        this.diagnosticLogging = diagnosticLogging;
+        this.diagnosticLogIntervalTicks = diagnosticLogIntervalTicks;
     }
 
     public void onServerTick() {
-        if (!BetterAutoSaveConfig.diagnosticLogging()) {
+        if (!diagnosticLogging.getAsBoolean()) {
             tickCounter = 0;
             return;
         }
-        int interval = BetterAutoSaveConfig.diagnosticLogIntervalTicks();
+        int interval = diagnosticLogIntervalTicks.getAsInt();
         if (++tickCounter < interval) {
             return;
         }

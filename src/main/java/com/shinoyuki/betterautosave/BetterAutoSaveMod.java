@@ -63,10 +63,12 @@ public final class BetterAutoSaveMod {
     public void onServerStarting(ServerStartingEvent event) {
         LOGGER.info("[BetterAutoSave] pipeline starting for {}", event.getServer().name());
         SaveMetrics metrics = new SaveMetrics();
-        SaveScheduler scheduler = new SaveScheduler(metrics);
+        SaveScheduler scheduler = new SaveScheduler(metrics, BetterAutoSaveConfig.chunksPerTickBase(),
+                BetterAutoSaveConfig.deadlineGuardSeconds(), BetterAutoSaveConfig::adaptiveEnabled);
         AsyncIoBridge ioBridge = new AsyncIoBridge();
         SnapshotPipeline pipeline = new SnapshotPipeline(scheduler, ioBridge, metrics);
-        DiagnosticLogger diagnosticLogger = new DiagnosticLogger(metrics);
+        DiagnosticLogger diagnosticLogger = new DiagnosticLogger(metrics,
+                BetterAutoSaveConfig::diagnosticLogging, BetterAutoSaveConfig::diagnosticLogIntervalTicks);
         SaveDispatcher dispatcher = new SaveDispatcher(pipeline, metrics);
         ChunkLatencyTracker latencyTracker = new ChunkLatencyTracker(
                 BetterAutoSaveConfig.hottestChunksWindowSize(),
