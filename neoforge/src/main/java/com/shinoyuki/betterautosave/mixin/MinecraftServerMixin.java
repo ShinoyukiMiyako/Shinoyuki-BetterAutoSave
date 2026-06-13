@@ -23,7 +23,7 @@ public abstract class MinecraftServerMixin {
     private int tickCount;
 
     @Shadow
-    public abstract float getAverageTickTime();
+    public abstract float getCurrentSmoothedTickTime();
 
     @Inject(method = "tickServer", at = @At("TAIL"))
     private void betterautosave$onTickServer(BooleanSupplier hasMoreTime, CallbackInfo ci) {
@@ -49,7 +49,7 @@ public abstract class MinecraftServerMixin {
         int remainingTicks = AUTOSAVE_INTERVAL - ticksIntoCycle;
         int remainingSeconds = remainingTicks / 20;
 
-        BetterAutoSaveCore.scheduler().onServerTick(getAverageTickTime(), remainingSeconds);
+        BetterAutoSaveCore.scheduler().onServerTick(getCurrentSmoothedTickTime(), remainingSeconds);
         DiagnosticLogger diag = BetterAutoSaveCore.diagnosticLogger();
         if (diag != null) {
             diag.onServerTick();
