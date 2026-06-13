@@ -1,9 +1,9 @@
 package com.shinoyuki.betterautosave.core.worker;
 
-import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.util.ServerThreadAssert;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -11,7 +11,7 @@ import java.util.function.LongConsumer;
 
 public final class SerializationWorker implements Runnable {
 
-    private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
+    private static final Logger LOGGER = LoggerFactory.getLogger("BetterAutoSave");
 
     private final BlockingQueue<SaveTask> queue;
     private final SaveMetrics metrics;

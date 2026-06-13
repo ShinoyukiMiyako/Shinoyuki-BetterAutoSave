@@ -1,12 +1,12 @@
 package com.shinoyuki.betterautosave.diagnostic;
 
-import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class DiagnosticLogger {
 
-    private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
+    private static final Logger LOGGER = LoggerFactory.getLogger("BetterAutoSave");
 
     private final SaveMetrics metrics;
     private int tickCounter;

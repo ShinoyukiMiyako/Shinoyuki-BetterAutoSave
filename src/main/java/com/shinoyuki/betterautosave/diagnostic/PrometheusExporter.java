@@ -1,9 +1,9 @@
 package com.shinoyuki.betterautosave.diagnostic;
 
-import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class PrometheusExporter {
 
-    private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
+    private static final Logger LOGGER = LoggerFactory.getLogger("BetterAutoSave");
     private static final String METRICS_PATH = "/metrics";
     private static final String CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
     private static final int BACKLOG = 4;

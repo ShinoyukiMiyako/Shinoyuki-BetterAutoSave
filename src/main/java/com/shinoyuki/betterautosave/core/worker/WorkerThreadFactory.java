@@ -1,14 +1,14 @@
 package com.shinoyuki.betterautosave.core.worker;
 
-import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class WorkerThreadFactory implements ThreadFactory {
 
-    private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
+    private static final Logger LOGGER = LoggerFactory.getLogger("BetterAutoSave");
 
     private final String namePrefix;
     private final Runnable onUncaught;
