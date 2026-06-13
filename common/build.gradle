@@ -1,0 +1,29 @@
+plugins {
+    id 'java-library'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = "${mod_id}-common"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // slf4j 是 common 唯一外部依赖 (DiagnosticLogger / PrometheusExporter / SerializationWorker / WorkerThreadFactory 的日志)。
+    // common 自身不在运行期独立加载 (被 forge/neoforge source-merge 重编), 运行期 slf4j 由 loader 的 MC 提供, 故 compileOnly。
+    compileOnly 'org.slf4j:slf4j-api:2.0.7'
+}
