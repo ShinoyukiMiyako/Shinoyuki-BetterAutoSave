@@ -215,6 +215,18 @@ public final class ChunkCaptureProcedure {
         if (mode == ConfigSpec.EventCompatMode.FULL) {
             preBuiltFullTag = ChunkSerializer.write(level, chunk);
         } else {
+            // Forge: LevelChunk 的区块 capability (ForgeCaps) 必须在主线程取 (cap provider 非线程安全),
+            // 复刻 1.20.1 Forge ChunkSerializer.write 末尾对 LevelChunk 无条件追加的 ForgeCaps 字段。手拼 core
+            // tag 漏此字段会让任何挂区块 cap 的 mod (issue #8: illusion) 异步存档时静默丢数据。FULL 走真
+            // ChunkSerializer.write 已含; 异常吞掉记录与 Forge patch 同 (单个 cap provider 故障不连累整块落盘)。
+            CompoundTag forgeCaps;
+            try {
+                forgeCaps = chunk.writeCapsToNBT();
+            } catch (Exception e) {
+                LOGGER.error("[BetterAutoSave] chunk {} capability 写出抛异常, 本次存档不含 ForgeCaps "
+                        + "(cap provider 序列化故障, 请联系对应 mod 作者)", pos, e);
+                forgeCaps = null;
+            }
             preBuiltCoreTag = buildCoreTag(
                     level,
                     pos,
@@ -233,7 +245,8 @@ public final class ChunkCaptureProcedure {
                     postProcessing,
                     upgradeData,
                     blendingData,
-                    belowZeroRetrogen);
+                    belowZeroRetrogen,
+                    forgeCaps);
         }
 
         return new ChunkSnapshot(
@@ -304,7 +317,8 @@ public final class ChunkCaptureProcedure {
             ShortList[] postProcessing,
             UpgradeData upgradeData,
             BlendingData blendingData,
-            BelowZeroRetrogen belowZeroRetrogen) {
+            BelowZeroRetrogen belowZeroRetrogen,
+            CompoundTag forgeCaps) {
         CompoundTag tag = new CompoundTag();
         tag.putInt("DataVersion", dataVersion);
         tag.putInt("xPos", pos.x);
@@ -345,6 +359,12 @@ public final class ChunkCaptureProcedure {
         tag.put("PostProcessing", ChunkSerializer.packOffsets(postProcessing));
 
         tag.put("block_entities", blockEntitiesNbt);
+
+        // Forge 注入字段, 与 1.20.1 Forge ChunkSerializer.write 对齐 (patch: writeCapsToNBT() -> "ForgeCaps",
+        // null 即不写; caps 在 capture 处主线程取好传入)。
+        if (forgeCaps != null) {
+            tag.put("ForgeCaps", forgeCaps);
+        }
 
         return tag;
     }
