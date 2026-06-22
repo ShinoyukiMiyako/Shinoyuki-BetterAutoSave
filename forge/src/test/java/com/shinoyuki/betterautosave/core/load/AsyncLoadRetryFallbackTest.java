@@ -17,19 +17,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * 异步加载 M2 降级回退 + 边界不变式的字节码回归 (docs/ASYNC_LOAD_DESIGN.md 第六/九节)。同
+ * 异步加载 v2 降级回退 + 边界 + 跨线程交付不变式的字节码回归 (docs/ASYNC_LOAD_DESIGN.md 第六/九节)。同
  * {@link AsyncLoadSplitParityTest}: bare JUnit 无 MC 运行期 (构造 ChunkLoadTask 需 ServerLevel/ProtoChunk 等
- * MC 类, Operation 又在 compileOnly 的 mixinextras-common 不在 test 运行期), 无法真跑 execute()。故对
- * build/classes 编译产物按目标方法内调用计数断言 M2 三条不变式, deletion-sensitive (删某步 -> 计数变 -> 断言挂):
+ * MC 类), 无法真跑 execute()。故对 build/classes 编译产物按目标方法内调用计数断言, deletion-sensitive
+ * (删某步 -> 计数变 -> 断言挂):
  *
  * <ul>
  *   <li><b>worker 内重试</b>: ChunkLoadTask.execute 必须有 recordChunkLoadRetried (重试路径存在) 且每次尝试前
- *       clearForRetry (复位上次失败尝试残留的延迟副作用, 防成功那次回放叠加陈旧 POI/光照写)。</li>
+ *       clearForRetry (复位上次失败尝试残留的延迟副作用, 防成功那次带出叠加陈旧 POI/光照写)。</li>
  *   <li><b>不静默吞错</b>: 重试耗尽必须 onUnhandledError -> completeExceptionally 把 worker 解析失败异常完成
- *       future, 让 wrap 走 vanilla 主线程 read 兜底; 绝不在 worker 内吞掉异常返回半解析 chunk。</li>
+ *       future, 让 replay-stage exceptionallyAsync 走 vanilla 主线程 read 兜底; 绝不在 worker 内吞掉异常返回半解析 chunk。</li>
  *   <li><b>主线程独占断言护栏</b>: LoadDeferredActions.replayOnMainThread 必须 assertOnServerThread,
  *       ChunkLoadTask.execute 必须 assertOnWorkerThread —— 越界 (回放误跑 worker / 解析误跑主线程) 显式炸出
  *       而非静默竞态 (第六节断言护栏)。</li>
+ *   <li><b>v2 deferred 经返回值显式交付</b>: ChunkLoadTask.execute 必须在 read 成功那刻 drainCaptured 取延迟副作用
+ *       快照并构造 LoadResult 带出 (v2 不靠 v1 的 join 隐式共享传 deferred; 删掉显式交付退回隐式共享此断言挂)。</li>
  * </ul>
  */
 class AsyncLoadRetryFallbackTest {
@@ -131,5 +133,33 @@ class AsyncLoadRetryFallbackTest {
         MethodNode execute = loadMethod("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "execute");
         assertEquals(1, countCalls(execute, "assertOnWorkerThread"),
                 "execute 必须 assertOnWorkerThread: 纯解析误在主线程内联 (堵 tick) 立刻炸出");
+    }
+
+    /**
+     * v2 跨线程交付: worker read-stage 必须把截走的 deferred 副作用经 {@code drainCaptured} 取快照、构造
+     * {@code LoadResult} 显式作为 future 值带出 (而非 v1 "主线程预持列表 + join 等可见" 的隐式共享)。删掉显式交付
+     * 退回隐式 join 共享 -> drainCaptured 计数归零或 LoadResult 不再构造 -> 断言挂。
+     */
+    @Test
+    void execute_hands_deferred_out_via_return_value() throws IOException {
+        MethodNode execute = loadMethod("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "execute");
+        assertEquals(1, countCalls(execute, "drainCaptured"),
+                "execute 必须在 read 成功那刻 drainCaptured 取延迟副作用快照 (随即封进 LoadResult 交给 future); "
+                        + "缺失说明 deferred 没被显式带出, 退回 v1 的 join 隐式共享");
+        assertTrue(countConstructorsOf(execute, "com/shinoyuki/betterautosave/core/load/LoadResult") >= 1,
+                "execute 必须构造 LoadResult(chunk, deferred) 把解析结果 + 延迟副作用一并经 future 值显式交给 "
+                        + "replay-stage; 缺失说明 worker 没把产物经返回值流给主线程");
+    }
+
+    /** 统计 method 内对指定 owner 的构造调用 (INVOKESPECIAL <init>)。 */
+    private int countConstructorsOf(MethodNode m, String ownerInternalName) {
+        int n = 0;
+        for (AbstractInsnNode insn : m.instructions.toArray()) {
+            if (insn instanceof MethodInsnNode call
+                    && call.name.equals("<init>") && call.owner.equals(ownerInternalName)) {
+                n++;
+            }
+        }
+        return n;
     }
 }

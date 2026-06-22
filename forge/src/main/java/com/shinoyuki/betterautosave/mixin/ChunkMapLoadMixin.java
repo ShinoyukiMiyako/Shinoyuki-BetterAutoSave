@@ -1,101 +1,138 @@
 package com.shinoyuki.betterautosave.mixin;
 
-import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.mojang.datafixers.util.Either;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.load.ChunkLoadTask;
 import com.shinoyuki.betterautosave.core.load.LoadDeferredActions;
+import com.shinoyuki.betterautosave.core.load.LoadResult;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.ai.village.poi.PoiManager;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import org.slf4j.Logger;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
+
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 /**
- * v0.x 异步加载核心钩子: 用 MixinExtras {@link WrapOperation} 包住 {@code ChunkMap.scheduleChunkLoad} 内对
- * {@code ChunkSerializer.read} 的 INVOKESTATIC, 把整段 read 改投独立 load worker 跑纯解析 (read 内的 POI 一致性 /
- * 光照 section 数据 / ChunkDataEvent.Load 派发由 {@link ChunkSerializerLoadMixin} 的 redirect 截走, 主线程回放)。
+ * 异步加载 v2 核心钩子 (future 链, 非阻塞): {@code @Redirect} 截走 {@code ChunkMap.scheduleChunkLoad} 内
+ * {@code readChunk().thenApply(Status 过滤).thenApplyAsync(read+markPosition, mainThreadExecutor)} 那次
+ * {@code thenApplyAsync(Function, Executor)} 调用 (ChunkMap.java:575/584, 反编译金源 bytecode offset 25 唯一一处
+ * {@code thenApplyAsync(Function,Executor)}), 在 handler 内重建两段 future 链:
+ * <ul>
+ *   <li>worker read-stage: 把 vanilla 那段 read lambda 拆出的纯解析投到 load worker ({@link ChunkLoadTask},
+ *       read 内 POI/光照/ChunkDataEvent.Load 副作用由 {@link ChunkSerializerLoadMixin} 的 redirect 截走);</li>
+ *   <li>main replay-stage: worker 解析完经 {@code thenApplyAsync(mainThreadExecutor)} 在主线程回放截走的副作用 +
+ *       {@code markPosition} + {@code Either.left(chunk)}。</li>
+ * </ul>
  *
- * <p>vanilla 该 INVOKE 已跑在 {@code thenApplyAsync(..., this.mainThreadExecutor)} 续段里 (ChunkMap.java:575/578),
- * 即本 wrap 进入时已在主线程。WrapOperation 契约要求<b>同步</b>返回 ProtoChunk, 无法把返回值变 future, 故 PARTIAL
- * 路径在 wrap 内 {@code result.join()} 阻塞等 worker 解析完, 再在主线程回放延迟副作用后返回。结构性后果: join 期间
- * 主线程被钉住 (BlockableEventLoop 不处理其他 mailbox 任务), CPU 重活搬到 worker 核但主线程空转等待 —— 净收益
- * 取决于 join 等待能否被其他工作填充, 是设计第七节 "实际回收 %" 决策级风险, 须 M0 spark 实测 (见 docs 与本类
- * 末尾说明)。
+ * <p>v2 相对 v1 的根本差异: v1 用 {@code @WrapOperation} 包内层 read 的 INVOKESTATIC, MixinExtras
+ * {@code Operation<ProtoChunk>} 契约要求 handler <b>同步</b>返回 ProtoChunk, 无法把返回值变 future, 故 v1 被迫
+ * {@code result.join()} <b>阻塞</b>主线程等 worker —— 20x 飞行压测 profile 实证主线程本就 ~40% 在 park 等管线,
+ * join 只是把 "主线程自己 deserialize" 换成 "主线程 park 等 worker deserialize", 墙钟一样、Can't-keep-up stall
+ * 照憋。v2 钩点上移到 {@code thenApplyAsync}, handler 把 "一段 future" 换成 "两段 future", 全程
+ * {@code thenComposeAsync}/{@code thenApplyAsync} 链接<b>无 join/get</b>: 主线程跑完 handler 返回的是未完成 future,
+ * 直接交回 vanilla 链继续 tick / 发别的区块, worker 并行 deserialize, 真正消除 stall。
  *
- * <p>闸门 (任一不过 -> {@code original.call} 即 vanilla 主线程 read, 零偏差兜底): 未安装 / load.enabled=false /
- * loadEventCompatMode=FULL / pipeline degraded / load 池未起线程 / wrap 不在主线程。worker 解析抛或 degraded 逐出
- * 时, future 异常完成, 同样回退 vanilla 主线程 read (read 只读磁盘字节, 重读零数据丢失)。
+ * <p>闸门 (任一不过 -> 原样调 {@code prior.thenApplyAsync(readLambda, mainExec)} 即 vanilla 单段主线程 read,
+ * 零偏差兜底): 未安装 / load.enabled=false / loadEventCompatMode=FULL / pipeline degraded / load 池未起线程。
+ *
+ * <p>失败贯通: worker 解析抛 (重试耗尽) 或 degraded 逐出时 {@code ChunkLoadTask.result()} 异常完成, replay-stage
+ * 的 {@code thenApplyAsync} 短路, 续上的 {@code exceptionallyAsync(mainThreadExecutor)} 在主线程重读 vanilla read
+ * 兜底 (read 只读磁盘字节, 重读零数据丢失); 主线程重读再抛 (真损坏区块) 自然冒泡进 vanilla scheduleChunkLoad 自己
+ * 的 {@code exceptionallyAsync(handleChunkLoadFailure)}, 与 vanilla read 抛同样建空 chunk。三个 vanilla 失败分支
+ * (isChunkDataValid / handleChunkLoadFailure / createEmptyChunk) 一行不改即生效 (见设计第四节)。
  */
 @Mixin(ChunkMap.class)
 public abstract class ChunkMapLoadMixin {
 
     private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
 
-    @WrapOperation(
-            method = "scheduleChunkLoad",
+    @Shadow
+    @Final
+    ServerLevel level;
+
+    @Shadow
+    @Final
+    private PoiManager poiManager;
+
+    @Redirect(method = "scheduleChunkLoad",
             at = @At(value = "INVOKE",
-                    target = "Lnet/minecraft/world/level/chunk/storage/ChunkSerializer;"
-                            + "read(Lnet/minecraft/server/level/ServerLevel;"
-                            + "Lnet/minecraft/world/entity/ai/village/poi/PoiManager;"
-                            + "Lnet/minecraft/world/level/ChunkPos;"
-                            + "Lnet/minecraft/nbt/CompoundTag;)"
-                            + "Lnet/minecraft/world/level/chunk/ProtoChunk;"))
-    private ProtoChunk betterautosave$wrapRead(ServerLevel level, PoiManager poi, ChunkPos pos, CompoundTag tag,
-                                               Operation<ProtoChunk> original) {
+                    target = "Ljava/util/concurrent/CompletableFuture;"
+                            + "thenApplyAsync(Ljava/util/function/Function;Ljava/util/concurrent/Executor;)"
+                            + "Ljava/util/concurrent/CompletableFuture;"))
+    private CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> betterautosave$asyncLoadChain(
+            CompletableFuture<Optional<CompoundTag>> prior,
+            Function<Optional<CompoundTag>, Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>> readLambda,
+            Executor mainExec,
+            ChunkPos pos) {
         if (!BetterAutoSaveCore.isInstalled() || !BetterAutoSaveConfig.loadEnabled()
                 || BetterAutoSaveConfig.loadEventCompatMode() == ConfigSpec.LoadCompatMode.FULL) {
-            return original.call(level, poi, pos, tag);
+            return prior.thenApplyAsync(readLambda, mainExec);
         }
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
         if (pipeline == null || pipeline.isDegraded() || !pipeline.isLoadPoolActive()) {
-            return original.call(level, poi, pos, tag);
+            return prior.thenApplyAsync(readLambda, mainExec);
         }
         SaveMetrics metrics = BetterAutoSaveCore.metrics();
         MinecraftServer server = pipeline.server();
         if (metrics == null || server == null) {
-            return original.call(level, poi, pos, tag);
-        }
-        // 防御性主线程校验: vanilla thenApplyAsync(mainThreadExecutor) 保证本 wrap 在主线程, 但未来 coremod 若改
-        // 续段线程, 在非主线程跑 join + 主线程回放会破坏 LoadDeferredActions 的线程契约。非主线程直接走 vanilla。
-        if (!((com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor) this)
-                .betterautosave$getMainThreadExecutor().isSameThread()) {
-            return original.call(level, poi, pos, tag);
+            return prior.thenApplyAsync(readLambda, mainExec);
         }
 
-        LoadDeferredActions deferred = new LoadDeferredActions();
-        ChunkLoadTask task = new ChunkLoadTask(original, level, poi, pos, tag, deferred, metrics,
-                BetterAutoSaveConfig.loadMaxRetries());
-        metrics.recordChunkLoadSubmitted();
-        pipeline.loadWorkerQueue().offer(task);
-        try {
-            // join 阻塞主线程等 worker 解析。worker 异常完成 (解析抛 / degraded 逐出) -> join 抛 CompletionException。
-            ProtoChunk parsed = task.result().join();
-            // 主线程顺序回放 worker 期间被 redirect 截走的 POI/光照/ChunkDataEvent.Load 副作用, 在该 ProtoChunk
-            // 被 protoChunkToFullChunk 消费前落到 ServerLevel 全局状态 (与 vanilla read 同步完成等价)。回放抛
-            // (第三方 Load listener 故障等) 自然冒泡进 vanilla scheduleChunkLoad 的 exceptionallyAsync, 与 vanilla
-            // read 抛同样落 handleChunkLoadFailure, 不在此生吞。
-            deferred.replayOnMainThread(server);
-            metrics.recordChunkLoadCompleted();
-            return parsed;
-        } catch (Throwable t) {
-            // 仅 worker 解析阶段失败回退 vanilla 主线程 read (replay 阶段的异常已在 try 内 replay 后, 不进本 catch
-            // 重跑 —— replay 抛走上面的自然冒泡)。此处 original.call 在主线程重读: 若 chunk 真损坏会再抛, 冒泡进
-            // vanilla handleChunkLoadFailure 建空 chunk, 与不装 BAS 等价。
-            metrics.recordChunkLoadFallback();
-            LOGGER.error("[BetterAutoSave] async load deserialize failed for chunk {} dim={}, falling back to vanilla "
-                            + "main-thread read", pos, level.dimension().location(), t);
-            return original.call(level, poi, pos, tag);
-        }
+        // 第一段编排仍在 mainThreadExecutor 起跳 (廉价: 只判 Optional + offer 队列, 不阻塞)。prior 是 :566 Status
+        // 过滤 thenApply 产出的 future, 此刻可能尚未完成 (readChunk 后台 IO), 故经 thenComposeAsync 续接绝不在 handler
+        // 内同步 join prior。
+        return prior.thenComposeAsync(opt -> {
+            if (opt.isEmpty()) {
+                // Status 缺失被 :566 过滤成空 -> 等价 vanilla :582 createEmptyChunk。直接在主线程跑 vanilla readLambda
+                // (它对空 Optional 走 createEmptyChunk), 零偏差兜底, 不投 worker。
+                return CompletableFuture.completedFuture(readLambda.apply(opt));
+            }
+            CompoundTag tag = opt.get();
+            ChunkLoadTask task = new ChunkLoadTask(level, poiManager, pos, tag, metrics,
+                    BetterAutoSaveConfig.loadMaxRetries());
+            metrics.recordChunkLoadSubmitted();
+            pipeline.loadWorkerQueue().offer(task);
+            // worker read-stage -> main replay-stage。replay 与 Either.left(chunk) 同在一个 mainThreadExecutor 任务内
+            // 顺序执行: replay 把 worker 截走的 POI/光照/事件副作用落回主线程, 严格先于该任务 return -> 严格先于
+            // scheduleChunkLoad 返回的 EMPTY future 完成 -> 严格先于下游 protoChunkToFullChunk 消费 ProtoChunk
+            // (CompletableFuture complete -> 续段 happens-before), 与 vanilla read 内同步完成 POI/光照后才返回等价。
+            return task.result().<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>thenApplyAsync(loadResult -> {
+                LoadDeferredActions.replayOnMainThread(server, loadResult.deferred());
+                ((ChunkMapAccessor) this).betterautosave$markPosition(pos,
+                        loadResult.chunk().getStatus().getChunkType());
+                metrics.recordChunkLoadCompleted();
+                return Either.left(loadResult.chunk());
+            }, mainExec).exceptionallyAsync(throwable -> {
+                // worker 解析失败 (重试耗尽) / degraded 逐出 -> 异常完成短路到这里。exceptionallyAsync(mainExec) 强制
+                // fallback 重读跑在主线程 (绝不能跑在完成异常的 worker 线程: 那样 readLambda 内 POI/光照 redirect 因
+                // current()==null 走 inline -> worker 跨线程写 PoiManager 崩)。主线程重读 = vanilla 本来的行为, 仅失败
+                // 罕路径, 墙钟与 vanilla 主线程 read 相当。readLambda.apply(opt) 含 markPosition + Either.left, opt 非空
+                // 走真实 read; 若区块真损坏再抛, 冒泡进 vanilla 自己的 exceptionallyAsync(handleChunkLoadFailure) 建空
+                // chunk, 与不装 BAS 等价。
+                metrics.recordChunkLoadFallback();
+                LOGGER.error("[BetterAutoSave] async load deserialize failed for chunk {} dim={}, falling back to "
+                        + "vanilla main-thread read", pos, level.dimension().location(), throwable);
+                return readLambda.apply(opt);
+            }, mainExec);
+        }, mainExec);
     }
 }
