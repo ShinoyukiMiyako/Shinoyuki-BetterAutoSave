@@ -163,8 +163,16 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
 
         ChunkSaveTask task = new ChunkSaveTask(snapshot, level, ioBridge, metrics, latencyTracker, chunkRecoveryQueue,
                 chunkPendingReoffer(level));
+        // inc serializing 紧贴 offer, 由 offer 成败决定 inc 去留 (与 SavedDataDispatch / reoffer sink 同不变式)。
+        // offer 抛 (无界队列分配 Node 时 OOM) 则无 task 会 execute 来 dec -> serializing 永久 +1 毒化 drainPending
+        // 收敛与 Prometheus。抛前 dec 回再上抛, 交调用方 (ChunkMapSaveMixin) recoverAfterDispatchFailure 走 vanilla 兜底。
         metrics.incInFlightSerializing();
-        chunkWorkerQueue.offer(task);
+        try {
+            chunkWorkerQueue.offer(task);
+        } catch (Throwable t) {
+            metrics.decInFlightSerializing();
+            throw t;
+        }
         return true;
     }
 
@@ -254,7 +262,47 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             LOGGER.error("[BetterAutoSave] entered DEGRADED mode; all saves fall back to vanilla synchronous path");
             // 单向闩锁首次翻转才 fire, 保证下游 (BetterBackup) 每进程最多收一次降级信号.
             SaveListenerRegistry.firePipelineDegraded();
+            // worker 全灭后队列里已 capture 但未 execute 的 task 永无人消费: 它们在 dispatch 时已
+            // setUnsaved(false)/setDirty(false) + inc serializing, 不善后则数据被 vanilla 关服 flush 当"已存"跳过
+            // 而永久静默丢失, 且 serializing gauge 永久正偏移。逐出残留 task 善后 (chunk/savedData 还原可重写标志
+            // 走 vanilla 兜底, entity 无坐标恢复仅 ERROR 明示)。本方法可能跑在死 worker 的 uncaught handler 线程,
+            // 故各 abandon 只做线程安全操作 (AtomicLong dec / CAS / ConcurrentQueue offer / setDirty), 绝不在此
+            // setUnsaved (非线程安全, 交主线程 drainChunkRecoveryQueue 还原)。
+            drainStrandedOnDegrade();
         }
+    }
+
+    /**
+     * degraded 翻转后逐出三条 worker 队列里已 capture 未 execute 的残留 task 并善后。与存活 worker 的 poll
+     * 天然互斥 (LinkedBlockingQueue.poll 原子, 每个 task 只被存活 worker execute 或本 drain 二选一处理, 无双发),
+     * 故无需额外锁。残窗: 某 dispatch 已过 degraded 闸门但尚未 offer 的 task 可能在本 drain 之后入队而漏掉,
+     * 概率极低 (须与 worker 全灭精确同窗), 不为此引主线程锁。
+     */
+    private void drainStrandedOnDegrade() {
+        int chunkN = drainQueueOnDegrade(chunkWorkerQueue);
+        int entityN = drainQueueOnDegrade(entityWorkerQueue);
+        int savedDataN = drainQueueOnDegrade(savedDataWorkerQueue);
+        if (chunkN + entityN + savedDataN > 0) {
+            LOGGER.error("[BetterAutoSave] DEGRADED: drained {} chunk + {} entity + {} savedData stranded tasks "
+                            + "(chunk/savedData restored for vanilla flush; entity increments for these chunks lost)",
+                    chunkN, entityN, savedDataN);
+        }
+    }
+
+    private static int drainQueueOnDegrade(BlockingQueue<SaveTask> queue) {
+        int n = 0;
+        SaveTask t;
+        while ((t = queue.poll()) != null) {
+            if (t instanceof ChunkSaveTask cst) {
+                cst.abandonToRecoveryOnDegrade();
+            } else if (t instanceof EntitySaveTask est) {
+                est.abandonOnDegrade();
+            } else if (t instanceof SavedDataSaveTask sdt) {
+                sdt.abandonOnDegrade();
+            }
+            n++;
+        }
+        return n;
     }
 
     public boolean isDegraded() {

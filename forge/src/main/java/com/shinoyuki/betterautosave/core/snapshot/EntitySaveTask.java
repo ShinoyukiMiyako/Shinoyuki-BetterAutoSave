@@ -311,4 +311,21 @@ public final class EntitySaveTask implements SaveTask {
             metrics.recordEntityRetried();
         }
     }
+
+    /**
+     * degraded 模式 worker 全灭、本 task 滞留队列永不 execute 时由 {@link SnapshotPipeline} 善后调用。
+     * entity 无 chunk 侧的坐标恢复队列 (实体卸载即被 vanilla 驱逐出内存, 坐标恢复无意义), 故仅配平 dispatch
+     * 时已 inc 的 serializing 与 mustDrain gauge, 并 ERROR 明示该坐标本周期实体增量丢失, 消除"只见 degraded
+     * 不知丢了哪些"的盲区。线程安全 (AtomicLong dec / 状态机单 CAS), 可在死 worker 的 uncaught handler 线程调。
+     */
+    void abandonOnDegrade() {
+        EntitySaveState state = snapshot.state();
+        metrics.decInFlightSerializing();
+        if (state.compareAndClearMustDrain()) {
+            metrics.decMustDrainPending();
+        }
+        LOGGER.error("[BetterAutoSave] entity chunk {} dim={} stranded in worker queue at DEGRADED transition; "
+                        + "its entity increment for this cycle is lost (entity path has no coordinate recovery)",
+                snapshot.pos(), snapshot.dimension().location());
+    }
 }

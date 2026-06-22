@@ -182,7 +182,15 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                     pipeline.entityPendingReoffer(worker, this));
             metrics.incInFlightSerializing();
             metrics.recordEntitySubmitted();
-            pipeline.entityWorkerQueue().offer(task);
+            // inc serializing 紧贴 offer, offer 抛 (无界队列分配 Node 时 OOM) 则无 task 会 execute 来 dec ->
+            // serializing 永久 +1 毒化 drainPending/Prometheus。抛前 dec 回再上抛, 交下方 catch 走
+            // resetAfterFallback + vanilla 兜底 (与 chunk captureAndDispatchChunk / SavedDataDispatch 同不变式)。
+            try {
+                pipeline.entityWorkerQueue().offer(task);
+            } catch (Throwable offerError) {
+                metrics.decInFlightSerializing();
+                throw offerError;
+            }
             // 复制 vanilla 在 storeEntities 非空分支末尾的副作用
             // (vanilla EntityStorage.java:108 emptyChunks.remove). 漏调会让该 chunk
             // 后续 unload→reload 时 vanilla loadEntities 命中 emptyChunks 快速路径

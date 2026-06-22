@@ -170,6 +170,10 @@ public final class EntitySaveTask implements SaveTask {
     private void onIoFailure(EntitySaveState state, CompoundTag tag, Throwable cause) {
         EntitySaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
         if (outcome == EntitySaveState.IoOutcome.FAILED_TERMINAL) {
+            // 有意偏差 (与 NeoForge 1.21 vanilla): vanilla EntityStorage.storeEntities 经 reportSaveFailureIfPresent
+            // 在 entity-chunk IO 写失败时异步写 <world>/debug/chunk-*-server.txt 诊断文件。BAS 把 IO 移到 worker,
+            // 改以 ERROR 日志 (带 dim+坐标) + 有界重试替代该 debug 文件 —— 对运维等价或更强 (日志可聚合), 且与
+            // chunk 路径 (ChunkSaveTask) 一致的系统性选择。运维改 grep "[BetterAutoSave] entity IO store failed"。
             // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
             // 杜绝"读快照 + 内部静默 clear"拆分导致的孤儿 inc 漏 dec.
             if (state.lastTransitionClearedMustDrain()) {
@@ -310,5 +314,22 @@ public final class EntitySaveTask implements SaveTask {
             // entity 无坐标恢复队列 (实体已离开内存, 坐标恢复无意义); 非终态 unhandled error 仅记数.
             metrics.recordEntityRetried();
         }
+    }
+
+    /**
+     * degraded 模式 worker 全灭、本 task 滞留队列永不 execute 时由 {@link SnapshotPipeline} 善后调用。
+     * entity 无 chunk 侧的坐标恢复队列 (实体卸载即被 vanilla 驱逐出内存, 坐标恢复无意义), 故仅配平 dispatch
+     * 时已 inc 的 serializing 与 mustDrain gauge, 并 ERROR 明示该坐标本周期实体增量丢失, 消除"只见 degraded
+     * 不知丢了哪些"的盲区。线程安全 (AtomicLong dec / 状态机单 CAS), 可在死 worker 的 uncaught handler 线程调。
+     */
+    void abandonOnDegrade() {
+        EntitySaveState state = snapshot.state();
+        metrics.decInFlightSerializing();
+        if (state.compareAndClearMustDrain()) {
+            metrics.decMustDrainPending();
+        }
+        LOGGER.error("[BetterAutoSave] entity chunk {} dim={} stranded in worker queue at DEGRADED transition; "
+                        + "its entity increment for this cycle is lost (entity path has no coordinate recovery)",
+                snapshot.pos(), snapshot.dimension().location());
     }
 }

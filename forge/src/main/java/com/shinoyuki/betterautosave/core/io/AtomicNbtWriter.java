@@ -46,24 +46,37 @@ public final class AtomicNbtWriter {
         }
         // 临时文件与目标同目录, 保证 ATOMIC_MOVE 在同一文件系统卷上 (跨卷 move 不可原子).
         File tmp = new File(target.getParentFile(), target.getName() + ".tmp");
-        try (FileOutputStream fos = new FileOutputStream(tmp)) {
-            // NbtIo.writeCompressed 内部用 try-with-resources 包 GZIPOutputStream, close 时会
-            // 关闭传入的流. 这里包一层不传播 close 的 wrapper, 让 gzip 层正常 finish (写完
-            // gzip trailer) 但保留 fos 打开, 以便随后 fsync. 不这么做的话 fos 在 writeCompressed
-            // 返回时已被关闭, getFD().sync() 抛 SyncFailedException.
-            NbtIo.writeCompressed(tag, new NonClosingOutputStream(fos));
-            fos.flush();
-            // fsync: 把 OS page cache 强制刷到物理盘. 不 fsync 时 rename 后仍可能因掉电丢内容,
-            // 因为 rename 元数据可能先于数据落盘.
-            fos.getFD().sync();
-        }
         try {
-            Files.move(tmp.toPath(), targetPath,
-                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException e) {
-            // 文件系统不支持原子 move (例如跨卷): 降级为非原子替换. 临时文件已 fsync 完整,
-            // 仍优于直接覆盖目标的写到一半崩溃风险.
-            Files.move(tmp.toPath(), targetPath, StandardCopyOption.REPLACE_EXISTING);
+            try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                // NbtIo.writeCompressed 内部用 try-with-resources 包 GZIPOutputStream, close 时会
+                // 关闭传入的流. 这里包一层不传播 close 的 wrapper, 让 gzip 层正常 finish (写完
+                // gzip trailer) 但保留 fos 打开, 以便随后 fsync. 不这么做的话 fos 在 writeCompressed
+                // 返回时已被关闭, getFD().sync() 抛 SyncFailedException.
+                NbtIo.writeCompressed(tag, new NonClosingOutputStream(fos));
+                fos.flush();
+                // fsync: 把 OS page cache 强制刷到物理盘. 不 fsync 时 rename 后仍可能因掉电丢内容,
+                // 因为 rename 元数据可能先于数据落盘.
+                fos.getFD().sync();
+            }
+            try {
+                Files.move(tmp.toPath(), targetPath,
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // 文件系统不支持原子 move (例如跨卷): 降级为非原子替换. 临时文件已 fsync 完整,
+                // 仍优于直接覆盖目标的写到一半崩溃风险.
+                Files.move(tmp.toPath(), targetPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            // 写 tmp / fsync / move 任一步失败: 删除可能残留的半截 tmp, 避免孤儿文件堆积。固定名 tmp 下次同名写
+            // 会 truncate 复用, 但若该 .dat 此后不再 dirty 则永久残留, 故进程内失败这里主动清。删除本身失败不掩盖
+            // 原 IOException (best-effort, 原异常优先上抛供调用方重试 / fallback)。掉电在 fsync 与 move 之间被
+            // kill 的孤儿本方法管不到 (进程已死), 仍靠下次同名写 truncate。
+            try {
+                Files.deleteIfExists(tmp.toPath());
+            } catch (IOException ignored) {
+                // 清理失败无关紧要, 原 IOException 优先.
+            }
+            throw e;
         }
     }
 

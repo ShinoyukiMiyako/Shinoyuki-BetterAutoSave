@@ -402,4 +402,21 @@ public final class ChunkSaveTask implements SaveTask {
         boolean terminal = outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL;
         recoveryQueue.offer(snapshot.dimension().location().toString(), snapshot.pos().toLong(), terminal);
     }
+
+    /**
+     * degraded 模式 worker 全灭、本 task 滞留队列永不 execute 时由 {@link SnapshotPipeline} 善后调用。
+     * 还原坐标进恢复队列让 vanilla 关服 flush 兜底写最新内存代, 并配平 dispatch 时已 inc 的 serializing 与
+     * (mixin 置的) mustDrain gauge —— 本 task 永不 execute, 不配平则两 gauge 永久正偏移毒化 drainPending/Prometheus。
+     * 仅 offer 坐标 (ConcurrentLinkedQueue 线程安全), 绝不在此 setUnsaved (本方法可能跑在死 worker 的 uncaught
+     * handler 线程, setUnsaved 非线程安全; 主线程 drainChunkRecoveryQueue 还原)。terminal=true 让 drain 以 ERROR
+     * 明示这是降级丢弃而非常规恢复。
+     */
+    void abandonToRecoveryOnDegrade() {
+        ChunkSaveState state = snapshot.state();
+        metrics.decInFlightSerializing();
+        if (state.compareAndClearMustDrain()) {
+            metrics.decMustDrainPending();
+        }
+        recoveryQueue.offer(snapshot.dimension().location().toString(), snapshot.pos().toLong(), true);
+    }
 }

@@ -3,9 +3,12 @@ package com.shinoyuki.betterautosave.core.snapshot;
 import com.shinoyuki.betterautosave.api.PipelineStateListener;
 import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.world.level.saveddata.SavedData;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -124,5 +127,43 @@ class SnapshotPipelineDegradedTest {
         assertFalse(drained, "degraded + 卡住的 inFlightSerializing 下 drainPending 必返 false (未真正 drain)");
         assertTrue(elapsed < 1_000L,
                 "degraded 下必须提前返回, 不空耗满 timeout, 实际耗时 " + elapsed + "ms (timeout " + timeoutMs + "ms)");
+    }
+
+    /**
+     * M2 (issue #6/#8 审查): worker 全灭触发 degraded 时, 队列里已 capture 未 execute 的 task 必须被善后,
+     * 否则数据被 vanilla 关服 flush 当"已存"跳过而静默丢失。SavedData 通道可在 bare JUnit 端到端构造 (无状态机/
+     * 无 MC 运行期依赖), 验证 triggerDegraded -> drain -> abandon 的完整链: 重新 setDirty 让 vanilla 兜底、释放
+     * 在途占位、配平 serializing gauge。删 triggerDegraded 的 drain 善后 -> savedData 仍 dirty=false -> 断言挂。
+     */
+    @Test
+    void degraded_drains_stranded_savedData_task_remarking_dirty_for_vanilla_flush() {
+        SaveMetrics metrics = new SaveMetrics();
+        SnapshotPipeline pipeline = new SnapshotPipeline(null, null, metrics);
+
+        // 模拟 mixin dispatch: 乐观清 dirty + inc serializing + add 在途占位 + 入队, 但 worker 全灭永不 execute.
+        SavedData savedData = new SavedData() {
+            @Override
+            public CompoundTag save(CompoundTag tag) {
+                return tag;
+            }
+        };
+        savedData.setDirty(false);
+        String name = "test_stranded_saveddata";
+        pipeline.savedDataInFlight().add(name);
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+                savedData, null, pipeline.savedDataInFlight());
+        metrics.incInFlightSerializing();
+        pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
+
+        // 全 worker 死亡触发 degraded -> 逐出残留 task 善后.
+        pipeline.triggerDegraded();
+
+        assertTrue(savedData.isDirty(),
+                "降级善后必须把滞留 SavedData 重新 setDirty, 否则 vanilla 关服 flush 按 dirty=false 跳过 -> 丢数据");
+        assertFalse(pipeline.savedDataInFlight().contains(name),
+                "降级善后必须释放在途文件名占位, 否则该 .dat 进程内永不再保存");
+        assertEquals(0L, metrics.snapshot().inFlightSerializing(),
+                "降级善后必须配平 serializing gauge (dispatch 的 inc 由 abandon dec)");
+        assertEquals(0, pipeline.savedDataWorkerQueue().size(), "残留 task 必须被逐出队列");
     }
 }

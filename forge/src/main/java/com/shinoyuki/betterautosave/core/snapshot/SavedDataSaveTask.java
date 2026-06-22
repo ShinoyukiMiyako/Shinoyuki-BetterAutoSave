@@ -102,4 +102,18 @@ public final class SavedDataSaveTask implements SaveTask {
             snapshot.inFlight().remove(snapshot.fileName());
         }
     }
+
+    /**
+     * degraded 模式 worker 全灭、本 task 滞留队列永不 execute 时由 {@link SnapshotPipeline} 善后调用。
+     * SavedData 在 dispatch 前已乐观 setDirty(false) + inc serializing, 本 task 永不写盘则 dirty=false 让
+     * vanilla 关服 flush 跳过 -> 丢数据。重新 setDirty 让 vanilla 同步兜底, 释放在途占位, 并配平 serializing。
+     * setDirty / ConcurrentHashMap remove / AtomicLong dec 均线程安全, 可在死 worker 的 uncaught handler 线程调。
+     */
+    void abandonOnDegrade() {
+        metrics.decInFlightSerializing();
+        snapshot.savedData().setDirty();
+        releaseInFlight();
+        LOGGER.error("[BetterAutoSave] SavedData {} stranded in worker queue at DEGRADED transition; "
+                        + "re-marked dirty for vanilla synchronous fallback", snapshot.fileName());
+    }
 }

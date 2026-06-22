@@ -156,6 +156,12 @@ public abstract class DimensionDataStorageMixin {
                 tag = new CompoundTag();
                 tag.put("data", savedData.save(new CompoundTag()));
                 NbtUtils.addCurrentDataVersion(tag);
+                // mod 的 save(CompoundTag) 可能无视入参、返回其持有的内部 live Tag (而非我们传入的新 tag)。
+                // BAS 把 vanilla 主线程同步写改成 worker 异步写, 引入了 forge 1.20.1 原本没有的并发: worker
+                // 序列化期间 mod 继续 mutate 那棵 live 子树 -> CME (只 catch IOException, 逃到重试再撞) 或写出
+                // torn / 半更新 NBT (静默损坏)。深拷贝外层即脱钩内嵌 "data" 子树的所有 live 引用, 与 NeoForge
+                // vanilla SavedData.save 的 compoundtag.copy() 同源。copy 抛 (病态 mod tag) 走下方同一 fallback。
+                tag = tag.copy();
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
                 // mod 序列化抛, 未入 worker, 释放在途占位.
