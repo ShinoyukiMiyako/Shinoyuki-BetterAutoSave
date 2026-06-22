@@ -14,6 +14,10 @@ public final class BetterAutoSaveConfig {
     private static volatile int workerThreads;
     private static volatile int entityWorkerThreads;
     private static volatile int savedDataWorkerThreads;
+    private static volatile int loadWorkerThreads;
+    private static volatile boolean loadEnabled;
+    private static volatile ConfigSpec.LoadCompatMode loadEventCompatMode;
+    private static volatile int loadMaxRetries;
     private static volatile boolean adaptiveEnabled;
     private static volatile int shutdownTimeoutSeconds;
     private static volatile int deadlineGuardSeconds;
@@ -50,6 +54,22 @@ public final class BetterAutoSaveConfig {
 
     public static int savedDataWorkerThreads() {
         return savedDataWorkerThreads;
+    }
+
+    public static int loadWorkerThreads() {
+        return loadWorkerThreads;
+    }
+
+    public static boolean loadEnabled() {
+        return loadEnabled;
+    }
+
+    public static ConfigSpec.LoadCompatMode loadEventCompatMode() {
+        return loadEventCompatMode;
+    }
+
+    public static int loadMaxRetries() {
+        return loadMaxRetries;
     }
 
     public static boolean adaptiveEnabled() {
@@ -123,6 +143,10 @@ public final class BetterAutoSaveConfig {
         workerThreads = ConfigSpec.WORKER_THREADS.get();
         entityWorkerThreads = ConfigSpec.ENTITY_WORKER_THREADS.get();
         savedDataWorkerThreads = ConfigSpec.SAVED_DATA_WORKER_THREADS.get();
+        loadWorkerThreads = ConfigSpec.LOAD_WORKER_THREADS.get();
+        loadEnabled = ConfigSpec.LOAD_ENABLED.get();
+        loadEventCompatMode = ConfigSpec.LOAD_EVENT_COMPAT_MODE.get();
+        loadMaxRetries = ConfigSpec.LOAD_MAX_RETRIES.get();
         adaptiveEnabled = ConfigSpec.ADAPTIVE_ENABLED.get();
         shutdownTimeoutSeconds = ConfigSpec.SHUTDOWN_TIMEOUT_SECONDS.get();
         deadlineGuardSeconds = ConfigSpec.DEADLINE_GUARD_SECONDS.get();

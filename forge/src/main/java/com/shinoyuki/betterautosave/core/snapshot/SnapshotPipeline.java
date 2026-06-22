@@ -5,6 +5,7 @@ import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
+import com.shinoyuki.betterautosave.core.load.ChunkLoadTask;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSubmissionSink;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
@@ -43,6 +44,10 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final BlockingQueue<SaveTask> chunkWorkerQueue = new LinkedBlockingQueue<>();
     private final BlockingQueue<SaveTask> entityWorkerQueue = new LinkedBlockingQueue<>();
     private final BlockingQueue<SaveTask> savedDataWorkerQueue = new LinkedBlockingQueue<>();
+    // 异步加载独立 worker 池 (v0.x): 与存盘三池隔离, 存盘洪峰不饿死加载。由 ChunkMapLoadMixin 的 wrap 直接
+    // offer ChunkLoadTask, 不经 SaveQueue/SaveScheduler 投递链 (加载是 vanilla 请求驱动, ChunkHolder 已对同
+    // 坐标 future 去重, 无需状态机/节流, 见设计第四节)。
+    private final BlockingQueue<SaveTask> loadWorkerQueue = new LinkedBlockingQueue<>();
 
     private final List<SerializationWorker> chunkWorkers = new ArrayList<>();
     private final List<Thread> chunkWorkerThreads = new ArrayList<>();
@@ -50,6 +55,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final List<Thread> entityWorkerThreads = new ArrayList<>();
     private final List<SerializationWorker> savedDataWorkers = new ArrayList<>();
     private final List<Thread> savedDataWorkerThreads = new ArrayList<>();
+    private final List<SerializationWorker> loadWorkers = new ArrayList<>();
+    private final List<Thread> loadWorkerThreads = new ArrayList<>();
 
     private final AtomicBoolean degraded = new AtomicBoolean(false);
     // joinWorkers 一旦请求 worker 停机即置位。接力重投 sink 据此判定: worker 已停 (关服残窗) 时再 offer
@@ -127,8 +134,37 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             savedDataWorkerThreads.add(t);
             t.start();
         }
-        LOGGER.debug("[BetterAutoSave] worker pool ready: {} chunk + {} entity + {} savedData",
-                chunkWorkers.size(), entityWorkers.size(), savedDataWorkers.size());
+
+        // 异步加载 worker 池 (v0.x). 仅当 load.enabled 才起线程; 关闭时 ChunkMapLoadMixin 的 wrap 也走 vanilla
+        // 主线程 read, 队列恒空, 不浪费线程。worker 死亡同样触发 triggerDegraded 让全 mod 退回 vanilla 路径。
+        // 加载侧无 SaveScheduler 逐 tick drain 回写深度时机 (与 savedData 同), 故注入 setLoadWorkerQueueDepth
+        // 四参构造消除 offer 峰值长期陈旧。
+        if (BetterAutoSaveConfig.loadEnabled()) {
+            WorkerThreadFactory loadFactory = new WorkerThreadFactory("BetterAutoSave-Load-Worker", this::triggerDegraded);
+            for (int i = 0; i < BetterAutoSaveConfig.loadWorkerThreads(); i++) {
+                SerializationWorker w = new SerializationWorker(
+                        "BetterAutoSave-Load-Worker-" + (i + 1),
+                        loadWorkerQueue,
+                        metrics,
+                        metrics::setLoadWorkerQueueDepth);
+                Thread t = loadFactory.newThread(w);
+                loadWorkers.add(w);
+                loadWorkerThreads.add(t);
+                t.start();
+            }
+        }
+        LOGGER.debug("[BetterAutoSave] worker pool ready: {} chunk + {} entity + {} savedData + {} load",
+                chunkWorkers.size(), entityWorkers.size(), savedDataWorkers.size(), loadWorkers.size());
+    }
+
+    /** load worker 队列, 供 ChunkMapLoadMixin 的 wrap 直接 offer ChunkLoadTask。 */
+    public BlockingQueue<SaveTask> loadWorkerQueue() {
+        return loadWorkerQueue;
+    }
+
+    /** load 池是否已起线程 (load.enabled 且至少一条 worker)。wrap 据此决定走 off-thread 还是 vanilla 主线程。 */
+    public boolean isLoadPoolActive() {
+        return !loadWorkers.isEmpty();
     }
 
     public boolean captureAndDispatchChunk(LevelChunk chunk, ServerLevel level, ChunkSaveState state) {
@@ -282,10 +318,12 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         int chunkN = drainQueueOnDegrade(chunkWorkerQueue);
         int entityN = drainQueueOnDegrade(entityWorkerQueue);
         int savedDataN = drainQueueOnDegrade(savedDataWorkerQueue);
-        if (chunkN + entityN + savedDataN > 0) {
-            LOGGER.error("[BetterAutoSave] DEGRADED: drained {} chunk + {} entity + {} savedData stranded tasks "
-                            + "(chunk/savedData restored for vanilla flush; entity increments for these chunks lost)",
-                    chunkN, entityN, savedDataN);
+        int loadN = drainQueueOnDegrade(loadWorkerQueue);
+        if (chunkN + entityN + savedDataN + loadN > 0) {
+            LOGGER.error("[BetterAutoSave] DEGRADED: drained {} chunk + {} entity + {} savedData + {} load stranded "
+                            + "tasks (chunk/savedData restored for vanilla flush; entity increments for these chunks "
+                            + "lost; load tasks fall back to vanilla main-thread read, no data loss)",
+                    chunkN, entityN, savedDataN, loadN);
         }
     }
 
@@ -299,6 +337,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
                 est.abandonOnDegrade();
             } else if (t instanceof SavedDataSaveTask sdt) {
                 sdt.abandonOnDegrade();
+            } else if (t instanceof ChunkLoadTask clt) {
+                clt.abandonOnDegrade();
             }
             n++;
         }
@@ -371,6 +411,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         for (SerializationWorker w : savedDataWorkers) {
             w.requestStop();
         }
+        for (SerializationWorker w : loadWorkers) {
+            w.requestStop();
+        }
         boolean ok = true;
         for (Thread t : chunkWorkerThreads) {
             long remaining = deadline - System.currentTimeMillis();
@@ -407,6 +450,23 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             }
         }
         for (Thread t : savedDataWorkerThreads) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                ok = false;
+                break;
+            }
+            try {
+                t.join(remaining);
+                if (t.isAlive()) {
+                    ok = false;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                ok = false;
+                break;
+            }
+        }
+        for (Thread t : loadWorkerThreads) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
                 ok = false;

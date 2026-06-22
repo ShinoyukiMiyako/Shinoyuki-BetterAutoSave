@@ -6,8 +6,10 @@
   "refmap": "shinoyuki_betterautosave.refmap.json",
   "mixins": [
     "ChunkAccessMixin",
+    "ChunkMapLoadMixin",
     "ChunkMapMixin",
     "ChunkMapSaveMixin",
+    "ChunkSerializerLoadMixin",
     "DimensionDataStorageMixin",
     "EntityStorageMixin",
     "MinecraftServerMixin",

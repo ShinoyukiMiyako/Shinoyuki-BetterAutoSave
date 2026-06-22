@@ -10,6 +10,16 @@ public final class ConfigSpec {
         DISABLED
     }
 
+    /**
+     * 异步加载切分模式。无 DISABLED 态: ChunkDataEvent.Load 不可跳 (第三方监听方假设主线程, 见
+     * docs/ASYNC_LOAD_DESIGN.md 第六节), 故最弱也是 FULL (整段 read 留主线程, 零行为偏差), 不存在
+     * "跳过事件" 的合法态。
+     */
+    public enum LoadCompatMode {
+        PARTIAL,
+        FULL
+    }
+
     private static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
 
     public static final ForgeConfigSpec.BooleanValue ENABLED;
@@ -18,12 +28,16 @@ public final class ConfigSpec {
     public static final ForgeConfigSpec.IntValue WORKER_THREADS;
     public static final ForgeConfigSpec.IntValue ENTITY_WORKER_THREADS;
     public static final ForgeConfigSpec.IntValue SAVED_DATA_WORKER_THREADS;
+    public static final ForgeConfigSpec.IntValue LOAD_WORKER_THREADS;
     public static final ForgeConfigSpec.BooleanValue ADAPTIVE_ENABLED;
     public static final ForgeConfigSpec.IntValue SHUTDOWN_TIMEOUT_SECONDS;
     public static final ForgeConfigSpec.IntValue DEADLINE_GUARD_SECONDS;
     public static final ForgeConfigSpec.IntValue MAX_RETRIES;
     public static final ForgeConfigSpec.IntValue SAVED_DATA_MAX_FILE_SIZE_MB;
     public static final ForgeConfigSpec.EnumValue<EventCompatMode> EVENT_COMPAT_MODE;
+    public static final ForgeConfigSpec.BooleanValue LOAD_ENABLED;
+    public static final ForgeConfigSpec.EnumValue<LoadCompatMode> LOAD_EVENT_COMPAT_MODE;
+    public static final ForgeConfigSpec.IntValue LOAD_MAX_RETRIES;
     public static final ForgeConfigSpec.BooleanValue DIAGNOSTIC_LOGGING;
     public static final ForgeConfigSpec.IntValue DIAGNOSTIC_LOG_INTERVAL_TICKS;
     public static final ForgeConfigSpec.BooleanValue PROMETHEUS_ENABLED;
@@ -83,6 +97,12 @@ public final class ConfigSpec {
                          "Bump to 2 if you run mods with many large SavedData files (e.g. MTR, ANTE).")
                 .defineInRange("savedDataWorkerThreads", 1, 1, 4);
 
+        LOAD_WORKER_THREADS = BUILDER
+                .comment("v0.x: threads dedicated to off-thread chunk deserialization (async load).",
+                         "Independent pool from chunk-save workers so a save backlog cannot starve loads.",
+                         "Deserialize is largely single-thread bound; 2 covers typical loads.")
+                .defineInRange("loadWorkerThreads", 2, 1, 8);
+
         BUILDER.pop();
 
         BUILDER.comment("Failure handling and shutdown").push("safety");
@@ -122,6 +142,36 @@ public final class ConfigSpec {
                          "  Use only when you are certain no listener mod relies on ChunkDataEvent.Save.",
                          "  Saves the per-chunk event dispatch overhead but breaks any mod that hooks Save.")
                 .defineEnum("eventCompatMode", EventCompatMode.PARTIAL);
+
+        BUILDER.pop();
+
+        BUILDER.comment("v0.x: Async chunk load (off-thread ChunkSerializer.read)").push("load");
+
+        LOAD_ENABLED = BUILDER
+                .comment("Master switch for async chunk loading. When false, ChunkSerializer.read stays entirely on",
+                         "the main thread (vanilla behavior), independent of the global 'enabled' save switch.",
+                         "Default false: opt-in until the off-thread load path is proven on your modpack.")
+                .define("enabled", false);
+
+        LOAD_EVENT_COMPAT_MODE = BUILDER
+                .comment("Async chunk-load split mode (v0.x).",
+                         "PARTIAL (default): pure NBT->object deserialization runs on a load worker; POI consistency,",
+                         "  light section data, and ChunkDataEvent.Load are deferred back to the main thread.",
+                         "FULL: the entire ChunkSerializer.read stays on the main thread (feature off for this dimension's",
+                         "  loads, zero behavior delta). Use as a per-config safety fallback if a mod misbehaves.",
+                         "There is intentionally no DISABLED: ChunkDataEvent.Load must always fire on the main thread,",
+                         "  so the weakest mode is FULL (everything on main), never 'skip the event'.")
+                .defineEnum("loadEventCompatMode", LoadCompatMode.PARTIAL);
+
+        LOAD_MAX_RETRIES = BUILDER
+                .comment("Times a load worker re-attempts ChunkSerializer.read on the worker thread after a parse",
+                         "throws, before giving up and falling back to a vanilla main-thread read.",
+                         "Off-thread parse failures are almost always transient (a Codec dispatch cache races a",
+                         "concurrent decode despite the guard, or a DataFixer cache hiccup); a single retry usually",
+                         "clears it without paying the main-thread fallback cost. 0 disables retry (fall back on first throw).",
+                         "The terminal fallback re-reads the same region bytes on the main thread, so no data is lost",
+                         "regardless of this value.")
+                .defineInRange("loadMaxRetries", 1, 0, 5);
 
         BUILDER.pop();
 

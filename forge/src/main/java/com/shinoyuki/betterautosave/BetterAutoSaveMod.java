@@ -87,6 +87,9 @@ public final class BetterAutoSaveMod {
                 BetterAutoSaveConfig.adaptiveEnabled(),
                 BetterAutoSaveConfig.deadlineGuardSeconds());
         LOGGER.info("[BetterAutoSave]   |- event compat: {}", BetterAutoSaveConfig.eventCompatMode());
+        LOGGER.info("[BetterAutoSave]   |- async load: enabled={} mode={} workers={}",
+                BetterAutoSaveConfig.loadEnabled(), BetterAutoSaveConfig.loadEventCompatMode(),
+                BetterAutoSaveConfig.loadWorkerThreads());
         LOGGER.info("[BetterAutoSave]   `- config: {}/{}/common.toml", SERIES_CONFIG_DIR, MOD_ID);
         if (BetterAutoSaveConfig.eventCompatMode() == ConfigSpec.EventCompatMode.DISABLED) {
             LOGGER.warn("[BetterAutoSave] eventCompatMode=DISABLED: ChunkDataEvent.Save listeners will NOT fire. "

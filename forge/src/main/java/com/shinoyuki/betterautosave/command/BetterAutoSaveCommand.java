@@ -89,6 +89,23 @@ public final class BetterAutoSaveCommand {
         out.append("Completed: ").append(s.savedDataCompleted()).append('\n');
         out.append("Failed: ").append(s.savedDataFailed()).append('\n');
         out.append("Fallback: ").append(s.savedDataFallback()).append('\n');
+        out.append("\n-- Async Load (v0.x) --\n");
+        out.append("LoadEnabled: ").append(BetterAutoSaveConfig.loadEnabled()).append('\n');
+        out.append("LoadCompatMode: ").append(BetterAutoSaveConfig.loadEventCompatMode()).append('\n');
+        out.append("LoadWorkerThreads: ").append(BetterAutoSaveConfig.loadWorkerThreads()).append('\n');
+        out.append("LoadWorkerQueueDepth: ").append(s.loadWorkerQueueDepth()).append('\n');
+        out.append("In-flight parsing: ").append(s.inFlightLoadParsing())
+                .append('/').append(BetterAutoSaveConfig.loadWorkerThreads()).append('\n');
+        out.append("Submitted: ").append(s.chunksLoadSubmitted()).append('\n');
+        out.append("Completed: ").append(s.chunksLoadCompleted()).append('\n');
+        out.append("Retried: ").append(s.chunksLoadRetried()).append('\n');
+        out.append("Fallback: ").append(s.chunksLoadFallback()).append('\n');
+        out.append("Deserialize count/avg: ").append(s.loadDeserialize().count())
+                .append('/').append(SaveMetrics.formatLatencyUs(s.loadDeserialize().avgNs())).append("\n");
+        out.append("Deserialize p50/p99/max: ")
+                .append(SaveMetrics.formatLatencyUs(s.loadDeserialize().p50Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.loadDeserialize().p99Ns())).append("/")
+                .append(SaveMetrics.formatLatencyUs(s.loadDeserialize().maxNs())).append("\n");
         out.append("\n-- Queue --\n");
         out.append("Worker queue depth: ").append(s.workerQueueDepth()).append('\n');
         out.append("In-flight serializing: ").append(s.inFlightSerializing()).append('\n');

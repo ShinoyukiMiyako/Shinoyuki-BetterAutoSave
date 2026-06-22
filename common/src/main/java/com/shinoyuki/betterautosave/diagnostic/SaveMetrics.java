@@ -70,15 +70,30 @@ public final class SaveMetrics {
     private final LongAdder savedDataFailed = new LongAdder();
     private final LongAdder savedDataFallback = new LongAdder();
 
+    // 异步加载侧计数 (v0.x). submitted=投递到 load worker, completed=worker 解析成功并由主线程取走结果,
+    // retried=worker 单次解析抛后在 worker 内重试 read 的次数 (每次重试 +1, 与存盘 chunksRetried 对称),
+    // fallback=PARTIAL 路径放弃 (FULL/degraded/重试耗尽仍抛) 退回 vanilla 主线程 read。
+    private final LongAdder chunksLoadSubmitted = new LongAdder();
+    private final LongAdder chunksLoadCompleted = new LongAdder();
+    private final LongAdder chunksLoadRetried = new LongAdder();
+    private final LongAdder chunksLoadFallback = new LongAdder();
+
     private final Histogram mainThreadCaptureNs = new Histogram();
     private final Histogram workerNbtBuildNs = new Histogram();
     private final Histogram ioStoreLatencyNs = new Histogram();
     private final Histogram eventDispatchNs = new Histogram();
+    // worker 纯解析耗时 (off-thread read), 与存盘侧 workerNbtBuildNs 对称但语义相反 (读 vs 写)。
+    private final Histogram loadDeserializeNs = new Histogram();
 
     private final AtomicLong workerQueueDepth = new AtomicLong();
     private final AtomicLong savedDataQueueDepth = new AtomicLong();
+    private final AtomicLong loadWorkerQueueDepth = new AtomicLong();
     private final AtomicLong inFlightSerializing = new AtomicLong();
     private final AtomicLong inFlightIoPending = new AtomicLong();
+    // load worker 占用 (并发跑 ChunkLoadTask.execute 的 worker 数). 与 loadWorkerQueueDepth (排队积压) 正交:
+    // 队列深度量待处理积压, 本 gauge 量正在解析的占用。受 LoadCodecGuard 串行化, 真正 decode 同时仅一个, 但多
+    // worker 可同时进 execute 阻塞在锁上, 故该值峰值到 loadWorkerThreads 即表 worker 全忙 + 锁竞争饱和。
+    private final AtomicLong inFlightLoadParsing = new AtomicLong();
 
     public void recordChunkSubmitted() {
         chunksSubmitted.increment();
@@ -156,6 +171,30 @@ public final class SaveMetrics {
         savedDataFallback.increment();
     }
 
+    public void recordChunkLoadSubmitted() {
+        chunksLoadSubmitted.increment();
+    }
+
+    public void recordChunkLoadCompleted() {
+        chunksLoadCompleted.increment();
+    }
+
+    public void recordChunkLoadRetried() {
+        chunksLoadRetried.increment();
+    }
+
+    public void recordChunkLoadFallback() {
+        chunksLoadFallback.increment();
+    }
+
+    public void recordLoadDeserializeNs(long nanos) {
+        loadDeserializeNs.add(nanos);
+    }
+
+    public void setLoadWorkerQueueDepth(long depth) {
+        loadWorkerQueueDepth.set(depth);
+    }
+
     public void recordCaptureNs(long nanos) {
         mainThreadCaptureNs.add(nanos);
     }
@@ -196,6 +235,14 @@ public final class SaveMetrics {
         inFlightIoPending.decrementAndGet();
     }
 
+    public void incInFlightLoadParsing() {
+        inFlightLoadParsing.incrementAndGet();
+    }
+
+    public void decInFlightLoadParsing() {
+        inFlightLoadParsing.decrementAndGet();
+    }
+
     public Snapshot snapshot() {
         return new Snapshot(
                 chunksSubmitted.sum(),
@@ -223,7 +270,14 @@ public final class SaveMetrics {
                 workerQueueDepth.get(),
                 savedDataQueueDepth.get(),
                 inFlightSerializing.get(),
-                inFlightIoPending.get()
+                inFlightIoPending.get(),
+                chunksLoadSubmitted.sum(),
+                chunksLoadCompleted.sum(),
+                chunksLoadRetried.sum(),
+                chunksLoadFallback.sum(),
+                loadDeserializeNs.snapshot(),
+                loadWorkerQueueDepth.get(),
+                inFlightLoadParsing.get()
         );
     }
 
@@ -316,7 +370,14 @@ public final class SaveMetrics {
             long workerQueueDepth,
             long savedDataQueueDepth,
             long inFlightSerializing,
-            long inFlightIoPending
+            long inFlightIoPending,
+            long chunksLoadSubmitted,
+            long chunksLoadCompleted,
+            long chunksLoadRetried,
+            long chunksLoadFallback,
+            HistogramSnapshot loadDeserialize,
+            long loadWorkerQueueDepth,
+            long inFlightLoadParsing
     ) {
     }
 }

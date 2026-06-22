@@ -81,6 +81,28 @@ class SaveMetricsTest {
     }
 
     @Test
+    void in_flight_load_parsing_gauge_tracks_inc_dec_independently() {
+        SaveMetrics m = new SaveMetrics();
+        // load 占用 gauge 与存盘 inFlightSerializing 必须各走各的 AtomicLong (共用 inc/dec 模板易接错).
+        m.incInFlightSerializing();
+        m.incInFlightLoadParsing();
+        m.incInFlightLoadParsing();
+        m.incInFlightLoadParsing();
+        m.decInFlightLoadParsing();
+
+        SaveMetrics.Snapshot snap = m.snapshot();
+        assertEquals(2, snap.inFlightLoadParsing(),
+                "三次 inc 一次 dec 后 load 占用必须为 2 (inc 漏算或 dec 串到别的 gauge 会偏)");
+        assertEquals(1, snap.inFlightSerializing(),
+                "load 占用的 inc/dec 不得污染存盘 inFlightSerializing");
+
+        m.decInFlightLoadParsing();
+        m.decInFlightLoadParsing();
+        assertEquals(0, m.snapshot().inFlightLoadParsing(),
+                "占用 task 全退 execute 后必须归零 (worker 全空闲)");
+    }
+
+    @Test
     void empty_histogram_yields_zero_avg_and_zero_p99() {
         SaveMetrics m = new SaveMetrics();
         SaveMetrics.HistogramSnapshot h = m.snapshot().eventDispatch();
