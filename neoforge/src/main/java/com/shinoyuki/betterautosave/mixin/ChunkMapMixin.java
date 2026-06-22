@@ -76,6 +76,10 @@ public abstract class ChunkMapMixin {
                 return;
             }
             betterautosave$enqueueDirtyChunks(scheduler, flushMetrics);
+            // ci.cancel() 同时跳过 vanilla saveAllChunks(true) do-while 之后的 processUnloads(() -> true)
+            // (强排所有待卸载 chunk) 与 flushWorker() (同步 flush IOWorker)。这是与 BAS 异步定位一致的有意取舍:
+            // 运营 /save-all flush 的语义从"立即全部落盘 + 强制卸载后返回"降级为"脏 chunk 已入队, worker 后续
+            // tick 异步写"。数据安全不受影响 (关服分支不 cancel, 仍同步兜底; 入队 chunk 由 worker 落盘)。
             ci.cancel();
             return;
         }
@@ -144,6 +148,10 @@ public abstract class ChunkMapMixin {
             ChunkSavePriority priority = new ChunkSavePriority(packed, dimensionId, sequence, deadlineMillis, 0.0);
             if (scheduler.enqueueChunk(priority)) {
                 enqueued++;
+                // 仅对实际入队成功的 holder 翻 wasAccessibleSinceLastSave (晚于类型/dirty/在途过滤), 严格窄于
+                // vanilla saveAllChunks(true) 对每个 wasAccessibleSinceLastSave holder 无条件的 .peek(refreshAccessibility)。
+                // 安全: 该标志只放宽 capture 候选集 (绝不漏掉脏 chunk 落盘), 被跳过 holder 的 stale 标志下个周期 save
+                // 即重算。本入队路径与周期 autosave 共享, 实际更贴近 vanilla saveChunkIfNeeded 而非 saveAllChunks。
                 holder.refreshAccessibility();
             }
         }

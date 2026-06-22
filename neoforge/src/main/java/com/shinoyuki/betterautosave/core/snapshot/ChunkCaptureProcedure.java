@@ -187,6 +187,12 @@ public final class ChunkCaptureProcedure {
 
         Map<Heightmap.Types, long[]> heightmapsRaw = new EnumMap<>(Heightmap.Types.class);
         for (Map.Entry<Heightmap.Types, Heightmap> entry : chunk.getHeightmaps()) {
+            // 用 getPersistedStatus().heightmapsAfter() 过滤。NeoForge 21.1 对 ChunkSerializer.write 的补丁
+            // (修 MC-308222) 对非 LevelChunk 状态额外落 WORLD_SURFACE_WG / OCEAN_FLOOR_WG (走的是 chunk 类型相关的
+            // 更宽集合); 但 BAS 异步路径只接管 LevelChunk (ChunkMapSaveMixin 对非 LevelChunk 显式 bypass, capture
+            // 形参即 LevelChunk), 而 LevelChunk 恒为 LEVELCHUNK 状态, 此时该更宽集合与 heightmapsAfter() 逐元素
+            // 相等, 故此处 heightmapsAfter() 完全正确、零数据丢失。该等价依赖"只异步存 LevelChunk"不变式: 若将来
+            // 管线接管 proto-chunk, 须改用补丁后的更宽集合以免漏落两个 _WG 高度图 (重新引入 MC-308222)。
             if (chunk.getPersistedStatus().heightmapsAfter().contains(entry.getKey())) {
                 heightmapsRaw.put(entry.getKey(), entry.getValue().getRawData().clone());
             }
