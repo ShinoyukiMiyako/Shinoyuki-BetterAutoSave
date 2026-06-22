@@ -9,6 +9,8 @@ import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraft.world.level.lighting.LevelLightEngine;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraftforge.eventbus.api.Event;
 import net.minecraftforge.eventbus.api.IEventBus;
 import org.spongepowered.asm.mixin.Mixin;
@@ -84,17 +86,23 @@ public abstract class ChunkSerializerLoadMixin {
      * (只持有 chunkaccess/tag/type 引用, 构造无主线程依赖), 仅 {@code post} 派发须留主线程 (设计第六节第 3 条:
      * 第三方 Load listener 普遍假设主线程)。vanilla 两处都是丢弃返回值的裸语句 post, 故 defer 分支返回 false 安全
      * (回放里的真实 post 返回值同样被丢弃)。
+     *
+     * <p>用 {@code @WrapOperation} 而非 {@code @Redirect}: 该 post 同时被其它 mod 以 {@code @ModifyArg} 命中
+     * (如 architectury 给 ChunkDataEvent 附 level), {@code @Redirect} 会整段替换调用、令对方 @ModifyArg 失配崩溃;
+     * {@code @WrapOperation} 保留原 INVOKE 让对方注入器照常生效, 我们只在外层包裹决定 defer/inline。
+     * {@code original.call(eventBus, event)} 收到的 event 已是对方 @ModifyArg 处理后的对象。
      */
-    @Redirect(method = "read",
+    @WrapOperation(method = "read",
             at = @At(value = "INVOKE",
                     target = "Lnet/minecraftforge/eventbus/api/IEventBus;"
                             + "post(Lnet/minecraftforge/eventbus/api/Event;)Z"))
-    private static boolean betterautosave$deferLoadEvent(IEventBus eventBus, Event event) {
+    private static boolean betterautosave$deferLoadEvent(IEventBus eventBus, Event event,
+                                                         Operation<Boolean> original) {
         LoadDeferredActions actions = LoadDeferredActions.current();
         if (actions != null) {
-            actions.add(() -> eventBus.post(event));
+            actions.add(() -> original.call(eventBus, event));
             return false;
         }
-        return eventBus.post(event);
+        return original.call(eventBus, event);
     }
 }

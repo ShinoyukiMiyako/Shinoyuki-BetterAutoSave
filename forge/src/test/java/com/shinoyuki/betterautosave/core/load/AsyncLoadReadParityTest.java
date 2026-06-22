@@ -46,6 +46,7 @@ class AsyncLoadReadParityTest {
     private static final String MIXIN = "com.shinoyuki.betterautosave.mixin.ChunkSerializerLoadMixin";
 
     private static final String REDIRECT_DESC = "Lorg/spongepowered/asm/mixin/injection/Redirect;";
+    private static final String WRAPOP_DESC = "Lcom/llamalad7/mixinextras/injector/wrapoperation/WrapOperation;";
 
     private Path mainClassesDir() {
         for (String candidate : new String[]{
@@ -93,7 +94,11 @@ class AsyncLoadReadParityTest {
         }
     }
 
-    /** 收集 ChunkSerializerLoadMixin 全部 @Redirect 的 at.target 描述符 (visible + invisible 都扫)。 */
+    /**
+     * 收集 ChunkSerializerLoadMixin 全部拦截器 (@Redirect 与 @WrapOperation) 的 at.target 描述符 (visible + invisible
+     * 都扫)。事件 post 用 @WrapOperation (与 architectury 等 @ModifyArg 同指令共存), POI/光照用 @Redirect, 两者都是
+     * "把 read 体内调用截走"的同一语义, 故 read-parity 的正反向断言都须把两类一并视作"被拦截"。
+     */
     private List<String> redirectTargets() throws IOException {
         ClassNode node = loadClass(MIXIN);
         List<String> targets = new ArrayList<>();
@@ -102,7 +107,7 @@ class AsyncLoadReadParityTest {
                     m.invisibleAnnotations != null ? m.invisibleAnnotations : List.<AnnotationNode>of(),
                     m.visibleAnnotations != null ? m.visibleAnnotations : List.<AnnotationNode>of())) {
                 for (AnnotationNode ann : anns) {
-                    if (REDIRECT_DESC.equals(ann.desc)) {
+                    if (REDIRECT_DESC.equals(ann.desc) || WRAPOP_DESC.equals(ann.desc)) {
                         collectDescriptorStrings(ann, targets);
                     }
                 }
@@ -126,7 +131,7 @@ class AsyncLoadReadParityTest {
         assertTrue(targets.stream().anyMatch(t -> t.contains("queueSectionData")),
                 "光照 queueSectionData 必须被 @Redirect 截走留主线程 (否则 worker 跨线程写 LevelLightEngine)");
         assertTrue(targets.stream().anyMatch(t -> t.contains("IEventBus") && t.contains("post")),
-                "ChunkDataEvent.Load 派发 (IEventBus.post) 必须被 @Redirect 截走留主线程派发 (第三方 listener 假设主线程)");
+                "ChunkDataEvent.Load 派发 (IEventBus.post) 必须被 @WrapOperation 截走留主线程派发 (第三方 listener 假设主线程)");
     }
 
     /**
