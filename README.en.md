@@ -31,7 +31,7 @@ Server-side only on both; clients do not need to install it.
 
 ## Installation
 
-Drop the jar matching your loader (Forge: `shinoyuki_betterautosave-0.11.0.jar`, NeoForge: `shinoyuki_betterautosave-neoforge-0.11.0.jar`) into the server's `mods/` folder and start. After the first launch the config file is generated at:
+Drop the jar matching your loader (Forge: `shinoyuki_betterautosave-0.12.0.jar`, NeoForge: `shinoyuki_betterautosave-neoforge-0.12.0.jar`) into the server's `mods/` folder and start. After the first launch the config file is generated at:
 
 ```
 config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml
@@ -121,7 +121,7 @@ Security note: the port listens on `0.0.0.0` by default. On public servers (clou
 ## Mod conflicts
 
 - **Smooth Chunk Save**: pick one. Both modify the chunk-unload save path. Compared to it, BAS does not delay disk writes (no data-loss window), does not cancel vanilla periodic autosaves and does not swallow exceptions.
-- **C2ME-Forge**: takes over the same save path as BAS; installing both means double processing, pick one. It is no longer maintained, so the overlap should be rare in practice.
+- **C2ME-Forge / C2ME**: only its IO / save-side features (async saving `ioSystem.async`, the serializer rewrite `gcFreeChunkSerializer`) take over the same save path as BAS, so those are pick-one; its loading / worldgen features (`midTickChunkTasksInterval`, parallel loading, worldgen) do not conflict with BAS and are complementary. To run both: turn off C2ME's IO / save-side features and set `autoSave` to `VANILLA` — BAS owns saving, C2ME owns loading. C2ME-Forge is no longer maintained, so the overlap is rare in practice.
 - **Lithium ports (Radium / Canary), Starlight Forge**: compatible.
 - Other mods that also touch chunk saving: they may occasionally make BAS's takeover fail, in which case BAS automatically falls back to vanilla handling — data safety is unaffected, you just lose a bit of the performance gain.
 
