@@ -1,6 +1,6 @@
-/build/
-/out/
-/classes/
+build/
+out/
+classes/
 /bin/
 /tools/
 
@@ -9,9 +9,9 @@
 /.gradle/
 /gradle-app.setting
 
-/run/
-/runs/
-/run-data/
+run/
+runs/
+run-data/
 
 /.idea/
 /.vscode/
@@ -28,20 +28,21 @@
 Thumbs.db
 
 *.log
-/logs/
+*.log.gz
+logs/
 /crash-reports/
 
 /forge-*-changelog.txt
 
-/src/main/resources/shinoyuki_betterautosave.refmap.json
+forge/src/main/resources/shinoyuki_betterautosave.refmap.json
 
 CLAUDE.md
 
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
 
-# ±¾µØÐ­×÷¹æ·¶, ÓÀ²»Èë¿â
+# ï¿½ï¿½ï¿½ï¿½Ð­ï¿½ï¿½ï¿½æ·¶, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 AGENTS.md
 
-# Æ½Ì¨·âÃæÍ¼µÈÃÀÊõËØ²Ä, ×ßÍøÕ¾ÉÏ´«²»½ø²Ö¿â
+# Æ½Ì¨ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø²ï¿½, ï¿½ï¿½ï¿½ï¿½Õ¾ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¿ï¿½
 branding/

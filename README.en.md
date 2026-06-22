@@ -22,14 +22,16 @@ BAS moves the whole saving process to background threads. The main thread only d
 
 ## Requirements
 
-- Minecraft 1.20.1
-- Forge 47.3.22 or newer (47.3 / 47.4 lines both work)
-- Java 17 or newer
-- Server-side only, clients do not need to install it
+Both loaders are maintained from the same source; pick the jar matching your server:
+
+- **Forge 1.20.1**: Forge 47.3.22 or newer (47.3 / 47.4 lines both work), Java 17 or newer
+- **NeoForge 1.21.1**: NeoForge 21.1 line, Java 21 or newer
+
+Server-side only on both; clients do not need to install it.
 
 ## Installation
 
-Drop `shinoyuki_betterautosave-0.11.0.jar` into the server's `mods/` folder and start. After the first launch the config file is generated at:
+Drop the jar matching your loader (Forge: `shinoyuki_betterautosave-0.11.0.jar`, NeoForge: `shinoyuki_betterautosave-neoforge-0.11.0.jar`) into the server's `mods/` folder and start. After the first launch the config file is generated at:
 
 ```
 config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml
@@ -136,9 +138,12 @@ All three options keep world data intact:
 ## Building / development
 
 ```bash
-./gradlew build         # compile + run tests
-./gradlew runServer     # start a dev server
+./gradlew build                 # compile + run all tests (common / forge / neoforge)
+./gradlew :forge:runServer      # start a 1.20.1 Forge dev server
+./gradlew :neoforge:runServer   # start a 1.21.1 NeoForge dev server
 ```
+
+Module layout: `common/` (zero-Minecraft pure-algorithm core, source-merged into both loaders — the crown-jewel save state machine lives here once, never forked) + `forge/` (1.20.1) + `neoforge/` (1.21.1). Dual-version design and porting details are in [MULTIVERSION_PLAN.md](docs/MULTIVERSION_PLAN.md) (Chinese).
 
 Technical deep dive, ecosystem research, full compatibility matrix and the version roadmap are in [ROADMAP.md](docs/ROADMAP.md) (Chinese).
 

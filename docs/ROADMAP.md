@@ -36,6 +36,7 @@
 
 > **当前**: v0.10 已落地. 后续路线参考[候选版本](#候选版本)段.
 > 顺序原则: v0.8 chunk load 已废弃, 不在路线图; mod-tick-trace / WebUI 推迟, 等系列其他 mod (BetterBackup) 上线后做统一面板更划算.
+> **多版本**: 自 2026-06 起 BAS 同源维护 Forge 1.20.1 + NeoForge 1.21.1 双加载器 (单仓 common/forge/neoforge 多模块 source-merge). 本路线图记录 1.20.1 演进史; NeoForge 1.21.1 端口设计、移植破坏点与执行结果见 [MULTIVERSION_PLAN.md](MULTIVERSION_PLAN.md).
 
 > **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
 
@@ -458,7 +459,7 @@ scrape_configs:
 
 ### BAS 兼容性矩阵 (代码核对)
 
-BAS mixin 拦截点 (见 [shinoyuki_betterautosave.mixins.json](../src/main/resources/shinoyuki_betterautosave.mixins.json)):
+BAS mixin 拦截点 (1.20.1 Forge 版, 见 [shinoyuki_betterautosave.mixins.json](../forge/src/main/resources/shinoyuki_betterautosave.mixins.json)):
 - `ChunkMap.saveAllChunks(boolean)` HEAD
 - `ChunkMap.save(ChunkAccess)` HEAD
 - `EntityStorage.storeEntities(ChunkEntities)` HEAD

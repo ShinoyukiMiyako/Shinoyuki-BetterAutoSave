@@ -1,0 +1,104 @@
+plugins {
+    // NeoForge 1.21.1 子模块用 ModDevGradle (MDG); 版本核实自 Gradle Plugin Portal (latest 2.0.141)。
+    id 'net.neoforged.moddev' version '2.0.141'
+}
+
+// 与 forge 子模块同款: 让 common 先求值, 取其 sourceSet 做 source-merge。
+evaluationDependsOn(':common')
+def commonProject = project(':common')
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = "${mod_id}-neoforge"
+}
+
+java {
+    // NeoForge 1.21.1 要求 Java 21。
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+neoForge {
+    // 坐标由 MDG 自动解析; 版本核实自 maven.neoforged.net (1.21.1 线最新补丁 21.1.233)。
+    version = neoforge_version
+
+    // Parchment 参数名映射, 与 forge 子模块一致; 版本核实自 maven.parchmentmc.org (1.21.1 -> 2024.11.17)。
+    parchment {
+        minecraftVersion = parchment_neoforge_minecraft
+        mappingsVersion = parchment_neoforge_mappings
+    }
+
+    runs {
+        configureEach {
+            systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
+        }
+        client {
+            client()
+        }
+        server {
+            server()
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            // common 的 .class 经下方 compileJava source-merge 进本模块 main 输出, 故 sourceSets.main 已含 common。
+            sourceSet sourceSets.main
+        }
+    }
+
+    // MDG JUnit 集成: 把 NeoForge 1.21.1 运行期 + 本 mod 类注入 test classpath, 让测试可用
+    // MC 类与 Bootstrap.bootStrap (12 个 @BeforeAll bootstrap 用例需要)。testedMod 绑上面 mods 注册的本 mod。
+    unitTest {
+        enable()
+        testedMod = mods.getByName(mod_id)
+    }
+}
+
+// source-merge: 沿用 forge 同款直接引用 (common 是纯 java-library, 未暴露 capability 配置)。
+// common 类零-MC, 按 Java 21 重编兼容 (21 是 17 超集)。
+compileJava {
+    source commonProject.sourceSets.main.allJava
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.slf4j:slf4j-api:2.0.7'
+    // MDG JUnit-against-NeoForge 框架; 版本与 neoforge 一致。
+    testImplementation "net.neoforged:testframework:${neoforge_version}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.0'
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+}
+
+processResources {
+    filteringCharset = 'UTF-8'
+    var replaceProperties = [
+        neoforge_loader_version_range   : neoforge_loader_version_range,
+        neoforge_version_range          : neoforge_version_range,
+        neoforge_minecraft_version_range: neoforge_minecraft_version_range,
+        mod_id                          : mod_id,
+        mod_name                        : mod_name,
+        mod_license                     : mod_license,
+        mod_version                     : mod_version,
+        mod_authors                     : mod_authors,
+        neoforge_mod_description        : neoforge_mod_description
+    ]
+    inputs.properties replaceProperties
+    // 1.21.x NeoForge 元数据文件名是 META-INF/neoforge.mods.toml (区别于 forge 的 mods.toml)。
+    filesMatching(['META-INF/neoforge.mods.toml']) {
+        expand replaceProperties
+    }
+}

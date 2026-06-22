@@ -1,0 +1,39 @@
+plugins {
+    id 'java-library'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = "${mod_id}-common"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // slf4j 是 common 唯一外部依赖 (DiagnosticLogger / PrometheusExporter / SerializationWorker / WorkerThreadFactory 的日志)。
+    // common 自身不在运行期独立加载 (被 forge/neoforge source-merge 重编), 运行期 slf4j 由 loader 的 MC 提供, 故主代码 compileOnly。
+    compileOnly 'org.slf4j:slf4j-api:2.0.7'
+
+    // common 的纯 Java 测试 (状态机/调度/worker/diagnostic) 作快测试家: 不依赖 ForgeGradle / MC bootstrap, 裸 JUnit 直跑。
+    // 被测类引用 slf4j, 主代码的 compileOnly 不传递到测试运行期, 故测试侧需显式 slf4j-api (compile + runtime)。
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.slf4j:slf4j-api:2.0.7'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.0'
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+}

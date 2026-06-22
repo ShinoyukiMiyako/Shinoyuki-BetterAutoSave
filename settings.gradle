@@ -11,3 +11,7 @@ plugins {
 }
 
 rootProject.name = 'shinoyuki_betterautosave'
+
+include 'common'
+include 'forge'
+include 'neoforge'
