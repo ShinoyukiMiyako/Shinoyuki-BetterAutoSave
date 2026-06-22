@@ -69,13 +69,15 @@ jobs:
           fi
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Build mod jar
-        run: ./gradlew build --no-daemon
+      - name: Build Forge 1.20.1 mod jar
+        # 只构建 forge 模块。NeoForge 1.21.1 构建暂不随版发布 (未做真机回归), 多模块下
+        # ./gradlew build 会连带构建 neoforge, 故显式只跑 :forge:build。
+        run: ./gradlew :forge:build --no-daemon
 
       - name: Verify jar artifact
         id: jar
         run: |
-          JAR="build/libs/shinoyuki_betterautosave-${{ steps.version.outputs.version }}.jar"
+          JAR="forge/build/libs/shinoyuki_betterautosave-${{ steps.version.outputs.version }}.jar"
           if [ ! -f "$JAR" ]; then
             echo "::error::Expected jar not found: $JAR"
             ls -la build/libs/ || true
