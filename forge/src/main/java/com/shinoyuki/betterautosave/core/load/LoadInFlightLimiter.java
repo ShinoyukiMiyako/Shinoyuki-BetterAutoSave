@@ -3,6 +3,7 @@ package com.shinoyuki.betterautosave.core.load;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.IntSupplier;
 
 /**
  * 异步在飞加载限流 (v2.1 L2): 把同时提交到 load worker 的区块解析任务数限制在 {@code max} 以内, 从而把同一 tick
@@ -26,12 +27,16 @@ public final class LoadInFlightLimiter {
 
     private static final CompletableFuture<Void> COMPLETED = CompletableFuture.completedFuture(null);
 
-    private final int max;
+    private final IntSupplier maxSupplier;
     private int inFlight;
     private final Queue<CompletableFuture<Void>> waiters = new ArrayDeque<>();
 
-    public LoadInFlightLimiter(int max) {
-        this.max = Math.max(1, max);
+    /**
+     * @param maxSupplier 动态读取当前并发上限 (读 volatile 配置 {@code BetterAutoSaveConfig.loadMaxInFlight()})。改
+     *                    配置经 Config Watcher 热重载即时生效, 无需重启 —— 便于飞行压测中实时调泄洪阀甜点。
+     */
+    public LoadInFlightLimiter(IntSupplier maxSupplier) {
+        this.maxSupplier = maxSupplier;
     }
 
     /**
@@ -40,7 +45,7 @@ public final class LoadInFlightLimiter {
      */
     public CompletableFuture<Void> acquire() {
         synchronized (this) {
-            if (inFlight < max) {
+            if (inFlight < Math.max(1, maxSupplier.getAsInt())) {
                 inFlight++;
                 return COMPLETED;
             }
@@ -75,6 +80,6 @@ public final class LoadInFlightLimiter {
     }
 
     public int max() {
-        return max;
+        return Math.max(1, maxSupplier.getAsInt());
     }
 }

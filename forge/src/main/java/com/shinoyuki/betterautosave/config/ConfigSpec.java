@@ -182,7 +182,7 @@ public final class ConfigSpec {
                          "Excess loads queue (workers stay fed) instead of flooding; the main thread drains replays over",
                          "ticks, trading a freeze for smooth per-chunk latency. Higher = more throughput but bigger per-tick",
                          "burst; lower = smoother but slower chunk arrival. Tune per server: raise until a burst reappears.")
-                .defineInRange("maxInFlight", 32, 2, 512);
+                .defineInRange("maxInFlight", 128, 2, 1024);
 
         BUILDER.pop();
 

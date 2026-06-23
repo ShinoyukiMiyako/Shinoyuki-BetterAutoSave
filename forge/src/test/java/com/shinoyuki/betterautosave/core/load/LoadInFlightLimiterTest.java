@@ -20,7 +20,7 @@ class LoadInFlightLimiterTest {
 
     @Test
     void acquire_up_to_max_grants_immediately() {
-        LoadInFlightLimiter l = new LoadInFlightLimiter(3);
+        LoadInFlightLimiter l = new LoadInFlightLimiter(() -> 3);
         CompletableFuture<Void> a = l.acquire();
         CompletableFuture<Void> b = l.acquire();
         CompletableFuture<Void> c = l.acquire();
@@ -32,7 +32,7 @@ class LoadInFlightLimiterTest {
 
     @Test
     void acquire_beyond_max_queues_then_release_hands_off() {
-        LoadInFlightLimiter l = new LoadInFlightLimiter(2);
+        LoadInFlightLimiter l = new LoadInFlightLimiter(() -> 2);
         l.acquire();
         l.acquire();
         CompletableFuture<Void> queued = l.acquire();
@@ -50,7 +50,7 @@ class LoadInFlightLimiterTest {
 
     @Test
     void release_without_waiter_frees_slot() {
-        LoadInFlightLimiter l = new LoadInFlightLimiter(4);
+        LoadInFlightLimiter l = new LoadInFlightLimiter(() -> 4);
         l.acquire();
         l.acquire();
         assertEquals(2, l.inFlight());
@@ -62,7 +62,7 @@ class LoadInFlightLimiterTest {
 
     @Test
     void no_permit_leak_under_balanced_acquire_release() {
-        LoadInFlightLimiter l = new LoadInFlightLimiter(8);
+        LoadInFlightLimiter l = new LoadInFlightLimiter(() -> 8);
         int n = 50;
         List<CompletableFuture<Void>> futs = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -80,7 +80,7 @@ class LoadInFlightLimiterTest {
 
     @Test
     void waiters_released_in_fifo_order() {
-        LoadInFlightLimiter l = new LoadInFlightLimiter(1);
+        LoadInFlightLimiter l = new LoadInFlightLimiter(() -> 1);
         l.acquire();
         CompletableFuture<Void> w1 = l.acquire();
         CompletableFuture<Void> w2 = l.acquire();

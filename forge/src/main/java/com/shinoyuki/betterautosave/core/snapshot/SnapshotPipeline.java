@@ -143,7 +143,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         // 加载侧无 SaveScheduler 逐 tick drain 回写深度时机 (与 savedData 同), 故注入 setLoadWorkerQueueDepth
         // 四参构造消除 offer 峰值长期陈旧。
         if (BetterAutoSaveConfig.loadEnabled()) {
-            loadInFlightLimiter = new LoadInFlightLimiter(BetterAutoSaveConfig.loadMaxInFlight());
+            loadInFlightLimiter = new LoadInFlightLimiter(BetterAutoSaveConfig::loadMaxInFlight);
             WorkerThreadFactory loadFactory = new WorkerThreadFactory("BetterAutoSave-Load-Worker", this::triggerDegraded);
             for (int i = 0; i < BetterAutoSaveConfig.loadWorkerThreads(); i++) {
                 SerializationWorker w = new SerializationWorker(
