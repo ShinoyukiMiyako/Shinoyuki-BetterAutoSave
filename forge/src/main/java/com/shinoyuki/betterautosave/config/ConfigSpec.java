@@ -38,6 +38,7 @@ public final class ConfigSpec {
     public static final ForgeConfigSpec.BooleanValue LOAD_ENABLED;
     public static final ForgeConfigSpec.EnumValue<LoadCompatMode> LOAD_EVENT_COMPAT_MODE;
     public static final ForgeConfigSpec.IntValue LOAD_MAX_RETRIES;
+    public static final ForgeConfigSpec.IntValue LOAD_MAX_IN_FLIGHT;
     public static final ForgeConfigSpec.BooleanValue DIAGNOSTIC_LOGGING;
     public static final ForgeConfigSpec.IntValue DIAGNOSTIC_LOG_INTERVAL_TICKS;
     public static final ForgeConfigSpec.BooleanValue PROMETHEUS_ENABLED;
@@ -172,6 +173,16 @@ public final class ConfigSpec {
                          "The terminal fallback re-reads the same region bytes on the main thread, so no data is lost",
                          "regardless of this value.")
                 .defineInRange("loadMaxRetries", 1, 0, 5);
+
+        LOAD_MAX_IN_FLIGHT = BUILDER
+                .comment("v2.1: max chunk-load deserializations submitted to load workers concurrently. Caps how many",
+                         "off-thread loads finish around the same time, so their main-thread POI/light replay + chunk",
+                         "install can't all land in one tick (the burst that shows as 'Can't keep up' under fast flight +",
+                         "high view-distance once parallel decoding feeds completions faster than the main thread installs).",
+                         "Excess loads queue (workers stay fed) instead of flooding; the main thread drains replays over",
+                         "ticks, trading a freeze for smooth per-chunk latency. Higher = more throughput but bigger per-tick",
+                         "burst; lower = smoother but slower chunk arrival. Tune per server: raise until a burst reappears.")
+                .defineInRange("maxInFlight", 32, 2, 512);
 
         BUILDER.pop();
 

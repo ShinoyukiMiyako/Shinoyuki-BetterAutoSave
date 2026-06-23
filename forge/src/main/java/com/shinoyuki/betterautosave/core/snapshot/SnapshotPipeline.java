@@ -6,6 +6,7 @@ import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
 import com.shinoyuki.betterautosave.config.ConfigSpec;
 import com.shinoyuki.betterautosave.core.io.AsyncIoBridge;
 import com.shinoyuki.betterautosave.core.load.ChunkLoadTask;
+import com.shinoyuki.betterautosave.core.load.LoadInFlightLimiter;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSavePriority;
 import com.shinoyuki.betterautosave.core.scheduler.ChunkSubmissionSink;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
@@ -57,6 +58,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private final List<Thread> savedDataWorkerThreads = new ArrayList<>();
     private final List<SerializationWorker> loadWorkers = new ArrayList<>();
     private final List<Thread> loadWorkerThreads = new ArrayList<>();
+    // v2.1 L2: 限并发在飞加载数, 泄掉多 worker 并行解码后回交主线程的 replay 突发。仅 load 池起线程时非 null。
+    private volatile LoadInFlightLimiter loadInFlightLimiter;
 
     private final AtomicBoolean degraded = new AtomicBoolean(false);
     // joinWorkers 一旦请求 worker 停机即置位。接力重投 sink 据此判定: worker 已停 (关服残窗) 时再 offer
@@ -140,6 +143,7 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         // 加载侧无 SaveScheduler 逐 tick drain 回写深度时机 (与 savedData 同), 故注入 setLoadWorkerQueueDepth
         // 四参构造消除 offer 峰值长期陈旧。
         if (BetterAutoSaveConfig.loadEnabled()) {
+            loadInFlightLimiter = new LoadInFlightLimiter(BetterAutoSaveConfig.loadMaxInFlight());
             WorkerThreadFactory loadFactory = new WorkerThreadFactory("BetterAutoSave-Load-Worker", this::triggerDegraded);
             for (int i = 0; i < BetterAutoSaveConfig.loadWorkerThreads(); i++) {
                 SerializationWorker w = new SerializationWorker(
@@ -165,6 +169,11 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     /** load 池是否已起线程 (load.enabled 且至少一条 worker)。wrap 据此决定走 off-thread 还是 vanilla 主线程。 */
     public boolean isLoadPoolActive() {
         return !loadWorkers.isEmpty();
+    }
+
+    /** v2.1 L2 在飞加载限流器; load 池起线程时非 null (isLoadPoolActive 为真即可用)。 */
+    public LoadInFlightLimiter loadInFlightLimiter() {
+        return loadInFlightLimiter;
     }
 
     public boolean captureAndDispatchChunk(LevelChunk chunk, ServerLevel level, ChunkSaveState state) {
