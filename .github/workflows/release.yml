@@ -7,6 +7,10 @@ on:
         description: 'Dry run: 仅构建 + 校验, 不创建 release (jar 作为 workflow artifact 下载)'
         type: boolean
         default: false
+      prerelease:
+        description: '预发布: 标记为 pre-release (测试版, 不作为 Latest 推给用户)'
+        type: boolean
+        default: false
 
 jobs:
   release:
@@ -104,4 +108,4 @@ jobs:
           files: ${{ steps.jar.outputs.path }}
           fail_on_unmatched_files: true
           draft: false
-          prerelease: false
+          prerelease: ${{ inputs.prerelease }}
