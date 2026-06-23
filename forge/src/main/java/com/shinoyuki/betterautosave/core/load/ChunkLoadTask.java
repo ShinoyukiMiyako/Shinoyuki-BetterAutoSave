@@ -71,9 +71,10 @@ public final class ChunkLoadTask implements SaveTask {
         // (设计第六节断言护栏, 与存盘 worker 入口对称)。
         WorkerThreadAssert.assertOnWorkerThread();
         long t0 = System.nanoTime();
-        // 占用 gauge 在 codec 锁外 inc: 一个 task 从进 execute 起 (含阻塞等 LoadCodecGuard 的时间) 就算占着一条
-        // load worker, 退 execute 时 dec。故峰值反映 "几条 worker 同时被加载任务占住", loadWorkerThreads 全占 = 锁
-        // 竞争饱和的诊断信号 (与 loadWorkerQueueDepth 的排队积压正交)。dec 在最外 finally 覆盖成功/重试耗尽抛/异常全路径。
+        // 占用 gauge inc: 一个 task 从进 execute 起就算占着一条 load worker, 退 execute 时 dec。v2.1 L1 后 read 整段
+        // 无锁并行, 故峰值到 loadWorkerThreads 表 "几条 worker 同时在真并行解析" (而非 v2 那样卡在整段读锁上); 仅结构
+        // 解码切片仍经 LoadCodecGuard 串行, 不计入本 gauge 的占用语义。与 loadWorkerQueueDepth 的排队积压正交。dec 在
+        // 最外 finally 覆盖成功/重试耗尽抛/异常全路径。
         metrics.incInFlightLoadParsing();
         // 每次 read 一个 worker 线程私有的 sink (绝不池级单例): beginCapture 在重试循环外只挂一次, ThreadLocal 在
         // 整段 worker 解析期间恒指向本 sink, 各次尝试经 clearForRetry 复位捕获列表 (而非重挂 ThreadLocal), 故 redirect
@@ -90,12 +91,14 @@ public final class ChunkLoadTask implements SaveTask {
             while (true) {
                 // 每次尝试前清空上一次失败尝试残留的延迟副作用, 防成功那次带出叠加陈旧 POI/光照写 (脏写)。
                 sink.clearForRetry();
-                // 全段 read 在锁内: 串行化 static 分发 Codec 解码防 DFU 缓存竞态 (LoadCodecGuard 取舍说明)。
-                LoadCodecGuard.lock();
                 try {
+                    // v2.1 L1: read 整段不再持锁。worker 间唯一跨线程竞态 (结构拼图解码经共享 dispatch Codec /
+                    // RegistryOps 缓存) 由 ChunkSerializerLoadMixin 的 @WrapOperation 在 read 内部精确包住
+                    // unpackStructureStart/unpackStructureReferences 时才取 LoadCodecGuard, 其余 section/调色板/biome/
+                    // heightmap/方块实体/ForgeCaps 解码 thread-confined 无锁并行 (取代 v2 "一次只解一个" 的粗粒度串行)。
                     ProtoChunk parsed = ChunkSerializer.read(level, poiManager, pos, tag);
                     // 成功那刻取走截走副作用的快照, 与 chunk 一并封进 LoadResult 显式交给 future (不靠 join 隐式共享)。
-                    // drainCaptured 在锁内 read 之后、unlock 之前调: 此刻本次 read 的 redirect 全部命中完毕, 列表完整。
+                    // 此刻本次 read 的 redirect 全部命中完毕 (结构解码锁也已在 read 内释放), 捕获列表完整。
                     List<Runnable> deferred = sink.drainCaptured();
                     result.complete(new LoadResult(parsed, deferred));
                     return;
@@ -109,8 +112,6 @@ public final class ChunkLoadTask implements SaveTask {
                     LOGGER.warn("[BetterAutoSave] async load deserialize threw for chunk {} dim={} (attempt {}/{}), "
                                     + "retrying on worker before main-thread fallback",
                             pos, level.dimension().location(), attempt, maxRetries, t);
-                } finally {
-                    LoadCodecGuard.unlock();
                 }
             }
         } finally {

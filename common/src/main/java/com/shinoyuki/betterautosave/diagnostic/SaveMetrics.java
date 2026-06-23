@@ -91,8 +91,8 @@ public final class SaveMetrics {
     private final AtomicLong inFlightSerializing = new AtomicLong();
     private final AtomicLong inFlightIoPending = new AtomicLong();
     // load worker 占用 (并发跑 ChunkLoadTask.execute 的 worker 数). 与 loadWorkerQueueDepth (排队积压) 正交:
-    // 队列深度量待处理积压, 本 gauge 量正在解析的占用。受 LoadCodecGuard 串行化, 真正 decode 同时仅一个, 但多
-    // worker 可同时进 execute 阻塞在锁上, 故该值峰值到 loadWorkerThreads 即表 worker 全忙 + 锁竞争饱和。
+    // 队列深度量待处理积压, 本 gauge 量正在解析的占用。v2.1 L1 后 read 整段无锁并行 (LoadCodecGuard 只串行结构解码
+    // 微秒切片), 故该值峰值到 loadWorkerThreads 即表 worker 全忙在真并行解析。
     private final AtomicLong inFlightLoadParsing = new AtomicLong();
 
     public void recordChunkSubmitted() {

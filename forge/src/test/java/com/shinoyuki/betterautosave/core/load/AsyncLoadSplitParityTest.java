@@ -25,8 +25,10 @@ import static org.junit.jupiter.api.Assertions.fail;
  * 归零 -> 断言挂)。覆盖 docs/ASYNC_LOAD_DESIGN.md 第四/六/九节 + v2 不阻塞不变式:
  *
  * <ul>
- *   <li>Codec 串行锁存在 (第四节并发护栏): ChunkLoadTask.execute 必须在 LoadCodecGuard.lock/unlock 之间直接调
- *       ChunkSerializer.read(=vanilla read), 否则多 worker 并发解码读坏 static 分发 Codec 的 DFU 缓存。</li>
+ *   <li>Codec 细粒度锁 (v2.1 L1): ChunkLoadTask.execute 直接调 ChunkSerializer.read 且<b>整段不再持锁</b>;
+ *       唯一跨线程竞态的结构解码由 ChunkSerializerLoadMixin 的两个 @WrapOperation handler 在 read 内部精确锁住
+ *       (各 LoadCodecGuard.lock 一次 + finally unlock 一次), 其余解码无锁并行。删掉这两处锁 -> 结构 dispatch
+ *       Codec / RegistryOps 缓存被多 worker 并发读坏 (数据损坏)。</li>
  *   <li>主线程独占副作用确实被 defer (第六节切分纪律): ChunkSerializerLoadMixin 四个 redirect handler 必须经
  *       LoadDeferredActions.current() 判据决定 inline/defer, 且 defer 分支 add 进延迟列表 —— 即 POI/光照/
  *       ChunkDataEvent.Load 在 off-thread 路径上绝不直接在 worker 执行。</li>
@@ -134,16 +136,41 @@ class AsyncLoadSplitParityTest {
     }
 
     @Test
-    void codec_guard_brackets_read_on_worker() throws IOException {
+    void worker_calls_read_without_bracketing_whole_read_in_lock() throws IOException {
+        // v2.1 L1: execute 直接调 ChunkSerializer.read 跑 vanilla 解析, 但<b>整段不再持锁</b> (锁收缩进 read 内部的
+        // 结构解码 @WrapOperation, 见 structure_decode_handlers_bracket_codec_lock)。execute 自身既不 lock 也不 unlock。
         MethodNode m = loadMethod("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "execute");
-        // lock 与 unlock 都必须出现; unlock 在 finally 双分支 (正常 + 异常) 各一次故 >=1, lock 恰一次。
-        assertTrue(countCalls(m, "lock") >= 1,
-                "Codec 锁: ChunkLoadTask.execute 必须 LoadCodecGuard.lock() 串行化 static Codec 解码");
-        assertTrue(countCalls(m, "unlock") >= 1,
-                "Codec 锁: ChunkLoadTask.execute 必须在 finally unlock(), 否则锁泄漏卡死全部 load worker");
-        // v2: worker read-stage 直接调 ChunkSerializer.read (v1 是经 Operation.call 调被 wrap 的 read)。
         assertTrue(countCalls(m, "read") >= 1,
-                "ChunkLoadTask.execute 必须在锁内直接调 ChunkSerializer.read 跑 vanilla 纯解析");
+                "ChunkLoadTask.execute 必须直接调 ChunkSerializer.read 跑 vanilla 纯解析");
+        assertEquals(0, countCalls(m, "lock"),
+                "v2.1 L1: execute 不得再 LoadCodecGuard.lock() 包整段 read (锁已收缩到 read 内结构解码 handler); "
+                        + "若此处仍 lock 则退回 v2 粗粒度串行 '一次只解一个'");
+        assertEquals(0, countCalls(m, "unlock"),
+                "v2.1 L1: execute 不得再 unlock (锁不在此); lock/unlock 均应只出现在结构解码 @WrapOperation handler 内");
+    }
+
+    /**
+     * v2.1 L1 细粒度锁 (deletion-sensitive, 核心数据安全闸门): read 内唯一跨线程竞态的结构拼图解码
+     * (unpackStructureStart / unpackStructureReferences, 经共享 dispatch Codec + RegistryOps 缓存) 必须各由一个
+     * ChunkSerializerLoadMixin 的 @WrapOperation handler 用 LoadCodecGuard.lock()/finally unlock() 精确包住,
+     * 内部经 original.call(...) 触发被锁的原解码。删掉任一处 lock/unlock -> 该结构 Codec 在 worker 间并发解码读坏
+     * 共享缓存 = 罕见数据损坏。lock 在 try 外恰一次 (==1); unlock 在 finally, javac 沿正常 + 异常出口各内联一份故
+     * >=1; original.call 触发被 wrap 的原 INVOKE 恰一次 (==1)。
+     */
+    @Test
+    void structure_decode_handlers_bracket_codec_lock() throws IOException {
+        String[] handlers = {
+                "betterautosave$lockStructureStartDecode",
+                "betterautosave$lockStructureReferencesDecode"};
+        for (String handler : handlers) {
+            MethodNode m = loadMethod("com.shinoyuki.betterautosave.mixin.ChunkSerializerLoadMixin", handler);
+            assertEquals(1, countCalls(m, "lock"),
+                    handler + ": 必须 LoadCodecGuard.lock() 恰一次串行化结构解码 (唯一跨线程竞态 Codec)");
+            assertTrue(countCalls(m, "unlock") >= 1,
+                    handler + ": 必须在 finally unlock() (>=1, javac 沿正常+异常出口内联); 缺失则锁泄漏卡死 load worker");
+            assertEquals(1, countCalls(m, "call"),
+                    handler + ": 必须经 Operation.call() 在锁内触发被 wrap 的原结构解码 (而非裸调或不调)");
+        }
     }
 
     @Test
