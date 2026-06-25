@@ -34,13 +34,19 @@ jobs:
 
             只做以下两件事, 不要分析根因、不给修复方案 (技术结论留人工或 @claude 触发):
 
-            1. 打权威分类标签:
-               - 按正文实际内容定一个最贴切的分类并 `gh issue edit ${{ github.event.issue.number }} --add-label "<标签>"`:
-                 崩溃/报错/watchdog -> bug; 卡顿/掉TPS/性能 -> performance; 丢存档/数据损坏 -> data-loss;
-                 功能请求 -> enhancement; 文档 -> documentation; 纯用法疑问 -> question。
-               - 若该 issue 当前带着 needs-triage, 归类后 `gh issue edit ${{ github.event.issue.number }} --remove-label needs-triage` 去掉它。
-               - 已有且正确的标签不要重复加; 拿不准就保留 needs-triage、不强行归类。
-               - 不要删报告者/维护者手动加的分类标签; 若你的判断与某个已有标签明显冲突, 别删它, 在评论里点出来留人工复核。
+            1. 多维度打标签 (先 `gh label list` 确认, 只用已有标签、不要新建):
+               一次性把判定出来的标签用逗号加上, 例 `gh issue edit ${{ github.event.issue.number }} --add-label "bug,forge,area:chunk-save,crash"`。
+               按维度判定, 判不出的维度就不加、不要硬凑:
+               - 类型 (必给且只给 1 个): 崩溃/报错/watchdog -> bug; 卡顿/掉TPS/性能 -> performance;
+                 丢存档/数据损坏 -> data-loss; 功能请求 -> enhancement; 文档 -> documentation; 纯用法疑问 -> question。
+               - 加载器 (能判出才加): Forge / 1.20.1 -> forge; NeoForge / 1.21.1 -> neoforge。
+               - 子系统 (能判出才加, 最多 2 个): 区块存盘/autosave/卸载 -> area:chunk-save; SavedData/.dat -> area:savedata;
+                 实体 -> area:entity-save; 异步加载 -> area:async-load; save-all flush/关服收尾 -> area:flush;
+                 BetterBackup -> area:backup; 跟其它 mod 冲突 (C2ME/FAWS/PrimeBackup 等) -> area:compat。
+               - 现象 (有就加): 崩溃 / watchdog 强杀 -> crash。
+               - 待分诊标 needs-triage: 归类后去掉它; 若关键信息 (版本 / 日志或spark / 复现) 不全, 把它换成 needs-info
+                 (`--remove-label needs-triage --add-label needs-info`); 信息齐全则只 `--remove-label needs-triage`。
+               - 已有且正确的标签不重复加; 不删报告者/维护者手动加的标签, 与已有标签明显冲突时别删、在评论里点出留人工复核; 拿不准的维度宁可不打。
 
             2. 回一条简短中文评论 (`gh issue comment ${{ github.event.issue.number }} --body "..."`):
                - 先看正文已经提供了哪些信息, 对已给的表示收到 —— 已附 spark / 日志 / 版本就别再要。
