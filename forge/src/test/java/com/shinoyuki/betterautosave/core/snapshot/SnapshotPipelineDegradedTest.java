@@ -2,6 +2,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.api.PipelineStateListener;
 import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
+import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -150,7 +151,8 @@ class SnapshotPipelineDegradedTest {
         savedData.setDirty(false);
         String name = "test_stranded_saveddata";
         pipeline.savedDataInFlight().add(name);
-        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"),
+                AtomicNbtWriter.serializeUncompressed(new CompoundTag()),
                 savedData, null, pipeline.savedDataInFlight());
         metrics.incInFlightSerializing();
         pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));

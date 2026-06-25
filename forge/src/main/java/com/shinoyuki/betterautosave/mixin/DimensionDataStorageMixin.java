@@ -3,6 +3,7 @@ package com.shinoyuki.betterautosave.mixin;
 import com.shinoyuki.betterautosave.BetterAutoSaveCore;
 import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.config.BetterAutoSaveConfig;
+import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.core.scheduler.SaveScheduler;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataDispatch;
 import com.shinoyuki.betterautosave.core.snapshot.SavedDataSaveTask;
@@ -149,19 +150,21 @@ public abstract class DimensionDataStorageMixin {
             //
             // 拆分后:
             // - mod 序列化抛 → 跳过该条 + log + fallback 计数, 不影响其他 entry
-            // - BAS dispatch 抛 → 用已构好的 tag 直接 NbtIo.writeCompressed 主线程同步
-            //   兜底, 不再调 vanilla savedData.save(file) (避免双重 save(CompoundTag))
-            CompoundTag tag;
+            // - BAS dispatch 抛 → 用已序列化好的脱钩字节直接原子写盘兜底, 不再调 vanilla
+            //   savedData.save(file) (避免双重 save(CompoundTag))
+            byte[] nbtBytes;
             try {
-                tag = new CompoundTag();
+                CompoundTag tag = new CompoundTag();
                 tag.put("data", savedData.save(new CompoundTag()));
                 NbtUtils.addCurrentDataVersion(tag);
-                // mod 的 save(CompoundTag) 可能无视入参、返回其持有的内部 live Tag (而非我们传入的新 tag)。
-                // BAS 把 vanilla 主线程同步写改成 worker 异步写, 引入了 forge 1.20.1 原本没有的并发: worker
-                // 序列化期间 mod 继续 mutate 那棵 live 子树 -> CME (只 catch IOException, 逃到重试再撞) 或写出
-                // torn / 半更新 NBT (静默损坏)。深拷贝外层即脱钩内嵌 "data" 子树的所有 live 引用, 与 NeoForge
-                // vanilla SavedData.save 的 compoundtag.copy() 同源。copy 抛 (病态 mod tag) 走下方同一 fallback。
-                tag = tag.copy();
+                // mod 的 save(CompoundTag) 可能无视入参、返回其持有的内部 live Tag (而非我们传入的新 tag);
+                // 即便写进我们的 tag, 也可能内嵌其持有的 live 子树。BAS 把 vanilla 主线程同步写改成 worker
+                // 异步写, 引入了 forge 1.20.1 原本没有的并发: worker 序列化期间 mod 继续 mutate 那棵 live
+                // 子树 -> CME (只 catch IOException, 逃到重试再撞) 或写出 torn / 半更新 NBT (静默损坏)。
+                // 一次性序列化成未压缩字节即彻底脱钩 (字节不可能 alias 任何 live 对象), 取代过去的 tag.copy()
+                // 深拷贝: 同样安全且更彻底, 但不分配平行 NBT 对象树, 对超大 SavedData 不再是主线程秒级尖峰
+                // (issue #12); worker 端只 gzip + 写。序列化抛 (病态 mod tag) 走下方同一 fallback。
+                nbtBytes = AtomicNbtWriter.serializeUncompressed(tag);
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
                 // mod 序列化抛, 未入 worker, 释放在途占位.
@@ -172,7 +175,7 @@ public abstract class DimensionDataStorageMixin {
             }
 
             try {
-                SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
+                SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, nbtBytes, savedData,
                         betterautosave$lastWrittenSize, pipeline.savedDataInFlight());
                 metrics.recordSavedDataSubmitted();
                 // 乐观清 dirty 必须发生在 enqueue 之前。若放在 offer 之后, 是 lost-update: worker 是独立线程,
@@ -200,10 +203,10 @@ public abstract class DimensionDataStorageMixin {
                 pipeline.savedDataInFlight().remove(name);
                 LOGGER.error("[BetterAutoSave] SavedData {} dispatch failed, falling back to direct sync write",
                         name, t);
-                // 用已构好的 tag 直接写盘, 不调 savedData.save(file) 避免 mod
+                // 用已序列化好的脱钩字节直接原子写盘, 不调 savedData.save(file) 避免 mod
                 // save(CompoundTag) 被双重调用. 写失败 vanilla 等价 (vanilla 也只 log).
                 try {
-                    net.minecraft.nbt.NbtIo.writeCompressed(tag, file);
+                    AtomicNbtWriter.writeCompressed(nbtBytes, file);
                     // 兜底写成功: dirty 已在 enqueue 前清 false, 此处幂等保持 false (与上移前同终值)。
                     savedData.setDirty(false);
                 } catch (java.io.IOException ioe) {

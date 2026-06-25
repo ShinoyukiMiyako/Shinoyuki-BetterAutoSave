@@ -135,6 +135,16 @@ public final class SaveListenerRegistry {
     }
 
     /**
+     * BAS 内部调用: 是否有已注册的 SavedData listener.
+     *
+     * <p>worker 端落盘后据此决定是否把脱钩字节反序列化回 tag 再 fire —— 无 listener (例如未装
+     * BetterBackup) 时跳过反序列化, 不为无人消费的 tag 付出 worker CPU。
+     */
+    public static boolean hasSavedDataListeners() {
+        return !SAVED_DATA.isEmpty();
+    }
+
+    /**
      * BAS 内部调用: 管线首次进入 degraded mode 时触发. 第三方 mod 不应调用.
      */
     public static void firePipelineDegraded() {
