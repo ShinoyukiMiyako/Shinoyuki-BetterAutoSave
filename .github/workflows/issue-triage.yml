@@ -1,0 +1,36 @@
+name: Issue 自动分诊
+
+# 新 issue 开启时自动跑: 只打标签 + 回一句中文 ack, 不下技术结论 (根因/修复留人工或 @claude)。
+# 鉴权走 Claude 订阅 OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret), 不消耗 API 余额。
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-sonnet-4-6 --max-turns 6"
+          prompt: |
+            你在给 Minecraft mod 仓库 Shinoyuki-BetterAutoSave (Forge 1.20.1 异步存盘优化 mod) 做 issue 自动分诊。
+            目标 issue: #${{ github.event.issue.number }} —— 「${{ github.event.issue.title }}」
+
+            只做以下两件事, 不要分析根因、不要给修复方案 (技术结论留人工或 @claude 触发):
+
+            1. 打标签: 先 `gh label list` 看仓库现有标签, 只从已有标签里选最贴切的 1-2 个,
+               用 `gh issue edit ${{ github.event.issue.number }} --add-label "<标签>"` 加上。不要创建新标签,
+               拿不准就只打最稳的那个。常见判定 (映射到仓库实际存在的同义标签):
+               崩溃/报错/数据异常 -> bug; 丢存档/丢数据 -> data-loss; 卡顿/掉TPS/性能 -> performance;
+               功能请求 -> enhancement; 文档问题 -> documentation; 用法疑问 -> question。
+
+            2. 回一条简短中文评论 (`gh issue comment ${{ github.event.issue.number }} --body "..."`):
+               感谢报告 + 已记录正在排查; 若缺关键信息则礼貌索取 —— 崩溃类要 crash report 与崩溃前服务器日志,
+               卡顿类要 spark profile 链接, 都最好附 BAS 版本号与复现步骤。语气友好、不堆术语、不下结论。
