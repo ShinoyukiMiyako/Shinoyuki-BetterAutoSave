@@ -24,17 +24,27 @@ jobs:
             --max-turns 6
             --allowedTools "Bash(gh:*)"
           prompt: |
-            你在给 Minecraft mod 仓库 Shinoyuki-BetterAutoSave (Forge 1.20.1 异步存盘优化 mod) 做 issue 自动分诊。
+            你在给 Minecraft mod 仓库 Shinoyuki-BetterAutoSave (Forge 1.20.1 / NeoForge 1.21.1 异步存盘优化 mod) 做 issue 自动分诊。
             目标 issue: #${{ github.event.issue.number }} —— 「${{ github.event.issue.title }}」
 
-            只做以下两件事, 不要分析根因、不要给修复方案 (技术结论留人工或 @claude 触发):
+            先了解现状 (用 gh 读取, 不要改代码):
+            - `gh issue view ${{ github.event.issue.number }} --json labels,body` 看现有标签和正文。
+            - `gh label list` 看仓库有哪些标签 (只能用已有的, 不要新建)。
+            - 正文里若有「你觉得可能是哪类问题」, 那是报告者的初步猜测, 仅供参考, 最终按正文实际内容判定。
 
-            1. 打标签: 先 `gh label list` 看仓库现有标签, 只从已有标签里选最贴切的 1-2 个,
-               用 `gh issue edit ${{ github.event.issue.number }} --add-label "<标签>"` 加上。不要创建新标签,
-               拿不准就只打最稳的那个。常见判定 (映射到仓库实际存在的同义标签):
-               崩溃/报错/数据异常 -> bug; 丢存档/丢数据 -> data-loss; 卡顿/掉TPS/性能 -> performance;
-               功能请求 -> enhancement; 文档问题 -> documentation; 用法疑问 -> question。
+            只做以下两件事, 不要分析根因、不给修复方案 (技术结论留人工或 @claude 触发):
+
+            1. 打权威分类标签:
+               - 按正文实际内容定一个最贴切的分类并 `gh issue edit ${{ github.event.issue.number }} --add-label "<标签>"`:
+                 崩溃/报错/watchdog -> bug; 卡顿/掉TPS/性能 -> performance; 丢存档/数据损坏 -> data-loss;
+                 功能请求 -> enhancement; 文档 -> documentation; 纯用法疑问 -> question。
+               - 若该 issue 当前带着 needs-triage, 归类后 `gh issue edit ${{ github.event.issue.number }} --remove-label needs-triage` 去掉它。
+               - 已有且正确的标签不要重复加; 拿不准就保留 needs-triage、不强行归类。
+               - 不要删报告者/维护者手动加的分类标签; 若你的判断与某个已有标签明显冲突, 别删它, 在评论里点出来留人工复核。
 
             2. 回一条简短中文评论 (`gh issue comment ${{ github.event.issue.number }} --body "..."`):
-               感谢报告 + 已记录正在排查; 若缺关键信息则礼貌索取 —— 崩溃类要 crash report 与崩溃前服务器日志,
-               卡顿类要 spark profile 链接, 都最好附 BAS 版本号与复现步骤。语气友好、不堆术语、不下结论。
+               - 先看正文已经提供了哪些信息, 对已给的表示收到 —— 已附 spark / 日志 / 版本就别再要。
+               - 只索取真正缺失的关键项; 若版本、日志/spark、复现都齐了, 就不要再要信息, 直接道谢 + 确认已记录正在排查。
+               - 缺失时才礼貌索取: 崩溃类要 crash report 与崩溃前日志, 卡顿类要 spark profile 链接, 外加 BAS 版本与复现步骤。
+               - 若报告者选的「可能是」分类与你的判断不一致, 友好点一句 (例: 你选的是 X, 看描述更像 Y, 已按 Y 归类, 若不对请补充)。
+               - 语气友好、不堆术语、不用 emoji 和颜文字、不下技术结论。
