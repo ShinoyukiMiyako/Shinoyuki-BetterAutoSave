@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   issues: write
+  id-token: write  # claude-code-action 用 GitHub App + OIDC 换 token, 必须有
 
 jobs:
   triage:
