@@ -1,0 +1,13 @@
+# GameTest 专用配置 (由 deployGameTestConfig 部署到隔离的 run-gametest 工作目录)。
+# 在线回退 (ChunkRestoreGameTest) 复用 BAS 异步 load worker, 故必须 load.enabled=true 且 load 池活跃,
+# 否则 restoreChunkLive 返回 REJECT_DISABLED, 用例失败。其余键由 ForgeConfigSpec.correct() 补默认。
+
+[general]
+	enabled = true
+
+[load]
+	enabled = true
+	loadEventCompatMode = "PARTIAL"
+	loadWorkerThreads = 2
+	loadMaxRetries = 1
+	maxInFlight = 128

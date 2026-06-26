@@ -21,6 +21,50 @@ java {
     toolchain.languageVersion = JavaLanguageVersion.of(17)
 }
 
+// gametest 独立 sourceSet: 在位的 GameTest harness (§3.8 GT-1/GT-2), 与 main 物理隔离,
+// 不进 mod jar (仅 gameTestServer run 用). 编译期 classpath 复用 main + common 的输出与依赖,
+// 故能直接引用本 mod 类与全部 MC/Forge 符号。
+sourceSets {
+    gametest {
+        // src/gametest/java 与 src/gametest/resources 由默认 sourceSet 约定提供, 不再显式 srcDir:
+        // 显式重复声明会让同一资源 (restore_platform.nbt) 被收集两次, processGametestResources 报 duplicate entry。
+        compileClasspath += sourceSets.main.output + commonProject.sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output + commonProject.sourceSets.main.output
+    }
+}
+
+configurations {
+    // 让 gametest 继承 main 的全部编译/运行依赖 (MC deobf 制品经 fg 注入在 minecraft 配置链上)。
+    gametestImplementation.extendsFrom implementation
+    gametestRuntimeOnly.extendsFrom runtimeOnly
+}
+
+// GameTest 自举: 把可提交的结构 SNBT 与测试配置部署到隔离的 run-gametest 工作目录, 让
+// `gradlew :forge:runGameTestServer` 从干净 clone 一条命令复现 (run-gametest 被 gitignore,
+// 不污染 dev 的 run/)。结构供 Forge GameTest 读取; 配置强制 load.enabled=true (在线回退前置)。
+def gameTestRunDir = project.file('run-gametest')
+
+tasks.register('deployGameTestStructures', Copy) {
+    from 'src/gametest/structures'
+    include '**/*.snbt'
+    into new File(gameTestRunDir, 'gameteststructures')
+}
+
+tasks.register('deployGameTestConfig', Copy) {
+    from 'src/gametest/config'
+    include 'common.toml'
+    // 路径须与 BetterAutoSaveMod 的 SERIES_CONFIG_DIR/MOD_ID/common.toml 一致 (ModConfig COMMON 注册点)。
+    into new File(gameTestRunDir, "config/Shinoyuki-Optimize/${mod_id}")
+    doLast {
+        // dedicated server 需 eula=true; 生成在 run-gametest (gitignore), 不提交 eula 文件。
+        new File(gameTestRunDir, 'eula.txt').text = 'eula=true\n'
+    }
+}
+
+tasks.matching { it.name == 'runGameTestServer' }.configureEach {
+    dependsOn 'deployGameTestStructures', 'deployGameTestConfig'
+}
+
 minecraft {
     mappings channel: mapping_channel, version: mapping_version
 
@@ -48,6 +92,20 @@ minecraft {
         server {
             property 'forge.enabledGameTestNamespaces', mod_id
             args '--nogui'
+        }
+
+        // ForgeGradle 1.20.1 内建 gameTestServer run (userdev config.json 已声明该 launchTarget):
+        // 启动一台仅跑 GameTest 的无头服务器, 进程退出码反映用例 PASS/FAIL, 可挂 CI。
+        // 这里追加把 gametest sourceSet 的输出注入 mod classpath, 否则 holder 类不会被扫描注册。
+        gameTestServer {
+            // 隔离工作目录: 与 dev 的 run/ 分开, 由 deployGameTestConfig/Structures 自举 (load.enabled=true + 结构)。
+            workingDirectory project.file('run-gametest')
+            property 'forge.enabledGameTestNamespaces', mod_id
+            mods {
+                "${mod_id}" {
+                    source sourceSets.gametest
+                }
+            }
         }
     }
 }
@@ -142,9 +200,22 @@ jar {
     finalizedBy 'reobfJar'
 }
 
+// JarJar: 把 mixinextras-forge (内含 MixinExtras 运行期类 + 自举 GAMELIBRARY) 嵌进 META-INF/jarjar/,
+// 产出自包含 fat jar (build/libs/<modid>-<ver>-all.jar)。修复: 此前只发普通 jar (不含 MixinExtras),
+// 启用异步加载/restore 的 @WrapOperation mixin 在真服上 ClassNotFound 崩溃; fat jar 自带 MixinExtras,
+// 安装即可用无需另装。reobfJarJar 把 fat jar reobf 成 SRG 供生产服运行。
+jarJar.enable()
+tasks.named('jarJar', net.minecraftforge.gradle.userdev.tasks.JarJar) {
+    finalizedBy 'reobfJarJar'
+}
+tasks.build.dependsOn('jarJar')
+
 publishing {
     publications {
         register('mavenJava', MavenPublication) {
+            // artifactId 必须显式设为 mod_id: 否则 MavenPublication 默认取子项目名 forge,
+            // 与既有发布坐标 (com.shinoyuki.betterautosave:shinoyuki_betterautosave) 及 BB 消费坐标不符。
+            artifactId = mod_id
             artifact jar
         }
     }

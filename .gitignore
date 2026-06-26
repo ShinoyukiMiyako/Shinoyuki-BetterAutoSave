@@ -12,6 +12,7 @@ bin/
 run/
 runs/
 run-data/
+run-gametest/
 
 /.idea/
 /.vscode/
