@@ -2,6 +2,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.saveddata.SavedData;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -27,6 +28,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * "抛后占位已释放" 断言挂.
  */
 class SavedDataSyncFallbackTest {
+
+    // _on_normal_write 走 vanilla SavedData.save(File) -> NbtUtils.addCurrentDataVersion -> SharedConstants,
+    // 需 MC bootstrap。与 core.state / core.snapshot 下多处测试同例自举, 不再依赖测试执行顺序里别的类先 bootstrap
+    // (否则本类被 JUnit 排到所有 bootstrap 类之前时抛 "Game version not set")。
+    @BeforeAll
+    static void bootstrapMinecraft() {
+        net.minecraft.SharedConstants.tryDetectVersion();
+        net.minecraft.server.Bootstrap.bootStrap();
+    }
 
     /** save(File) 透出 RuntimeException 的 mod 桩 (模拟非幂等 / 损坏实现). */
     private static final class ThrowingSavedData extends SavedData {

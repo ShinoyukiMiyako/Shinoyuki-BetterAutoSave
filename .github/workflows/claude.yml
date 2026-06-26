@@ -1,0 +1,29 @@
+name: Claude (@claude 触发)
+
+# 在 issue / PR 评论里 @claude 时触发, 用 Opus 4.8 做实质工作 (分析、改代码、答疑)。
+# 鉴权走 Claude 订阅 OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret), 不消耗 API 余额。
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write  # claude-code-action 用 GitHub App + OIDC 换 token, 必须有
+
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude') && github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model claude-opus-4-8
+            --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
+            --append-system-prompt "分析spark性能报告时先读scripts/spark/README.md按其步骤跑scripts/spark下的脚本：spark_report.py看子系统与mod归因、spark_tree.py看inclusive调用树；切记self-time会把BAS成本误归fastutil或JDK，必须看inclusive树把成本归回betterautosave注入帧"

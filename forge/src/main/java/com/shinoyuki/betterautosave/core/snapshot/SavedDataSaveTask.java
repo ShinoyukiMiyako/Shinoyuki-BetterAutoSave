@@ -5,14 +5,18 @@ import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
 import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtIo;
 import org.slf4j.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 
 /**
  * worker 端 SavedData 写盘任务. 与 {@link ChunkSaveTask} /
- * {@link EntitySaveTask} 同结构, 但实现最简: 主线程已构好完整 tag, worker
- * 仅调 {@link NbtIo#writeCompressed} 写盘 + 触发 listener.
+ * {@link EntitySaveTask} 同结构, 但实现最简: 主线程已把外层 tag 序列化成脱钩字节,
+ * worker 仅 gzip + 原子写盘 + (有 listener 时) 反序列化回 tag 触发 listener.
  *
  * <p><b>失败重试策略</b>: vanilla {@code SavedData.save(File)} 失败时只
  * {@code LOGGER.error} 不抛, 不重试. BAS 行为升级: 失败时**worker 线程直接调**
@@ -54,7 +58,7 @@ public final class SavedDataSaveTask implements SaveTask {
         try {
             // 原子写 (tmp + fsync + ATOMIC_MOVE) 替代 vanilla 的直接覆盖,
             // 防写到一半崩溃留截断 .dat 导致下次加载 gzip 解压失败丢数据.
-            AtomicNbtWriter.writeCompressed(snapshot.preBuiltTag(), snapshot.targetFile());
+            AtomicNbtWriter.writeCompressed(snapshot.nbtBytes(), snapshot.targetFile());
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             metrics.recordSavedDataCompleted();
@@ -63,7 +67,7 @@ public final class SavedDataSaveTask implements SaveTask {
                 snapshot.historySizeMap().put(snapshot.fileName(), snapshot.targetFile().length());
             }
             // BAS 公开 API: SavedData 已成功落盘. 触发外部 listener (BetterBackup 等).
-            SaveListenerRegistry.fireSavedDataWritten(snapshot.fileName(), snapshot.preBuiltTag());
+            fireListenersIfAny();
         } catch (IOException e) {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
@@ -95,6 +99,29 @@ public final class SavedDataSaveTask implements SaveTask {
         metrics.recordSavedDataFailed();
         snapshot.savedData().setDirty();
         LOGGER.error("[BetterAutoSave] SavedData worker uncaught for {}", taskName(), cause);
+    }
+
+    /**
+     * 落盘成功后通知外部 listener (BetterBackup 等). 仅当真有注册 listener 时才把脱钩字节反序列化回
+     * tag —— 无 listener (例如未装 BetterBackup) 时跳过, 不为无人消费的 tag 付反序列化开销。
+     *
+     * <p>写盘此刻已成功; 反序列化失败 (理论不可能, 字节是本进程刚序列化的) 仅影响下游通知, 不影响
+     * 数据正确性, 故记日志后跳过, 不重标 dirty。listener 自身抛异常由
+     * {@link SaveListenerRegistry#fireSavedDataWritten} 内部逐个 suppress, 不外泄到本 task 计账。
+     */
+    private void fireListenersIfAny() {
+        if (!SaveListenerRegistry.hasSavedDataListeners()) {
+            return;
+        }
+        CompoundTag tag;
+        try {
+            tag = NbtIo.read(new DataInputStream(new ByteArrayInputStream(snapshot.nbtBytes())));
+        } catch (IOException e) {
+            LOGGER.error("[BetterAutoSave] SavedData {} listener notify skipped: NBT decode failed "
+                    + "(data already on disk)", snapshot.fileName(), e);
+            return;
+        }
+        SaveListenerRegistry.fireSavedDataWritten(snapshot.fileName(), tag);
     }
 
     private void releaseInFlight() {

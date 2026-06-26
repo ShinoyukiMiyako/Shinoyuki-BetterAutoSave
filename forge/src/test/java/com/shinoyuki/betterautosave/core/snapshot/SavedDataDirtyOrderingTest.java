@@ -1,5 +1,6 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
+import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.nbt.CompoundTag;
@@ -57,7 +58,8 @@ class SavedDataDirtyOrderingTest {
     private SavedDataSnapshot snapshot(String name, File file, SavedData data, Set<String> inFlight) {
         CompoundTag tag = new CompoundTag();
         tag.putInt("v", 1);
-        return new SavedDataSnapshot(name, file, tag, data, new ConcurrentHashMap<>(), inFlight);
+        return new SavedDataSnapshot(name, file, AtomicNbtWriter.serializeUncompressed(tag), data,
+                new ConcurrentHashMap<>(), inFlight);
     }
 
     /**

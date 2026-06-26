@@ -1,0 +1,61 @@
+name: Issue 自动分诊
+
+# 新 issue 开启时自动跑: 只打标签 + 回一句中文 ack, 不下技术结论 (根因/修复留人工或 @claude)。
+# 鉴权走 Claude 订阅 OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret), 不消耗 API 余额。
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write  # claude-code-action 用 GitHub App + OIDC 换 token, 必须有
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 6
+            --allowedTools "Bash(gh:*)"
+          prompt: |
+            你在给 Minecraft mod 仓库 Shinoyuki-BetterAutoSave (Forge 1.20.1 / NeoForge 1.21.1 异步存盘优化 mod) 做 issue 自动分诊。
+            目标 issue: #${{ github.event.issue.number }} —— 「${{ github.event.issue.title }}」
+
+            先了解现状 (用 gh 读取, 不要改代码):
+            - `gh issue view ${{ github.event.issue.number }} --json labels,body` 看现有标签和正文。
+            - `gh label list` 看仓库有哪些标签 (只能用已有的, 不要新建)。
+            - 正文里若有「你觉得可能是哪类问题」, 那是报告者的初步猜测, 仅供参考, 最终按正文实际内容判定。
+
+            只做以下两件事, 不要分析根因、不给修复方案 (技术结论留人工或 @claude 触发):
+
+            1. 多维度打标签 (先 `gh label list` 确认, 只用已有标签、不要新建):
+               一次性把判定出来的标签用逗号加上, 例 `gh issue edit ${{ github.event.issue.number }} --add-label "bug,forge,area:chunk-save,crash"`。
+               按维度判定, 判不出的维度就不加、不要硬凑:
+               - 类型 (必给且只给 1 个): 崩溃/报错/watchdog -> bug; 卡顿/掉TPS/性能 -> performance;
+                 丢存档/数据损坏 -> data-loss; 功能请求 -> enhancement; 文档 -> documentation; 纯用法疑问 -> question。
+               - 加载器 (能判出才加): Forge / 1.20.1 -> forge; NeoForge / 1.21.1 -> neoforge。
+               - 子系统 (能判出才加, 最多 2 个): 区块存盘/autosave/卸载 -> area:chunk-save; SavedData/.dat -> area:savedata;
+                 实体 -> area:entity-save; 异步加载 -> area:async-load; save-all flush/关服收尾 -> area:flush;
+                 BetterBackup -> area:backup; 跟其它 mod 冲突 (C2ME/FAWS/PrimeBackup 等) -> area:compat。
+               - 现象 (有就加): 崩溃 / watchdog 强杀 -> crash。
+               - 待分诊标 needs-triage: 归类后去掉它; 若关键信息 (版本 / 日志或spark / 复现) 不全, 把它换成 needs-info
+                 (`--remove-label needs-triage --add-label needs-info`); 信息齐全则只 `--remove-label needs-triage`。
+               - 已有且正确的标签不重复加; 不删报告者/维护者手动加的标签, 与已有标签明显冲突时别删、在评论里点出留人工复核; 拿不准的维度宁可不打。
+
+            2. 回一条简短中文评论 (`gh issue comment ${{ github.event.issue.number }} --body "..."`):
+               硬性规则: 评论里**绝对不要**做任何技术分析或根因推测 —— 不要出现"问题可能出在X""跟Y有关""值得排查Z"
+               "是…导致的""…之间有时序/协调问题"这类判断, 哪怕信息很全、你心里已有想法, 也一个字都不要写。任何
+               根因或方向分析一律留给人工或 @claude。
+               评论**只允许**包含下面这些, 别的不要写:
+               - 一句感谢 + 确认已记录正在排查;
+               - (可选) 一句"已归类为 <这些标签>";
+               - 关键信息缺失时, 礼貌索取缺的那几项 (崩溃类要 crash report 与崩溃前日志; 卡顿类要 spark profile 链接;
+                 外加 BAS 版本与复现步骤); 信息齐全就别要、只道谢确认, 并对已给的表示收到;
+               - (可选) 报告者选的「可能是」与你打的类型标不一致时, 一句"已按 X 归类, 若不对请补充", 但不要解释为什么。
+               语气友好、不堆术语、不用 emoji 和颜文字。

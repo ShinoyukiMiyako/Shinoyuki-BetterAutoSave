@@ -1,5 +1,6 @@
 package com.shinoyuki.betterautosave.core.snapshot;
 
+import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -39,7 +40,7 @@ class SavedDataInFlightDedupTest {
     private SavedDataSnapshot snapshot(String name, File file, Set<String> inFlight) {
         CompoundTag tag = new CompoundTag();
         tag.putInt("v", 1);
-        return new SavedDataSnapshot(name, file, tag, new StubSavedData(),
+        return new SavedDataSnapshot(name, file, AtomicNbtWriter.serializeUncompressed(tag), new StubSavedData(),
                 new ConcurrentHashMap<>(), inFlight);
     }
 
