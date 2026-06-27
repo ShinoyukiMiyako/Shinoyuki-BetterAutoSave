@@ -142,7 +142,10 @@ dependencies {
     annotationProcessor 'io.github.llamalad7:mixinextras-common:0.3.5'
 
     implementation fg.deobf("io.github.llamalad7:mixinextras-forge:0.3.5")
-    jarJar(group: 'io.github.llamalad7', name: 'mixinextras-forge', version: '[0.3.5,0.4)')
+    // 上界放到 0.5 (含 0.4.x): 整合包里别的 mod (如 Create 内嵌 mixinextras-forge 0.4.1) 要求 >=0.4.x,
+    // 卡死 <0.4.0 会让 FML JarSelector 选不出共同版本而崩服。封顶 <0.5 让运行期停在 0.4 线 (与 Create
+    // 等已验证版本一致), 不把整包 MixinExtras 拉到最新 0.5.x 引入未验证变量。0.4.x 向后兼容 @WrapOperation API。
+    jarJar(group: 'io.github.llamalad7', name: 'mixinextras-forge', version: '[0.3.5,0.5)')
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.0'
