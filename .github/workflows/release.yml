@@ -81,10 +81,13 @@ jobs:
       - name: Verify jar artifact
         id: jar
         run: |
-          JAR="forge/build/libs/shinoyuki_betterautosave-${{ steps.version.outputs.version }}.jar"
+          # 必须发自包含 fat jar (-all): 内嵌 MixinExtras, 否则真服加载异步加载/在线回退的
+          # @WrapOperation mixin 会 ClassNotFoundException 崩溃。thin jar (无 -all) 仅供 mcmodsrepo
+          # 给 BetterBackup 编译期消费, 绝不作为发布产物 (v0.13.0-beta.1 误发 thin jar 即此教训)。
+          JAR="forge/build/libs/shinoyuki_betterautosave-${{ steps.version.outputs.version }}-all.jar"
           if [ ! -f "$JAR" ]; then
-            echo "::error::Expected jar not found: $JAR"
-            ls -la build/libs/ || true
+            echo "::error::Expected fat jar not found: $JAR"
+            ls -la forge/build/libs/ || true
             exit 1
           fi
           echo "path=$JAR" >> "$GITHUB_OUTPUT"
