@@ -1,4 +1,4 @@
-package com.shinoyuki.betterautosave.mixin.accessor;
+package com.shinoyuki.betterautosave.core.load;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.ChunkPos;
@@ -11,10 +11,16 @@ import java.util.concurrent.CompletableFuture;
  * {@code PoiManager}) 的 duck 接口, 把 vanilla 私有的 "POI 列读盘" 与 "解析填缓存" 拆成可分别在 worker /
  * 主线程调用的两个方法 (Tier A 异步 POI 预读)。
  *
+ * <p>本接口<b>必须放在 mixin 包外</b> (core.load 而非 mixin.accessor): mixins.json 声明的 mixin 包
+ * {@code com.shinoyuki.betterautosave.mixin.*} 内的类是 mixin 处理器私有的, 未注册的普通类放在其中会在被直接
+ * 引用时抛 {@code IllegalClassLoadError} ("is in a defined mixin package ... cannot be referenced directly")。
+ * {@code @Accessor} 接口 (如 ChunkMapAccessor) 因在 mixins.json 注册为 mixin 才可引用; 本接口是被 class mixin
+ * 实现的 duck 接口、不进 mixins.json, 故须置于普通包。
+ *
  * <p>背景: 异步加载 PARTIAL 模式下 {@code ChunkSerializer.read} 内的 {@code PoiManager.checkConsistencyWithBlocks}
  * 被 defer 回主线程 replay, 但它触发的 {@code getOrLoad -> readColumn} 在主线程 {@code tryRead().join()} 阻塞等
- * POI region 读盘 (spark 实测占主线程 ~15%, 全是 join 干等)。Tier A 让 worker 在反序列化那刻顺手把该列 POI
- * 字节读出线程, 主线程 replay 前用预读字节填缓存, 令随后的 {@code getOrLoad} 命中缓存 O(1) 返回, 清掉主线程读盘。
+ * POI region 读盘 (spark 实测占主线程 ~15%, 全是 join 干等)。Tier A 让 worker 在反序列化那刻把该列 POI 字节读出
+ * 线程, 主线程 replay 前用预读字节填缓存, 令随后的 {@code getOrLoad} 命中缓存 O(1) 返回, 清掉主线程读盘。
  */
 public interface SectionStorageLoadAccess {
 

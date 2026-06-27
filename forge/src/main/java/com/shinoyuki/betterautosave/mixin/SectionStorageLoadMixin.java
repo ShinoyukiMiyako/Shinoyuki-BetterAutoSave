@@ -1,7 +1,7 @@
 package com.shinoyuki.betterautosave.mixin;
 
 import com.mojang.serialization.DynamicOps;
-import com.shinoyuki.betterautosave.mixin.accessor.SectionStorageLoadAccess;
+import com.shinoyuki.betterautosave.core.load.SectionStorageLoadAccess;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.SectionPos;
 import net.minecraft.nbt.CompoundTag;
