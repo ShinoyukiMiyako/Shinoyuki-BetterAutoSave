@@ -1,10 +1,12 @@
 name: Issue 自动分诊
 
-# 新 issue 开启时自动跑: 只打标签 + 回一句中文 ack, 不下技术结论 (根因/修复留人工或 @claude)。
-# 鉴权走 Claude 订阅 OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret), 不消耗 API 余额。
+# 维护者给 issue 手动打上 claude-triage 标签时触发: 只打标签 + 回一句中文 ack, 不下技术结论 (根因/修复留人工或 @claude)。
+# 为何不在 issues opened 自动跑: claude-code-action 走 OIDC 换 GitHub App token 时会校验"触发者"对仓库的写权限,
+# 外部报告者开 issue 触发者无写权限, app token 换发必 401 (见 issue #20)。改由维护者手动打标签触发, 触发者恒有写权限,
+# 既保留 claude[bot] 身份又把外部触发面清零。鉴权走 Claude 订阅 OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret), 不消耗 API 余额。
 on:
   issues:
-    types: [opened]
+    types: [labeled]
 
 permissions:
   contents: read
@@ -13,6 +15,8 @@ permissions:
 
 jobs:
   triage:
+    # 只认维护者手动加的 claude-triage; 不能复用 needs-triage (issue 模板创建时自动加, 触发者=外部报告者会 401)。
+    if: github.event.label.name == 'claude-triage'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +48,10 @@ jobs:
                  实体 -> area:entity-save; 异步加载 -> area:async-load; save-all flush/关服收尾 -> area:flush;
                  BetterBackup -> area:backup; 跟其它 mod 冲突 (C2ME/FAWS/PrimeBackup 等) -> area:compat。
                - 现象 (有就加): 崩溃 / watchdog 强杀 -> crash。
-               - 待分诊标 needs-triage: 归类后去掉它; 若关键信息 (版本 / 日志或spark / 复现) 不全, 把它换成 needs-info
+               - 触发标 claude-triage: 这是维护者手动加来触发本次分诊的, 用完即弃, 分诊结束务必移除 (`--remove-label claude-triage`)。
+               - 待分诊标 needs-triage (若有): 归类后去掉它; 若关键信息 (版本 / 日志或spark / 复现) 不全, 把它换成 needs-info
                  (`--remove-label needs-triage --add-label needs-info`); 信息齐全则只 `--remove-label needs-triage`。
-               - 已有且正确的标签不重复加; 不删报告者/维护者手动加的标签, 与已有标签明显冲突时别删、在评论里点出留人工复核; 拿不准的维度宁可不打。
+               - 已有且正确的标签不重复加; 除 claude-triage 外不删报告者/维护者手动加的标签, 与已有标签明显冲突时别删、在评论里点出留人工复核; 拿不准的维度宁可不打。
 
             2. 回一条简短中文评论 (`gh issue comment ${{ github.event.issue.number }} --body "..."`):
                硬性规则: 评论里**绝对不要**做任何技术分析或根因推测 —— 不要出现"问题可能出在X""跟Y有关""值得排查Z"
