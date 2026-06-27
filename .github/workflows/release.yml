@@ -112,3 +112,22 @@ jobs:
           fail_on_unmatched_files: true
           draft: false
           prerelease: ${{ inputs.prerelease }}
+
+      # 同步发布到 Modrinth (项目 shinoyuki-betterautosave)。发的是同一个自包含 fat jar + 同一份发行说明。
+      # version-type 跟随 prerelease 勾选: 预发布 -> beta 通道, 正式 -> release 通道。
+      # env.MODRINTH_TOKEN 为空时整步跳过 (fork 或未配 secret 不会让发版失败)。
+      - name: Publish to Modrinth
+        if: inputs.dry_run == false && env.MODRINTH_TOKEN != ''
+        uses: Kir-Antipov/mc-publish@v3
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+        with:
+          modrinth-id: shinoyuki-betterautosave
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: ${{ steps.jar.outputs.path }}
+          name: BetterAutoSave ${{ steps.version.outputs.tag }}
+          version: ${{ steps.version.outputs.version }}
+          version-type: ${{ inputs.prerelease && 'beta' || 'release' }}
+          changelog-file: ${{ steps.notes.outputs.path }}
+          loaders: forge
+          game-versions: 1.20.1
