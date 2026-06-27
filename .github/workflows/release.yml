@@ -71,6 +71,12 @@ jobs:
             echo "::error::Release notes not found at $NOTES_FILE. Create the file (matching the tag) before triggering."
             exit 1
           fi
+          # 英文发行说明供 Modrinth 发布用 (面向国际用户); 缺失则提前失败, 不让发版半途 (GitHub release 已建) 才炸。
+          EN_NOTES="release-notes/${{ steps.version.outputs.tag }}.en.md"
+          if [ ! -f "$EN_NOTES" ]; then
+            echo "::error::English release notes not found at $EN_NOTES (required for the Modrinth publish step)."
+            exit 1
+          fi
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Build Forge 1.20.1 mod jar
@@ -128,6 +134,7 @@ jobs:
           name: BetterAutoSave ${{ steps.version.outputs.tag }}
           version: ${{ steps.version.outputs.version }}
           version-type: ${{ inputs.prerelease && 'beta' || 'release' }}
-          changelog-file: ${{ steps.notes.outputs.path }}
+          # Modrinth 面向国际用户, changelog 用英文 .en.md (GitHub release 正文仍用中文 .md)。
+          changelog-file: release-notes/${{ steps.version.outputs.tag }}.en.md
           loaders: forge
           game-versions: 1.20.1
