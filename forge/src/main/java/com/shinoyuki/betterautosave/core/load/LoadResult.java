@@ -1,8 +1,11 @@
 package com.shinoyuki.betterautosave.core.load;
 
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.chunk.ChunkAccess;
 
+import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 异步加载 v2 future 链中 worker read-stage 的产物, 跨线程交付给主线程 replay-stage 的不可变载体。
@@ -20,6 +23,14 @@ import java.util.List;
  *
  * <p>{@code deferred} 是 worker 截走副作用的快照拷贝 (见 {@link LoadDeferredActions#drainCaptured()}), 与 sink
  * 本身解耦: sink 随 worker read 结束 GC, 列表的所有权移交本 record -> replay-stage, 单消费者无共享。
+ *
+ * <p>{@code poiColumnNbt} (Tier A 异步 POI 预读): worker 在反序列化那刻经
+ * {@code SectionStorageLoadAccess.betterautosave$readColumnNbtFuture} 顺手读出的该列 POI region 字节,
+ * 主线程 replay-stage 用它填 POI 缓存 (经 {@code betterautosave$populateColumnOnMain}), 使 deferred 的
+ * {@code checkConsistencyWithBlocks -> getOrLoad} 命中缓存而不在主线程阻塞读盘。三态语义:
+ * {@code null} = 未预读 (prefetch 关 / restore 路径), 主线程按 vanilla 自己读 POI; {@code Optional.empty()}
+ * = 已预读且盘上无该列 POI; {@code Optional.of} = 已预读到字节。{@code CompoundTag} 线程封闭, 经 future
+ * happens-before 交主线程。
  */
-public record LoadResult(ChunkAccess chunk, List<Runnable> deferred) {
+public record LoadResult(ChunkAccess chunk, List<Runnable> deferred, @Nullable Optional<CompoundTag> poiColumnNbt) {
 }

@@ -91,7 +91,10 @@ public final class OnlineChunkRestorer {
 
         // 反序列化下沉 load worker (ChunkLoadTask 吃传入 tag, 不读盘); 解析期截走的 POI/光照/事件副作用
         // 随 LoadResult.deferred 回来, 主线程回放。
-        ChunkLoadTask task = new ChunkLoadTask(level, poiManager, pos, tag, metrics, BetterAutoSaveConfig.loadMaxRetries());
+        // poiPrefetch=false: 回退的是已加载的 live chunk, 其 POI 列多半已在内存, 预读会被 populate 护栏跳过而纯
+        // 浪费一次 IOWorker 读 (restore 也不调 populateColumnOnMain); 故 restore 显式不预读, 走 vanilla 主线程 POI。
+        ChunkLoadTask task = new ChunkLoadTask(level, poiManager, pos, tag, metrics,
+                BetterAutoSaveConfig.loadMaxRetries(), false);
         pipeline.loadWorkerQueue().offer(task);
 
         Executor mainExec = server;

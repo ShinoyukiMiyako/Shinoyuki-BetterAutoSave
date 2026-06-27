@@ -12,6 +12,7 @@ import com.shinoyuki.betterautosave.core.load.LoadResult;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor;
+import com.shinoyuki.betterautosave.mixin.accessor.SectionStorageLoadAccess;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ChunkHolder;
@@ -114,7 +115,7 @@ public abstract class ChunkMapLoadMixin {
             // 两路都 release —— 漏一次即永久占一个名额, max 个全泄漏后所有加载排队饿死。死锁安全见 LoadInFlightLimiter。
             return limiter.acquire().<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>thenComposeAsync(ignored -> {
                 ChunkLoadTask task = new ChunkLoadTask(level, poiManager, pos, tag, metrics,
-                        BetterAutoSaveConfig.loadMaxRetries());
+                        BetterAutoSaveConfig.loadMaxRetries(), BetterAutoSaveConfig.loadPoiPrefetch());
                 metrics.recordChunkLoadSubmitted();
                 pipeline.loadWorkerQueue().offer(task);
                 // worker read-stage -> main replay-stage。replay 与 Either.left(chunk) 同在一个 mainThreadExecutor 任务内
@@ -122,6 +123,13 @@ public abstract class ChunkMapLoadMixin {
                 // scheduleChunkLoad 返回的 EMPTY future 完成 -> 严格先于下游 protoChunkToFullChunk 消费 ProtoChunk
                 // (CompletableFuture complete -> 续段 happens-before), 与 vanilla read 内同步完成 POI/光照后才返回等价。
                 return task.result().<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>thenApplyAsync(loadResult -> {
+                    // Tier A: replay 前先用 worker 预读的 POI 字节填缓存 (poiColumnNbt != null = 已预读)。填好后
+                    // 紧接的 deferred checkConsistencyWithBlocks -> getOrLoad 命中缓存 O(1), 不在主线程阻塞读盘。
+                    // 必须严格先于 replayOnMainThread (deferred 里含 checkConsistency)。null = 未预读, 走 vanilla。
+                    if (loadResult.poiColumnNbt() != null) {
+                        ((SectionStorageLoadAccess) poiManager)
+                                .betterautosave$populateColumnOnMain(pos, loadResult.poiColumnNbt());
+                    }
                     LoadDeferredActions.replayOnMainThread(server, loadResult.deferred());
                     ((ChunkMapAccessor) this).betterautosave$markPosition(pos,
                             loadResult.chunk().getStatus().getChunkType());

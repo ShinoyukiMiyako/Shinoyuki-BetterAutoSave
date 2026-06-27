@@ -4,6 +4,7 @@ import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.core.worker.SaveTask;
 import com.shinoyuki.betterautosave.core.worker.WorkerThreadAssert;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import com.shinoyuki.betterautosave.mixin.accessor.SectionStorageLoadAccess;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.ai.village.poi.PoiManager;
@@ -13,6 +14,7 @@ import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import org.slf4j.Logger;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -44,16 +46,20 @@ public final class ChunkLoadTask implements SaveTask {
     private final SaveMetrics metrics;
     // 投递时快照的 worker 内重试上限 (config 是 volatile, 在任务构造点定格一次保证本任务重试次数确定)。
     private final int maxRetries;
+    // Tier A: 是否在 worker 上预读该列 POI region 字节带回主线程 (正常加载按 config; 在线回退恒 false ——
+    // 回退的是 live chunk, POI 多半已在内存, 预读必被 populate 护栏跳过而纯浪费一次 IOWorker 读)。
+    private final boolean poiPrefetch;
     private final CompletableFuture<LoadResult> result = new CompletableFuture<>();
 
     public ChunkLoadTask(ServerLevel level, PoiManager poiManager, ChunkPos pos, CompoundTag tag,
-                         SaveMetrics metrics, int maxRetries) {
+                         SaveMetrics metrics, int maxRetries, boolean poiPrefetch) {
         this.level = level;
         this.poiManager = poiManager;
         this.pos = pos;
         this.tag = tag;
         this.metrics = metrics;
         this.maxRetries = maxRetries;
+        this.poiPrefetch = poiPrefetch;
     }
 
     public CompletableFuture<LoadResult> result() {
@@ -76,6 +82,11 @@ public final class ChunkLoadTask implements SaveTask {
         // 解码切片仍经 LoadCodecGuard 串行, 不计入本 gauge 的占用语义。与 loadWorkerQueueDepth 的排队积压正交。dec 在
         // 最外 finally 覆盖成功/重试耗尽抛/异常全路径。
         metrics.incInFlightLoadParsing();
+        // Tier A: read 之前先 fire 该列 POI region 异步读盘, 与下面区块反序列化在本 worker 上并行 (loadAsync 立即返回
+        // future, 不阻塞)。read 成功后再 join 取字节。只触底层 IOWorker (线程安全), 不碰 storage, 故 off-thread 安全。
+        CompletableFuture<Optional<CompoundTag>> poiFuture = poiPrefetch
+                ? ((SectionStorageLoadAccess) poiManager).betterautosave$readColumnNbtFuture(pos)
+                : null;
         // 每次 read 一个 worker 线程私有的 sink (绝不池级单例): beginCapture 在重试循环外只挂一次, ThreadLocal 在
         // 整段 worker 解析期间恒指向本 sink, 各次尝试经 clearForRetry 复位捕获列表 (而非重挂 ThreadLocal), 故 redirect
         // handler 任一尝试都命中同一 sink。worker 是池化复用线程, endCapture 的 remove 必须在 finally 确保下一区块的
@@ -100,7 +111,19 @@ public final class ChunkLoadTask implements SaveTask {
                     // 成功那刻取走截走副作用的快照, 与 chunk 一并封进 LoadResult 显式交给 future (不靠 join 隐式共享)。
                     // 此刻本次 read 的 redirect 全部命中完毕 (结构解码锁也已在 read 内释放), 捕获列表完整。
                     List<Runnable> deferred = sink.drainCaptured();
-                    result.complete(new LoadResult(parsed, deferred));
+                    // Tier A: read 已成功, 在 worker 上 join 预读的 POI 字节 (worker 闲, 阻塞无害)。POI 预读失败
+                    // 严格隔离: 退回 null 让主线程 replay 按 vanilla 自己读 POI (零数据影响), 绝不让 POI 故障触发
+                    // 上面区块 read 的重试 —— 故此 join 的 try/catch 在区块 read 成功之后、与 read 的 catch 分离。
+                    Optional<CompoundTag> poiNbt = null;
+                    if (poiFuture != null) {
+                        try {
+                            poiNbt = poiFuture.join();
+                        } catch (Throwable poiErr) {
+                            LOGGER.warn("[BetterAutoSave] async POI prefetch failed for chunk {} dim={}, main thread "
+                                    + "will read POI inline", pos, level.dimension().location(), poiErr);
+                        }
+                    }
+                    result.complete(new LoadResult(parsed, deferred, poiNbt));
                     return;
                 } catch (Throwable t) {
                     if (attempt >= maxRetries) {

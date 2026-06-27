@@ -19,6 +19,7 @@ public final class BetterAutoSaveConfig {
     private static volatile ConfigSpec.LoadCompatMode loadEventCompatMode;
     private static volatile int loadMaxRetries;
     private static volatile int loadMaxInFlight;
+    private static volatile boolean loadPoiPrefetch;
     private static volatile boolean adaptiveEnabled;
     private static volatile int shutdownTimeoutSeconds;
     private static volatile int deadlineGuardSeconds;
@@ -75,6 +76,10 @@ public final class BetterAutoSaveConfig {
 
     public static int loadMaxInFlight() {
         return loadMaxInFlight;
+    }
+
+    public static boolean loadPoiPrefetch() {
+        return loadPoiPrefetch;
     }
 
     public static boolean adaptiveEnabled() {
@@ -153,6 +158,7 @@ public final class BetterAutoSaveConfig {
         loadEventCompatMode = ConfigSpec.LOAD_EVENT_COMPAT_MODE.get();
         loadMaxRetries = ConfigSpec.LOAD_MAX_RETRIES.get();
         loadMaxInFlight = ConfigSpec.LOAD_MAX_IN_FLIGHT.get();
+        loadPoiPrefetch = ConfigSpec.LOAD_POI_PREFETCH.get();
         adaptiveEnabled = ConfigSpec.ADAPTIVE_ENABLED.get();
         shutdownTimeoutSeconds = ConfigSpec.SHUTDOWN_TIMEOUT_SECONDS.get();
         deadlineGuardSeconds = ConfigSpec.DEADLINE_GUARD_SECONDS.get();

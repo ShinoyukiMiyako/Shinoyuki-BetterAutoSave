@@ -39,6 +39,7 @@ public final class ConfigSpec {
     public static final ForgeConfigSpec.EnumValue<LoadCompatMode> LOAD_EVENT_COMPAT_MODE;
     public static final ForgeConfigSpec.IntValue LOAD_MAX_RETRIES;
     public static final ForgeConfigSpec.IntValue LOAD_MAX_IN_FLIGHT;
+    public static final ForgeConfigSpec.BooleanValue LOAD_POI_PREFETCH;
     public static final ForgeConfigSpec.BooleanValue DIAGNOSTIC_LOGGING;
     public static final ForgeConfigSpec.IntValue DIAGNOSTIC_LOG_INTERVAL_TICKS;
     public static final ForgeConfigSpec.BooleanValue PROMETHEUS_ENABLED;
@@ -183,6 +184,17 @@ public final class ConfigSpec {
                          "ticks, trading a freeze for smooth per-chunk latency. Higher = more throughput but bigger per-tick",
                          "burst; lower = smoother but slower chunk arrival. Tune per server: raise until a burst reappears.")
                 .defineInRange("maxInFlight", 128, 2, 1024);
+
+        LOAD_POI_PREFETCH = BUILDER
+                .comment("Tier A: read each loading chunk's POI region off-thread on the load worker, so the deferred",
+                         "PoiManager.checkConsistencyWithBlocks no longer blocks the main thread on a synchronous POI",
+                         "disk read during replay. The worker reads the POI bytes (IOWorker only, thread-safe) and hands",
+                         "them to the main thread, which parses + populates the POI cache before replay; the consistency",
+                         "check then hits the cache instead of reading disk. Profiled main-thread savings are large under",
+                         "fast flight (the POI getOrLoad join wait is the dominant main-thread chunk-load cost).",
+                         "Only takes effect when async load is on and mode is PARTIAL. Default true: set false to fall back",
+                         "to vanilla main-thread POI reads if a POI-storage mod misbehaves. Hot-reloadable.")
+                .define("asyncPoiPrefetch", true);
 
         BUILDER.pop();
 
