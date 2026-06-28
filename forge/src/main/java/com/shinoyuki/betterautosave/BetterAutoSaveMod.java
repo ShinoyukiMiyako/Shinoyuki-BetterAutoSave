@@ -134,6 +134,8 @@ public final class BetterAutoSaveMod {
             scheduler.enterShutdownMode();
         }
         SnapshotPipeline pipeline = BetterAutoSaveCore.pipeline();
+        // 正常关服由本钩子接管 drain, 摘掉 JVM 关闭兜底 hook (否则 JVM 退出阶段会重复 drain)。
+        pipeline.detachShutdownHook();
         long t0 = System.currentTimeMillis();
         // drained=false 表示超时内队列/在途未清空; 此时不能让后续 joined 日志暗示 IO 已落盘.
         // 残窗说明: drainPending 返回到 joinWorkers 之间, whenComplete 回调里的迟到失败重投仍可能

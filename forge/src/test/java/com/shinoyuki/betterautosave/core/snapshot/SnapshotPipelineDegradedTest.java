@@ -168,4 +168,19 @@ class SnapshotPipelineDegradedTest {
                 "降级善后必须配平 serializing gauge (dispatch 的 inc 由 abandon dec)");
         assertEquals(0, pipeline.savedDataWorkerQueue().size(), "残留 task 必须被逐出队列");
     }
+
+    /**
+     * JVM 关闭兜底 hook 的接管语义: worker 改 daemon 后, JVM 退出不再被 worker 钉死, 由本兜底 hook 在 halt
+     * 前补 drain+join 保证落盘。但正常关服 (onServerStopping) 已自己 drain, 故一旦 detachShutdownHook
+     * 接管, 兜底 hook 必须变 no-op, 不重复 drain。删掉 managedShutdownDone 守卫 -> 第二次断言挂。
+     */
+    @Test
+    void jvm_shutdown_drain_runs_until_normal_shutdown_takes_over() {
+        SnapshotPipeline pipeline = newPipeline();
+        // 未接管 (start() 未调, worker 列表空): 兜底 drain 必须真正执行并立即收敛。
+        assertTrue(pipeline.drainOnJvmShutdown(), "onServerStopping 未接管时, JVM 兜底 drain 必须执行");
+        // 正常关服接管后: 兜底 hook 必须跳过, 不重复 drain。
+        pipeline.detachShutdownHook();
+        assertFalse(pipeline.drainOnJvmShutdown(), "detach (正常关服接管) 后, JVM 兜底 drain 必须跳过");
+    }
 }

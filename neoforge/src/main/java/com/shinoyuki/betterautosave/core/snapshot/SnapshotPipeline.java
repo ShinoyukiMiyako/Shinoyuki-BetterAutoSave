@@ -64,6 +64,12 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     private volatile MinecraftServer server;
     private volatile ChunkResolutionHook chunkResolution;
     private volatile ChunkLatencyTracker latencyTracker;
+    // JVM 关闭兜底。worker 是 daemon 不再钉死 JVM, 正常关服由 onServerStopping 调 detachShutdownHook 接管 drain;
+    // 若别的 mod 在 ServerStoppingEvent 抛异常跳过了 onServerStopping, 这个 hook 在 JVM halt 前补 drain+join 保证落盘。
+    // timeout 在 start() 捕获 (而非关闭时再读 config), 避免 JVM teardown 期触碰 config 系统。
+    private volatile Thread shutdownHook;
+    private volatile long shutdownTimeoutMs;
+    private volatile boolean managedShutdownDone;
 
     public interface ChunkResolutionHook {
         void onPriorityDrained(ChunkSavePriority priority);
@@ -129,6 +135,11 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         }
         LOGGER.debug("[BetterAutoSave] worker pool ready: {} chunk + {} entity + {} savedData",
                 chunkWorkers.size(), entityWorkers.size(), savedDataWorkers.size());
+
+        this.shutdownTimeoutMs = BetterAutoSaveConfig.shutdownTimeoutSeconds() * 1000L;
+        Thread hook = new Thread(this::onJvmShutdown, "BetterAutoSave-Shutdown-Drain");
+        this.shutdownHook = hook;
+        Runtime.getRuntime().addShutdownHook(hook);
     }
 
     public boolean captureAndDispatchChunk(LevelChunk chunk, ServerLevel level, ChunkSaveState state) {
@@ -424,6 +435,57 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             }
         }
         return ok;
+    }
+
+    /**
+     * 正常关服 (onServerStopping) 接管 drain 时调用: 标记已接管并摘掉 JVM 关闭兜底 hook, 避免 JVM 退出阶段重复 drain。
+     * 若此刻 JVM 已在关闭序列中 (removeShutdownHook 抛 IllegalStateException), 说明正在跑的就是兜底 hook, 忽略即可。
+     */
+    public void detachShutdownHook() {
+        managedShutdownDone = true;
+        Thread hook = this.shutdownHook;
+        this.shutdownHook = null;
+        if (hook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(hook);
+            } catch (IllegalStateException jvmAlreadyStopping) {
+                // JVM 已进入关闭序列, hook 正在/即将运行, 无需也无法摘除。
+            }
+        }
+    }
+
+    private void onJvmShutdown() {
+        drainOnJvmShutdown();
+    }
+
+    /**
+     * JVM 关闭兜底 drain。仅当 onServerStopping 未接管 (managedShutdownDone=false) 时执行: 把 worker 的在途序列化
+     * 与队列残余 drain 完再 join, 保证 daemon worker 被 halt 杀掉前已落盘 (与正常关服同一组 drainPending/joinWorkers)。
+     * 只引用启动期已加载的类与已捕获的 shutdownTimeoutMs, 不在 teardown 期触碰 config / 触发新类加载。
+     * 返回是否真正执行了兜底 drain, 供测试断言接管语义。
+     */
+    boolean drainOnJvmShutdown() {
+        if (managedShutdownDone) {
+            return false;
+        }
+        LOGGER.warn("[BetterAutoSave] onServerStopping 未执行 (疑似别的 mod 在 ServerStoppingEvent 抛异常打断关服事件链); "
+                + "worker 为 daemon 不会钉死 JVM, 由 JVM 关闭 hook 在 halt 前兜底 drain+join 保证在途写入落盘");
+        try {
+            if (scheduler != null) {
+                scheduler.enterShutdownMode();
+            }
+            boolean drained = drainPending(shutdownTimeoutMs);
+            boolean joined = joinWorkers(shutdownTimeoutMs);
+            if (drained && joined) {
+                LOGGER.info("[BetterAutoSave] JVM 关闭兜底 drain 完成: worker 已干净终止");
+            } else {
+                LOGGER.warn("[BetterAutoSave] JVM 关闭兜底 drain 未在 {}ms 内全部完成 (drained={} joined={})",
+                        shutdownTimeoutMs, drained, joined);
+            }
+        } catch (Throwable t) {
+            LOGGER.error("[BetterAutoSave] JVM 关闭兜底 drain hook 自身抛异常", t);
+        }
+        return true;
     }
 
     public BlockingQueue<SaveTask> chunkWorkerQueue() {

@@ -113,7 +113,7 @@ class SerializationWorkerTest {
     }
 
     @Test
-    void thread_factory_names_threads_and_marks_daemon_false() {
+    void thread_factory_names_threads_and_marks_daemon_true() {
         WorkerThreadFactory factory = new WorkerThreadFactory("BetterAutoSave-Worker", null);
         Thread t1 = factory.newThread(() -> {
         });
@@ -121,7 +121,8 @@ class SerializationWorkerTest {
         });
         assertEquals("BetterAutoSave-Worker-1", t1.getName());
         assertEquals("BetterAutoSave-Worker-2", t2.getName());
-        assertEquals(false, t1.isDaemon());
+        // daemon: worker 绝不能钉死 JVM (否则别的 mod 关服抛异常跳过 BAS 收尾时, 服务器关不掉)。
+        assertTrue(t1.isDaemon(), "worker 必须是 daemon, 否则会把服务器拖成关不掉");
         assertTrue(t1.getPriority() < Thread.NORM_PRIORITY);
     }
 
