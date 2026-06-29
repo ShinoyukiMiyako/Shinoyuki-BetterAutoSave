@@ -114,8 +114,13 @@ public abstract class ChunkMapLoadMixin {
             // 多 worker 并行解码后 replay+install 全砸一个 tick 的突发)。许可在末尾 whenComplete 的 success 与 fallback
             // 两路都 release —— 漏一次即永久占一个名额, max 个全泄漏后所有加载排队饿死。死锁安全见 LoadInFlightLimiter。
             return limiter.acquire().<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>thenComposeAsync(ignored -> {
+                // 关服窄窗闸门: worker 停机已请求时禁用 Tier A POI 预读 —— 此后 IOWorker 即将关闭, betterautosave$
+                // readColumnNbtFuture 触发的 tryRead 可能永不完成, 让 worker 退回 vanilla 主线程内联读 POI (read 成功后
+                // poiNbt 恒 null -> replay 走 vanilla 自读) 而非投一个可能挂死的预读 future。read 本体仍照常异步, 仅放弃
+                // 这一项预读优化。配合 ChunkLoadTask 内 poiFuture 的有限超时 join 形成双保险。
+                boolean poiPrefetch = BetterAutoSaveConfig.loadPoiPrefetch() && !pipeline.isWorkersStopping();
                 ChunkLoadTask task = new ChunkLoadTask(level, poiManager, pos, tag, metrics,
-                        BetterAutoSaveConfig.loadMaxRetries(), BetterAutoSaveConfig.loadPoiPrefetch());
+                        BetterAutoSaveConfig.loadMaxRetries(), poiPrefetch);
                 metrics.recordChunkLoadSubmitted();
                 pipeline.loadWorkerQueue().offer(task);
                 // worker read-stage -> main replay-stage。replay 与 Either.left(chunk) 同在一个 mainThreadExecutor 任务内

@@ -12,6 +12,7 @@
     "ChunkSerializerLoadMixin",
     "DimensionDataStorageMixin",
     "EntityStorageMixin",
+    "LevelChunkCapsLoadMixin",
     "MinecraftServerMixin",
     "SavedDataMixin",
     "SectionStorageLoadMixin",

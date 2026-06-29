@@ -369,6 +369,15 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         return degraded.get();
     }
 
+    /**
+     * worker 停机已请求 (joinWorkers 已置位 workersStopping)。关服窄窗用: 此后 load worker 即将 requestStop +
+     * 被 halt, 不应再向 worker 投递 Tier A POI 预读 (预读 future 多半已无人 join / IOWorker 即将关闭 ->
+     * tryRead 永不完成), 提交点据此把 poiPrefetch 退成 false 走 vanilla 主线程内联读 POI。volatile 读, 跨线程可见。
+     */
+    public boolean isWorkersStopping() {
+        return workersStopping;
+    }
+
     public MinecraftServer server() {
         return server;
     }
@@ -656,8 +665,14 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             if (chunkWorkerQueue.isEmpty()
                     && entityWorkerQueue.isEmpty()
                     && savedDataWorkerQueue.isEmpty()
+                    // 加载侧对称纳入: load worker 在途解析 (loadWorkerQueue 待 poll + inFlightLoadParsing 解析中)
+                    // 必须也归零才算 drain 干净。漏查则关服在 load 高峰期会在 worker 仍解析时误判 idle 返回 true ->
+                    // joinWorkers 紧接 halt 杀掉仍在跑 ChunkSerializer.read 的 load worker (虽 read 只读盘无数据丢失,
+                    // 但与存盘侧 drain 语义不对称, 且会留下半截 replay 的 future 永不完成)。
+                    && loadWorkerQueue.isEmpty()
                     && snap.inFlightSerializing() == 0L
-                    && snap.inFlightIoPending() == 0L) {
+                    && snap.inFlightIoPending() == 0L
+                    && snap.inFlightLoadParsing() == 0L) {
                 return true;
             }
             try {

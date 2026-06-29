@@ -9,6 +9,7 @@ import net.minecraft.world.entity.ai.village.poi.PoiManager;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.chunk.DataLayer;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
@@ -89,6 +90,33 @@ public abstract class ChunkSerializerLoadMixin {
             actions.add(() -> original.call(lightEngine, layer, sectionPos, data));
         } else {
             original.call(lightEngine, layer, sectionPos, data);
+        }
+    }
+
+    /**
+     * ForgeCaps 反序列化 (金源 :162 LEVELCHUNK 分支 {@code ((LevelChunk)chunkaccess).readCapsFromNBT(
+     * tag.getCompound("ForgeCaps"))}): 把盘上存的第三方 chunk capability 数据反序列化回各 cap 实例。
+     * {@code readCapsFromNBT -> capProvider.deserializeInternal -> deserializeCaps} 触发第三方 cap 的
+     * {@code INBTSerializable.deserializeNBT}, 与 cap gather ({@link LevelChunkCapsLoadMixin} defer 的
+     * {@code initInternal}) 同性质——第三方 cap 代码普遍假设主线程, 且 deserialize 必须发生在 gather 建出 cap 实例
+     * <b>之后</b>。两者都 defer 进同一 {@link LoadDeferredActions} sink, 按 read 执行序 (gather:161 先于
+     * deserialize:162) 入列、replay 时同序回放, 保持 "先 gather 后 deserialize" 的依赖。
+     *
+     * <p>{@code @WrapOperation} 而非 {@code @Redirect}: 与事件 {@code post} 同理, 保留原 INVOKE 让其它 mod 对
+     * {@code readCapsFromNBT} 的注入器照常生效, 我们只在外层包裹决定 defer/inline。worker 期 defer 分支
+     * {@code original.call(levelChunk, tag)} 在主线程 replay 时才真正执行反序列化。
+     */
+    @WrapOperation(method = "read",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/world/level/chunk/LevelChunk;"
+                            + "readCapsFromNBT(Lnet/minecraft/nbt/CompoundTag;)V"))
+    private static void betterautosave$deferReadCapsFromNBT(LevelChunk levelChunk, CompoundTag tag,
+                                                            Operation<Void> original) {
+        LoadDeferredActions actions = LoadDeferredActions.current();
+        if (actions != null) {
+            actions.add(() -> original.call(levelChunk, tag));
+        } else {
+            original.call(levelChunk, tag);
         }
     }
 

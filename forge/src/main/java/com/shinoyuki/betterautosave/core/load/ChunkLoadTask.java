@@ -15,6 +15,8 @@ import org.slf4j.Logger;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 异步加载 v2 PARTIAL 模式投递到 load worker 的 read-stage 任务: 在 worker 线程上跑 vanilla
@@ -37,6 +39,12 @@ import java.util.concurrent.CompletableFuture;
 public final class ChunkLoadTask implements SaveTask {
 
     private static final Logger LOGGER = BetterAutoSaveMod.LOGGER;
+
+    // Tier A POI 预读 join 的有限超时上限。read 成功后在 worker 上 join 预读 future 取字节; 正常 IOWorker 几十 ms
+    // 内完成, 但关服窄窗 (IOWorker 已 close 但提交闸门未拦到的极罕赛跑) 下 tryRead 的 future 可能永不完成 ->
+    // 无界 join() 会把这条 load worker 永久钉死、令 drainPending 的 inFlightLoadParsing 永不归零拖死关服。有限超时
+    // 退回 poiNbt=null (主线程 replay 按 vanilla 自读 POI, 零数据影响) + WARN 诊断, 是关服不挂死的兜底。
+    private static final long POI_PREFETCH_JOIN_TIMEOUT_SECONDS = 10L;
 
     private final ServerLevel level;
     private final PoiManager poiManager;
@@ -116,7 +124,13 @@ public final class ChunkLoadTask implements SaveTask {
                     Optional<CompoundTag> poiNbt = null;
                     if (poiFuture != null) {
                         try {
-                            poiNbt = poiFuture.join();
+                            // 有限超时 join (非无界 join()): 关服窄窗下 IOWorker 已关、tryRead 的 future 可能永不完成,
+                            // 无界等会把本 load worker 永久钉死拖死关服 (inFlightLoadParsing 永不归零)。超时即放弃预读。
+                            poiNbt = poiFuture.get(POI_PREFETCH_JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                        } catch (TimeoutException poiTimeout) {
+                            LOGGER.warn("[BetterAutoSave] async POI prefetch timed out after {}s for chunk {} dim={} "
+                                            + "(IOWorker likely closing during shutdown), main thread will read POI inline",
+                                    POI_PREFETCH_JOIN_TIMEOUT_SECONDS, pos, level.dimension().location());
                         } catch (Throwable poiErr) {
                             LOGGER.warn("[BetterAutoSave] async POI prefetch failed for chunk {} dim={}, main thread "
                                     + "will read POI inline", pos, level.dimension().location(), poiErr);
