@@ -15,7 +15,7 @@ Besides the periodic autosave, several other moments stutter the same way:
 
 - Players teleporting, or large numbers of chunks being unloaded (a chunk must be saved before it leaves memory)
 - Entity-dense areas during a save (large farms / mob grinders) — saving entities one by one adds extra stalls
-- Villages, raids and some mod data (e.g. MTR train data) being written to disk — a single large file can stall 50-200 ms
+- Villages, raids and other global data (vanilla SavedData), plus large data some mods store through the same mechanism, being written to disk — a single large file can stall 50-200 ms
 
 BAS moves the whole saving process to background threads. The main thread only does the one thing that must happen in place — taking a snapshot of the data to be saved. Serialization and disk IO are handed to the background. The stutter essentially disappears.
 
@@ -31,7 +31,7 @@ Server-side only on both; clients do not need to install it.
 
 ## Installation
 
-Drop the jar matching your loader (Forge: `shinoyuki_betterautosave-0.12.0.jar`, NeoForge: `shinoyuki_betterautosave-neoforge-0.12.0.jar`) into the server's `mods/` folder and start. After the first launch the config file is generated at:
+Download the jar matching your loader from Releases — **for Forge, use the `-all` jar** (named like `shinoyuki_betterautosave-<version>-all.jar`; it bundles MixinExtras and other dependencies, while the plain thin jar crashes on load for missing dependencies), **for NeoForge** use `shinoyuki_betterautosave-neoforge-<version>.jar` — then drop it into the server's `mods/` folder and start. After the first launch the config file is generated at:
 
 ```
 config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.toml
@@ -69,7 +69,7 @@ The config file is `config/Shinoyuki-Optimize/shinoyuki_betterautosave/common.to
 | throttle.adaptiveEnabled | true | Slow down automatically when the server struggles; keep it on |
 | workers.chunkWorkerThreads | 2 | Background threads for chunks |
 | workers.entityWorkerThreads | 2 | Background threads for entities |
-| workers.savedDataWorkerThreads | 1 | Background threads for saved data; raise to 2 with heavy data mods (e.g. MTR) |
+| workers.savedDataWorkerThreads | 1 | Background threads for saved data; raise to 2 with mods that write a lot of vanilla SavedData |
 | compat.eventCompatMode | PARTIAL | Compatibility level, see below |
 
 The remaining entries (retry counts, shutdown timeout, monitoring switches, etc.) are documented by comments inside the config file.
