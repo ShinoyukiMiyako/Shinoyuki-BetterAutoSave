@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-![BetterAutoSave](https://raw.githubusercontent.com/xiaoxiao-cvs/Shinoyuki-BetterAutoSave/main/docs/images/BetterAutoSave.png)
+![BetterAutoSave](https://raw.githubusercontent.com/ShinoyukiMiyako/Shinoyuki-BetterAutoSave/main/docs/images/BetterAutoSave.png)
 
 > 让服务器自动存档时不再卡顿 ~  
 > 此Mod部分代码由 Claude Opus 4.8 / Claude Fable 5 生成，若有任何问题请提交 issue

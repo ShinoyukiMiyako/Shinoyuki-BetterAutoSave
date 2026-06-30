@@ -481,7 +481,7 @@ BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升
 
 ## 候选版本
 
-(本节暂无规划中的 minor 版本. v0.9 已落地, BAS chunk save / entity save / SavedData / 工具化 都已覆盖. 后续工作转向 BetterBackup 独立 mod, 见 [BetterBackup 仓库](https://github.com/xiaoxiao-cvs/Shinoyuki-BetterBackup).)
+(本节暂无规划中的 minor 版本. v0.9 已落地, BAS chunk save / entity save / SavedData / 工具化 都已覆盖. 后续工作转向 BetterBackup 独立 mod, 见 [BetterBackup 仓库](https://github.com/ShinoyukiMiyako/Shinoyuki-BetterBackup).)
 
 ## 已废弃
 
