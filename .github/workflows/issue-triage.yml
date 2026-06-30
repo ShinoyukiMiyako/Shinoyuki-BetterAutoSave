@@ -79,4 +79,11 @@ jobs:
                - 以 spark_tree.py 的 inclusive 调用树 + spark_report.py 的 BY MOD SOURCE 为准。
                - **绝不**只看 self-time / SUBSYSTEM ROLLUP 下结论: spark 叶子 self-time 会把 BAS 注入逻辑的成本误归到 fastutil / JDK collections, 让 BAS 在 self-time 里显示接近 0; 只有 inclusive 树能把成本归回 BAS 的 handler$...betterautosave$... 注入帧。
                - 这是初判不是定论, 拿不准就说拿不准, 不硬给根因。
-               输出: 单独再发一条评论 (`gh issue comment`), 开头一行明确标注 "自动预诊 (机器生成, 供 @claude / 维护者复核, 可能有误, 不作结论)", 正文 3 行内: 最热 inclusive 路径 + 占比、初步指向哪个子系统、是否 BAS 相关。中文、不堆术语、不用 emoji。
+               输出: 单独再发一条评论, 用 markdown 排版, 参照本仓以往 @claude 排查评论的风格 (结论标题 + 代码块调用树 + 占比表格 + 关键处加粗), 但**严守「预诊」边界**: 只基于 spark 数据, 不读源码、不比对 vanilla、不下"是否回归/是哪个 mod"这类定论 (那些留 @claude)。把 markdown 写进临时文件再 `gh issue comment <num> --body-file /tmp/prediag.md` (含代码块, 用 --body-file 免转义)。正文结构:
+               - 第一行原样标注: `自动预诊 (机器生成, 供 @claude / 维护者复核, 可能有误, 不作结论)`。
+               - 一句结论标题 (markdown `###`, 描述性、别下定论): 最热 inclusive 路径指向哪条帧、占整段采样多少、是不是 BAS 注入帧。
+               - 一个 ``` 代码块: 从 spark_tree.py 的 HEAVIEST CALL PATHS 截最热那条 inclusive 链 (入口 -> 瓶颈帧), 每帧标 `incl Xms self Yms`, 在 BAS 的 handler$...betterautosave$... 注入帧那行用 `<- 报告热点` 标注; 深度够说明问题即可, 别贴整棵。
+               - 一个 markdown 表格: 列 spark_tree.py "INCLUSIVE TIME of save/chunk-related frames" 的前几项 (帧 / inclusive ms / 占比), 顺带带上区块相关帧 (saveAllChunks / ChunkMap) 好做对比。
+               - 一句 self-time 校正 (**加粗**): 用 spark_report.py 的 SUBSYSTEM ROLLUP / BY MOD SOURCE 说明 self-time 把这笔成本误归到 fastutil / JDK collections, BAS 自身 self 接近 0, 以 inclusive 为准成本归 BAS 注入帧。
+               - 一节 `下一步 (留 @claude / 人工核实)`: 列 2-3 条该深挖的点 (例: 该帧是不是 vanilla 等价、非回归 / 是哪个 mod 的超大 SavedData / 要不要 clone 源码确认), 但**不要自己下这些结论**。
+               全程中文、不堆废术语、不用 emoji。
