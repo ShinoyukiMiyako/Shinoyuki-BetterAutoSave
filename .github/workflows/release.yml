@@ -24,11 +24,16 @@ jobs:
           # 需要完整 tag 历史用于 "tag 已存在" 守卫
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 17 and 21
+        # forge / common 子模块 toolchain Java 17, neoforge 子模块 toolchain Java 21 (NeoForge 1.21.1 要求)。
+        # 两个都装, Gradle toolchain 按模块自动选对应 JDK; JAVA_HOME 取最后一个 (21) 作 Gradle 运行时,
+        # 与本地一致 (Gradle on 21 + forge 走 17 toolchain, FG6 在 21 运行时已验证可构建)。
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: |
+            17
+            21
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -79,32 +84,43 @@ jobs:
           fi
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Build Forge 1.20.1 mod jar
-        # 只构建 forge 模块。NeoForge 1.21.1 构建暂不随版发布 (未做真机回归), 多模块下
-        # ./gradlew build 会连带构建 neoforge, 故显式只跑 :forge:build。
-        run: ./gradlew :forge:build --no-daemon
+      - name: Build Forge 1.20.1 + NeoForge 1.21.1 mod jars
+        # 双端构建。entity 终态接力修复两端均经真机回归 (forge 1.20.1 测试服 + neoforge 1.21.1
+        # runServer, 见 v0.16.1 发行说明), 故 0.16.1 起 neoforge 随版发布。
+        run: ./gradlew :forge:build :neoforge:build --no-daemon
 
-      - name: Verify jar artifact
+      - name: Verify jar artifacts
         id: jar
         run: |
-          # 必须发自包含 fat jar (-all): 内嵌 MixinExtras, 否则真服加载异步加载/在线回退的
+          # Forge 必须发自包含 fat jar (-all): 内嵌 MixinExtras, 否则真服加载异步加载/在线回退的
           # @WrapOperation mixin 会 ClassNotFoundException 崩溃。thin jar (无 -all) 仅供 mcmodsrepo
           # 给 BetterBackup 编译期消费, 绝不作为发布产物 (v0.13.0-beta.1 误发 thin jar 即此教训)。
-          JAR="forge/build/libs/shinoyuki_betterautosave-${{ steps.version.outputs.version }}-all.jar"
-          if [ ! -f "$JAR" ]; then
-            echo "::error::Expected fat jar not found: $JAR"
+          FORGE_JAR="forge/build/libs/shinoyuki_betterautosave-${{ steps.version.outputs.version }}-all.jar"
+          if [ ! -f "$FORGE_JAR" ]; then
+            echo "::error::Expected forge fat jar not found: $FORGE_JAR"
             ls -la forge/build/libs/ || true
             exit 1
           fi
-          echo "path=$JAR" >> "$GITHUB_OUTPUT"
-          echo "Built: $JAR ($(du -h "$JAR" | cut -f1))"
+          # NeoForge (MDG) 产单 jar, jarJar 内嵌依赖, 无 -all/thin 之分。
+          NEOFORGE_JAR="neoforge/build/libs/shinoyuki_betterautosave-neoforge-${{ steps.version.outputs.version }}.jar"
+          if [ ! -f "$NEOFORGE_JAR" ]; then
+            echo "::error::Expected neoforge jar not found: $NEOFORGE_JAR"
+            ls -la neoforge/build/libs/ || true
+            exit 1
+          fi
+          echo "forge_path=$FORGE_JAR" >> "$GITHUB_OUTPUT"
+          echo "neoforge_path=$NEOFORGE_JAR" >> "$GITHUB_OUTPUT"
+          echo "Built forge:    $FORGE_JAR ($(du -h "$FORGE_JAR" | cut -f1))"
+          echo "Built neoforge: $NEOFORGE_JAR ($(du -h "$NEOFORGE_JAR" | cut -f1))"
 
-      - name: Upload jar as workflow artifact (dry-run only)
+      - name: Upload jars as workflow artifact (dry-run only)
         if: inputs.dry_run == true
         uses: actions/upload-artifact@v4
         with:
           name: shinoyuki_betterautosave-${{ steps.version.outputs.version }}
-          path: ${{ steps.jar.outputs.path }}
+          path: |
+            ${{ steps.jar.outputs.forge_path }}
+            ${{ steps.jar.outputs.neoforge_path }}
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -112,9 +128,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: BetterAutoSave ${{ steps.version.outputs.tag }} — Forge 1.20.1 异步存档优化
+          name: BetterAutoSave ${{ steps.version.outputs.tag }} — Forge 1.20.1 / NeoForge 1.21.1 异步存档优化
           body_path: ${{ steps.notes.outputs.path }}
-          files: ${{ steps.jar.outputs.path }}
+          files: |
+            ${{ steps.jar.outputs.forge_path }}
+            ${{ steps.jar.outputs.neoforge_path }}
           fail_on_unmatched_files: true
           draft: false
           prerelease: ${{ inputs.prerelease }}
@@ -130,11 +148,19 @@ jobs:
         with:
           modrinth-id: shinoyuki-betterautosave
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
-          files: ${{ steps.jar.outputs.path }}
+          # 单个 Modrinth 版本号同时挂两端 jar (forge -all + neoforge), loaders / game-versions 取并集。
+          # 首个文件 (forge -all.jar) 为 primary; 用户按 加载器+MC版本 过滤后下对应文件。
+          files: |
+            ${{ steps.jar.outputs.forge_path }}
+            ${{ steps.jar.outputs.neoforge_path }}
           name: BetterAutoSave ${{ steps.version.outputs.tag }}
           version: ${{ steps.version.outputs.version }}
           version-type: ${{ inputs.prerelease && 'beta' || 'release' }}
           # Modrinth 面向国际用户, changelog 用英文 .en.md (GitHub release 正文仍用中文 .md)。
           changelog-file: release-notes/${{ steps.version.outputs.tag }}.en.md
-          loaders: forge
-          game-versions: 1.20.1
+          loaders: |
+            forge
+            neoforge
+          game-versions: |
+            1.20.1
+            1.21.1
