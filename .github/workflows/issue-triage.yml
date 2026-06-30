@@ -26,8 +26,8 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 12
-            --allowedTools "Bash(gh:*),Bash(curl:*),Bash(python3:*)"
+            --max-turns 30
+            --allowedTools "Bash(gh:*),Bash(curl:*),Bash(python3:*),Bash(head:*),Bash(tail:*),Bash(cat:*),Bash(grep:*)"
           prompt: |
             你在给 Minecraft mod 仓库 Shinoyuki-BetterAutoSave (Forge 1.20.1 / NeoForge 1.21.1 异步存盘优化 mod) 做 issue 自动分诊。
             目标 issue: #${{ github.event.issue.number }} —— 「${{ github.event.issue.title }}」
