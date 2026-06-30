@@ -84,6 +84,24 @@ A few mods listen to the "chunk save" event. This switch controls how complete t
 
 When unsure, stay on PARTIAL.
 
+### Async chunk loading (experimental, off by default)
+
+> Back up your entire world folder before enabling this. It is experimental and changes the chunk *loading* path — moving the step that parses save bytes into game objects (deserialization) onto background threads. By design, even if background parsing fails it falls back to re-reading the same bytes on the main thread and loses no data; but any feature that touches the loading path may hit an edge case not covered under your specific mod combination. Backing up first is taking responsibility for your own saves.
+
+When vanilla loads a chunk, the step that parses the on-disk save bytes into game objects sits on the main thread. With a large view distance, or players moving fast / teleporting, this step becomes a main-thread burden. With async loading enabled, BAS moves parsing to background threads too; the main thread only does the parts that must happen in place (POI consistency, lighting, load-event replay), and the freed main-thread time turns into more TPS headroom. This pays off most on "view distance 10-12 + multiplayer" production servers; pure single-player extreme flying (view distance maxed) hits the ceiling of vanilla's single-threaded chunk pipeline, which async parsing cannot help with.
+
+Off by default; enable it manually in the config. The relevant settings are in the `[load]` section (thread count in `[workers]`):
+
+| Key | Default | Description |
+|---|---|---|
+| load.enabled | false | Master switch for async loading, independent of the save side's `general.enabled` |
+| load.loadEventCompatMode | PARTIAL | Split level: PARTIAL = parsing on the background, POI / lighting / events back on the main thread; FULL = the whole parse stays on the main thread (equivalent to this feature off, zero behavior difference — a fallback when a mod is incompatible). No DISABLED state (load events must be dispatched on the main thread) |
+| load.maxInFlight | 128 | Cap on parse tasks submitted to the background at once. Prevents a batch of chunks finishing together and replaying into the same tick as a momentary stall. Higher = more throughput but larger per-tick bursts; lower = smoother but chunks arrive slower. Raise it per server until bursts reappear |
+| load.loadMaxRetries | 1 | Retries when background parsing throws; once exhausted it falls back to vanilla main-thread reading (no data loss) |
+| workers.loadWorkerThreads | 2 | Background threads for async loading. Parsing is essentially a single-thread bottleneck; 2 is enough, raising it mostly wastes |
+
+If something goes wrong, set `load.enabled` back to `false`, or switch `loadEventCompatMode` to `FULL`, to return to vanilla loading behavior immediately (config hot-reload, no restart needed).
+
 ## In-game commands (OP required)
 
 | Command | Effect |
