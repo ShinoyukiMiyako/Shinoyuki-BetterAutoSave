@@ -532,6 +532,150 @@ class EntityPendingRelayTest {
         assertEquals(0L, metrics.snapshot().mustDrainPending(), "chunk mustDrain gauge 配平归零");
     }
 
+    /**
+     * c0 修复回归 (entity 终态接力): gen1 的 IO 反复失败到耗尽 maxRetries 走 FAILED_TERMINAL 时, 若碰撞
+     * 已登记 gen2 pending, 必须接力把 gen2 重投落盘, 而非取走即丢。entity 无 vanilla 兜底 (实体已被驱逐出
+     * 内存), gen2 是该坐标最新增量的唯一副本, 漏接力即永久静默丢失。与 chunk handleTerminalFailure CONSUMED 对称。
+     *
+     * <p>判定标准: 删 handleTerminalFailure 的接力分支 (回到取走即丢) -> gen2 从未提交 IO, submitCount 恒为
+     * 4 且末次提交是 gen1 (gen=1), 下面 submitCount/末代号断言挂; entitiesCompleted 变 0、entitiesFailed 变 1。
+     */
+    @Test
+    void terminal_io_failure_with_pending_relays_latest_generation() {
+        EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        // maxRetries=3: gen1 attempt 1..3 inline 失败 REQUEUE 重投, attempt 4 用手动 future 维持在途, 以便
+        // 在 "gen1 终态前" 登记 gen2; attempt 5 (gen2 接力) 成功落盘。
+        CompletableFuture<Void> gen1FinalFuture = new CompletableFuture<>();
+        java.util.concurrent.atomic.AtomicInteger submitCount = new java.util.concurrent.atomic.AtomicInteger();
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            int n = submitCount.incrementAndGet();
+            if (n <= 3) {
+                CompletableFuture<Void> failed = new CompletableFuture<>();
+                failed.completeExceptionally(new java.io.IOException("disk full attempt " + n));
+                return failed;
+            }
+            if (n == 4) {
+                return gen1FinalFuture;
+            }
+            return CompletableFuture.completedFuture(null);
+        };
+        EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, null, reofferHolder[0]);
+            relay.execute();
+        };
+
+        EntitySaveTask task = new EntitySaveTask(gen1, metrics, submitter, null, reofferHolder[0]);
+        task.execute();             // gen1 attempt 1..4, 末次停在 gen1FinalFuture 在途
+
+        // 碰撞登记 gen2 (gen1 仍在终态前的在途 attempt 4).
+        state.markDirty();          // gen=2
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        EntitySnapshot gen2Pending = snapshotForGeneration(state, 2L);
+        state.registerPendingSnapshot(gen2Pending);
+
+        // gen1 attempt 4 失败 -> retryCount=4>3 FAILED_TERMINAL -> 接力 gen2 -> attempt 5 成功.
+        gen1FinalFuture.completeExceptionally(new java.io.IOException("disk full attempt 4 final"));
+
+        assertEquals(5, submitCount.get(),
+                "gen1 提交 4 次 (1 首投+3 重投) 耗尽后, 终态必须接力 gen2 再提交 1 次 = 5");
+        CompoundTag lastSubmitted = submittedTags.get(submittedTags.size() - 1);
+        assertEquals(2L, submittedGeneration(lastSubmitted),
+                "entity 终态接力必须把碰撞后最新代 (gen=2) 落盘, 而非取走丢弃");
+        assertEquals(EntitySaveState.Phase.CLEAN, state.phase(), "gen2 接力落地后 phase 回 CLEAN");
+        assertFalse(state.mustDrain(), "接力链落地后 mustDrain 清零");
+        assertFalse(state.hasPendingSnapshot(), "pending 已被接力消费, 槽清空");
+
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(1L, snap.entitiesCompleted(), "gen2 接力落盘计 entitiesCompleted 一次");
+        assertEquals(0L, snap.entitiesFailed(), "gen2 接力成功, 旧代终态不再算丢失, entitiesFailed 为 0");
+        assertEquals(4L, snap.entitiesRetried(), "gen1 三次 REQUEUE + 一次终态接力 = entitiesRetried 四次");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(0L, snap.mustDrainPending(), "mustDrain gauge 配平归零");
+    }
+
+    /**
+     * c0 修复收敛性 (entity 终态接力级联): gen2 接力的 IO 也失败时, 因 retryCount 不重置 (沿用 gen1 已耗尽
+     * 预算), 接力 IO 一次即 FAILED_TERMINAL 且槽已空 -> 一步收敛到真终态, 不无限接力。锁住 "不重置 retryCount"
+     * 的收敛纪律 (重置会让持续 IO 故障下永不终态、无限接力)。
+     *
+     * <p>判定标准: 若 handleTerminalFailure 重置了 retryCount, gen2 接力会再吃满 maxRetries 次重投,
+     * submitCount 远超 5; 本断言 submitCount==5 (gen1 四次 + gen2 一次) 锁死一步收敛。
+     */
+    @Test
+    void terminal_relay_when_relay_also_fails_converges_in_one_step() {
+        EntitySaveState state = new EntitySaveState(new ChunkPos(3, -5).toLong(), "minecraft:overworld", 1L);
+        SaveMetrics metrics = new SaveMetrics();
+
+        state.markDirty();          // gen=1
+        state.trySnapshot();
+        state.enterSerializing();   // inFlightGeneration=1
+        EntitySnapshot gen1 = snapshotForGeneration(state, 1L);
+        metrics.incInFlightSerializing();
+
+        CompletableFuture<Void> gen1FinalFuture = new CompletableFuture<>();
+        java.util.concurrent.atomic.AtomicInteger submitCount = new java.util.concurrent.atomic.AtomicInteger();
+        List<CompoundTag> submittedTags = new ArrayList<>();
+        // 所有 attempt 都失败 (gen2 接力 IO 也失败); attempt 4 用手动 future 维持在途以便登记 gen2.
+        EntitySaveTask.IoSubmitter submitter = tag -> {
+            submittedTags.add(tag);
+            int n = submitCount.incrementAndGet();
+            if (n == 4) {
+                return gen1FinalFuture;
+            }
+            CompletableFuture<Void> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new java.io.IOException("persistent failure attempt " + n));
+            return failed;
+        };
+        EntitySaveTask.PendingReoffer[] reofferHolder = new EntitySaveTask.PendingReoffer[1];
+        reofferHolder[0] = pending -> {
+            metrics.incInFlightSerializing();
+            EntitySaveTask relay = new EntitySaveTask(pending, metrics, submitter, null, reofferHolder[0]);
+            relay.execute();
+        };
+
+        EntitySaveTask task = new EntitySaveTask(gen1, metrics, submitter, null, reofferHolder[0]);
+        task.execute();             // gen1 attempt 1..4, 末次停在 gen1FinalFuture 在途
+
+        state.markDirty();          // gen=2 碰撞登记
+        assertTrue(state.tryMarkMustDrain());
+        metrics.incMustDrainPending();
+        state.registerPendingSnapshot(snapshotForGeneration(state, 2L));
+
+        // gen1 attempt 4 失败 -> 终态接力 gen2 -> gen2 attempt 5 也失败 -> retryCount=5>3 立即终态, 槽空收敛.
+        gen1FinalFuture.completeExceptionally(new java.io.IOException("persistent failure attempt 4 final"));
+
+        assertEquals(5, submitCount.get(),
+                "gen1 四次 + gen2 接力一次 = 5 次提交后一步收敛, retryCount 不重置故不无限接力");
+        CompoundTag lastSubmitted = submittedTags.get(submittedTags.size() - 1);
+        assertEquals(2L, submittedGeneration(lastSubmitted),
+                "gen2 接力即便最终失败, 也必须真实提交过一次 IO (拿到唯一落盘机会)");
+        assertEquals(EntitySaveState.Phase.FAILED, state.phase(), "级联耗尽后 phase 终态 FAILED");
+        assertFalse(state.mustDrain(), "真终态收敛后 mustDrain 清零");
+        assertFalse(state.hasPendingSnapshot(), "pending 已被接力 take 走, 槽清空");
+
+        SaveMetrics.Snapshot snap = metrics.snapshot();
+        assertEquals(1L, snap.entitiesFailed(), "gen2 接力最终失败计 entitiesFailed 一次");
+        assertEquals(0L, snap.entitiesCompleted(), "全程无成功落盘");
+        assertEquals(4L, snap.entitiesRetried(), "gen1 三次 REQUEUE + 一次终态接力 = entitiesRetried 四次");
+        assertEquals(0L, snap.inFlightIoPending(), "ioPending gauge 配平归零");
+        assertEquals(0L, snap.inFlightSerializing(), "serializing gauge 配平归零");
+        assertEquals(0L, snap.mustDrainPending(), "mustDrain gauge 配平归零");
+    }
+
     private static int setMaxRetries(int value) throws Exception {
         Field f = com.shinoyuki.betterautosave.config.BetterAutoSaveConfig.class.getDeclaredField("maxRetries");
         f.setAccessible(true);
