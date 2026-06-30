@@ -1,6 +1,7 @@
 name: Issue 自动分诊
 
 # 维护者给 issue 手动打上 claude-triage 标签时触发: 只打标签 + 回一句中文 ack, 不下技术结论 (根因/修复留人工或 @claude)。
+# 例外: 正文带 spark profile 链接时, 额外跑一次自动预诊 (机器生成, 标注清楚供 @claude/维护者复核), 见 prompt 第 3 步。
 # 为何不在 issues opened 自动跑: claude-code-action 走 OIDC 换 GitHub App token 时会校验"触发者"对仓库的写权限,
 # 外部报告者开 issue 触发者无写权限, app token 换发必 401 (见 issue #20)。改由维护者手动打标签触发, 触发者恒有写权限,
 # 既保留 claude[bot] 身份又把外部触发面清零。鉴权走 Claude 订阅 OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret), 不消耗 API 余额。
@@ -24,9 +25,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
-            --model claude-sonnet-4-6
-            --max-turns 6
-            --allowedTools "Bash(gh:*)"
+            --model claude-sonnet-5
+            --max-turns 12
+            --allowedTools "Bash(gh:*),Bash(curl:*),Bash(python3:*)"
           prompt: |
             你在给 Minecraft mod 仓库 Shinoyuki-BetterAutoSave (Forge 1.20.1 / NeoForge 1.21.1 异步存盘优化 mod) 做 issue 自动分诊。
             目标 issue: #${{ github.event.issue.number }} —— 「${{ github.event.issue.title }}」
@@ -36,7 +37,8 @@ jobs:
             - `gh label list` 看仓库有哪些标签 (只能用已有的, 不要新建)。
             - 正文里若有「你觉得可能是哪类问题」, 那是报告者的初步猜测, 仅供参考, 最终按正文实际内容判定。
 
-            只做以下两件事, 不要分析根因、不给修复方案 (技术结论留人工或 @claude 触发):
+            默认只做下面 1、2 两件事 (打标签 + 不含分析的 ack 评论), 不分析根因、不给修复方案 (技术结论留人工或 @claude 触发);
+            唯一例外: 正文带 spark profile 链接时, 额外做第 3 件事 —— spark 自动预诊 (见下)。
 
             1. 多维度打标签 (先 `gh label list` 确认, 只用已有标签、不要新建):
                一次性把判定出来的标签用逗号加上, 例 `gh issue edit ${{ github.event.issue.number }} --add-label "bug,forge,area:chunk-save,crash"`。
@@ -56,7 +58,7 @@ jobs:
             2. 回一条简短中文评论 (`gh issue comment ${{ github.event.issue.number }} --body "..."`):
                硬性规则: 评论里**绝对不要**做任何技术分析或根因推测 —— 不要出现"问题可能出在X""跟Y有关""值得排查Z"
                "是…导致的""…之间有时序/协调问题"这类判断, 哪怕信息很全、你心里已有想法, 也一个字都不要写。任何
-               根因或方向分析一律留给人工或 @claude。
+               根因或方向分析一律留给人工或 @claude。(唯一例外是第 3 步的 spark 预诊, 它必须单独成块、清楚标注为机器预诊; 本条 ack 评论本身仍然零分析。)
                评论**只允许**包含下面这些, 别的不要写:
                - 一句感谢 + 确认已记录正在排查;
                - (可选) 一句"已归类为 <这些标签>";
@@ -64,3 +66,17 @@ jobs:
                  外加 BAS 版本与复现步骤); 信息齐全就别要、只道谢确认, 并对已给的表示收到;
                - (可选) 报告者选的「可能是」与你打的类型标不一致时, 一句"已按 X 归类, 若不对请补充", 但不要解释为什么。
                语气友好、不堆术语、不用 emoji 和颜文字。
+
+            3. (仅当正文含 spark profile 链接时才做; 没有就跳过, 当作不存在) spark 自动预诊:
+               spark 解析工具已随仓库 checkout 在 scripts/spark/ (纯 Python 标准库, ubuntu runner 自带 python3/curl, 无需装依赖)。
+               取数 + 解析:
+               - 从链接 `https://spark.lucko.me/<id>` 取出 <id> (域名后那段, 去掉末尾 / 和 ? 参数)。
+               - `curl -fsSL https://bytebin.lucko.me/<id> -o /tmp/profile.sparksampler` 拉原始 protobuf (bytebin 约存 60 天)。
+               - `python3 scripts/spark/spark_tree.py /tmp/profile.sparksampler "Server thread"` —— 主依据, 看 inclusive 调用树最热路径。
+               - `python3 scripts/spark/spark_report.py /tmp/profile.sparksampler` —— 补充, 看 BY MOD SOURCE 归因和 SUBSYSTEM ROLLUP。
+               - curl 或解析失败 (链接过期 / 不是服务端 spark / 取不到数据) 就别硬来, 评论里如实说"spark 链接没能自动取到数据 (可能已过期), 已转人工/@claude", 不编造。
+               判读纪律 (踩过的坑, 必须守):
+               - 以 spark_tree.py 的 inclusive 调用树 + spark_report.py 的 BY MOD SOURCE 为准。
+               - **绝不**只看 self-time / SUBSYSTEM ROLLUP 下结论: spark 叶子 self-time 会把 BAS 注入逻辑的成本误归到 fastutil / JDK collections, 让 BAS 在 self-time 里显示接近 0; 只有 inclusive 树能把成本归回 BAS 的 handler$...betterautosave$... 注入帧。
+               - 这是初判不是定论, 拿不准就说拿不准, 不硬给根因。
+               输出: 单独再发一条评论 (`gh issue comment`), 开头一行明确标注 "自动预诊 (机器生成, 供 @claude / 维护者复核, 可能有误, 不作结论)", 正文 3 行内: 最热 inclusive 路径 + 占比、初步指向哪个子系统、是否 BAS 相关。中文、不堆术语、不用 emoji。
