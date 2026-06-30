@@ -170,31 +170,64 @@ public final class EntitySaveTask implements SaveTask {
     private void onIoFailure(EntitySaveState state, CompoundTag tag, Throwable cause) {
         EntitySaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
         if (outcome == EntitySaveState.IoOutcome.FAILED_TERMINAL) {
-            // 有意偏差 (与 NeoForge 1.21 vanilla): vanilla EntityStorage.storeEntities 经 reportSaveFailureIfPresent
-            // 在 entity-chunk IO 写失败时异步写 <world>/debug/chunk-*-server.txt 诊断文件。BAS 把 IO 移到 worker,
-            // 改以 ERROR 日志 (带 dim+坐标) + 有界重试替代该 debug 文件 —— 对运维等价或更强 (日志可聚合), 且与
-            // chunk 路径 (ChunkSaveTask) 一致的系统性选择。运维改 grep "[BetterAutoSave] entity IO store failed"。
-            // 重试耗尽: ioFailed 内部 CAS 已清 mustDrain boolean, 用其返回值配平 gauge,
-            // 杜绝"读快照 + 内部静默 clear"拆分导致的孤儿 inc 漏 dec.
-            if (state.lastTransitionClearedMustDrain()) {
-                metrics.decMustDrainPending();
-            }
-            // 终态前若挂着接力快照, 在飞 task 已死无法接力, 该坐标实体已被 vanilla 驱逐出内存 (无 isUnsaved
-            // 等价门可让 vanilla 兜底), 这份最新实体增量永久丢失。entity 无坐标恢复队列, 取走清空防泄漏并明示
-            // ERROR (带 dim+坐标)。
-            if (state.takePendingSnapshot() != null) {
-                LOGGER.error("[BetterAutoSave] entity chunk {} dim={} had a pending relay snapshot when IO hit "
-                                + "terminal retry limit; its latest entity increment is lost (entities already "
-                                + "evicted from memory, no vanilla fallback)",
-                        snapshot.pos(), snapshot.dimension().location());
-            }
-            metrics.recordEntityFailed();
+            handleTerminalFailure(state);
             return;
         }
         // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
         // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
         metrics.recordEntityRetried();
         submitIo(state, tag);
+    }
+
+    /**
+     * FAILED_TERMINAL (IO 重试耗尽) 后接力槽处置, 与 {@link ChunkSaveTask#handleTerminalFailure} 的 CONSUMED /
+     * EMPTY_DEAD 两态对称 (entity 无 PREPARING/HANDED_TO_MAIN —— 无 dispatchSaveEvent 窗口, 槽是裸
+     * AtomicReference, 不存在主线程仍在改写未就绪 tag 的态)。
+     *
+     * <p><b>有意偏差 (与 NeoForge 1.21 vanilla)</b>: vanilla EntityStorage.storeEntities 经
+     * reportSaveFailureIfPresent 在 entity-chunk IO 写失败时异步写 {@code <world>/debug/chunk-*-server.txt}
+     * 诊断文件。BAS 把 IO 移到 worker, 改以 ERROR 日志 (带 dim+坐标) + 有界重试替代该 debug 文件 —— 对运维
+     * 等价或更强 (日志可聚合), 且与 chunk 路径 (ChunkSaveTask) 一致的系统性选择。运维改
+     * grep "[BetterAutoSave] entity IO store failed"。
+     *
+     * <p><b>为何旧代终态仍要接力 pending</b>: gen1 的 tag 反复写盘失败到耗尽预算, 但碰撞登记的 gen2 是另一份
+     * 独立快照, 其 tag 一次都没提交过。实体已被 vanilla 驱逐出内存且 entity 无坐标恢复队列, gen2 是该坐标最新
+     * 实体增量的唯一副本 —— 丢弃即永久静默丢失。接力把它包成新 task 重投, 至少拿到一次真实写盘机会 (重投的首次
+     * submitIo 必提交一次, 不看 retryCount)。这与 onIoSuccess / onUnhandledError 撞 pending 的接力一致, 补齐
+     * 本路径此前唯一漏接力的遗漏。
+     *
+     * <p><b>retryCount 不重置 (级联收敛)</b>: 接力沿用 gen1 已耗尽的重试预算 (同一 state 属性)。接力 IO 成功则
+     * CLEAN_LANDED 自然归零; 接力 IO 再失败立即 FAILED_TERMINAL 且此刻槽已空 (gen2 已被取走) 走真终态 ERROR ——
+     * 级联一步收敛, 不会在持续 IO 故障 (满盘/坏盘) 下无限接力 (entity 无 vanilla 兜底, 重置预算反让持续故障
+     * 永不终态)。与 {@link ChunkSaveTask#handleTerminalFailure} 同一收敛纪律。
+     *
+     * <p><b>写后读对偶不破坏</b>: {@link EntitySaveState#ioFailed} 已先把 phase 写成 FAILED (终态, 非在飞),
+     * 本方法再 takePendingSnapshot 析构式读槽 —— 与主线程 {@link EntityPendingRelayCoordinator#registerAndSelfKick}
+     * 的 "先写槽再重读 phase" 互为先写后读, getAndSet 裁定唯一消费者防双投, 与 CLEAN_LANDED 路径同纪律。
+     */
+    private void handleTerminalFailure(EntitySaveState state) {
+        EntitySnapshot pending = (EntitySnapshot) state.takePendingSnapshot();
+        if (pending != null && pendingReoffer != null) {
+            // 槽非空且 sink 可达: 接力 gen2 一次 (CONSUMED 语义)。mustDrain 恢复 (接力在途, 关服 join 须继续等),
+            // 跳过 ioFailed 清除的 honor-dec —— gauge 维持, 由接力链终态唯一清+dec, 与 chunk CONSUMED 同构。
+            state.markMustDrain();
+            state.reenterSerializingForPending(pending.capturedGeneration());
+            safeReoffer(state, pending);
+            metrics.recordEntityRetried();
+            return;
+        }
+        // 槽空 (常规终态) 或 sink 不可达 (单测未注入接力): 真终态死亡。honor ioFailed 的 mustDrain 清除配平 gauge。
+        if (state.lastTransitionClearedMustDrain()) {
+            metrics.decMustDrainPending();
+        }
+        if (pending != null) {
+            // 槽非空但无 reoffer sink: 无法接力, entity 无 vanilla 兜底, 该坐标最新实体增量永久丢失, 明示 ERROR。
+            LOGGER.error("[BetterAutoSave] entity chunk {} dim={} had a pending relay snapshot when IO hit "
+                            + "terminal retry limit but no reoffer sink; its latest entity increment is lost "
+                            + "(entities already evicted from memory, no vanilla fallback)",
+                    snapshot.pos(), snapshot.dimension().location());
+        }
+        metrics.recordEntityFailed();
     }
 
     /**
