@@ -142,10 +142,13 @@ dependencies {
     annotationProcessor 'io.github.llamalad7:mixinextras-common:0.3.5'
 
     implementation fg.deobf("io.github.llamalad7:mixinextras-forge:0.3.5")
-    // 上界放到 0.5 (含 0.4.x): 整合包里别的 mod (如 Create 内嵌 mixinextras-forge 0.4.1) 要求 >=0.4.x,
-    // 卡死 <0.4.0 会让 FML JarSelector 选不出共同版本而崩服。封顶 <0.5 让运行期停在 0.4 线 (与 Create
-    // 等已验证版本一致), 不把整包 MixinExtras 拉到最新 0.5.x 引入未验证变量。0.4.x 向后兼容 @WrapOperation API。
-    jarJar(group: 'io.github.llamalad7', name: 'mixinextras-forge', version: '[0.3.5,0.5)')
+    // JarJar 内嵌固定 0.5.4, 但对外声明兼容范围 [0.3.5,): 内嵌版本与声明范围解耦。此前封顶 <0.5 (与内嵌 0.4.1
+    // 绑死), 在整合包出现要求 mixinextras >=0.5 的 mod (如 C2ME/letmefix/hariplayer) 时与其区间交集为空,
+    // FML JarSelector 选不出共同版本, 直接崩服 (#22)。开放上界后 FML 取包内最高版, BAS 随之上 0.5.x;
+    // 声明下界仍留 0.3.5, 不反向强制只装 0.4.x 的包升级。@WrapOperation API 0.3~0.5 向后兼容。
+    jarJar(group: 'io.github.llamalad7', name: 'mixinextras-forge', version: '0.5.4') {
+        jarJar.ranged(it, '[0.3.5,)')
+    }
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.0'
