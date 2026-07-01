@@ -16,6 +16,7 @@
     "MinecraftServerMixin",
     "SavedDataMixin",
     "SectionStorageLoadMixin",
+    "accessor.ChunkAccessAccessor",
     "accessor.ChunkMapAccessor",
     "accessor.ChunkSerializerInvoker",
     "accessor.ChunkStorageAccessor",

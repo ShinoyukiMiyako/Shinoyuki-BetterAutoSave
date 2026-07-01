@@ -9,7 +9,9 @@ import com.shinoyuki.betterautosave.core.load.ChunkLoadTask;
 import com.shinoyuki.betterautosave.core.load.LoadDeferredActions;
 import com.shinoyuki.betterautosave.core.load.LoadResult;
 import com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline;
+import com.shinoyuki.betterautosave.BetterAutoSaveMod;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
+import com.shinoyuki.betterautosave.mixin.accessor.ChunkAccessAccessor;
 import com.shinoyuki.betterautosave.mixin.accessor.ChunkMapAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -30,7 +32,9 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,14 +49,39 @@ import java.util.concurrent.Executor;
  * 光照传播(贵)走 {@link ThreadedLevelLightEngine} 异步; 主线程只做 O(1 个 chunk) 的引用替换
  * + 入队 + 发包 (约等于 vanilla 平时加载一个 chunk)。
  *
- * <p>原地替换全程只用 vanilla 公有 API 操作 live {@link LevelChunk} (getSections 返回内部数组引用,
- * clearAllBlockEntities / addAndRegisterBlockEntity / setHeightmap / initializeLightSources / setUnsaved
- * 皆 public), 故<b>不需要</b>对 LevelChunk 注入 mixin —— 保对象 identity 不变, ChunkHolder 的 future
- * 仍指向同一 live 对象 (内容已换)。
+ * <p>原地替换的<b>成功路径</b>全程只用 vanilla 公有 API 操作 live {@link LevelChunk} (getSections
+ * 返回内部数组引用, clearAllBlockEntities / addAndRegisterBlockEntity / setHeightmap /
+ * initializeLightSources / setUnsaved 皆 public), 保对象 identity 不变, ChunkHolder 的 future 仍指向同一
+ * live 对象 (内容已换)。
+ *
+ * <p><b>失败回滚路径</b>需要一处 accessor mixin: install 从 setLightCorrect(false)/arraycopy 起就地
+ * 破坏性 mutate live chunk, 中途抛错会停在半改态。为让 INSTALL_FAILED 的"已回滚, 不留半个 chunk"文案
+ * 名副其实, mutate 前先对 live 拍浅快照, 抛错时精确回灌。其中 {@code pendingBlockEntities} (keepPacked
+ * 形态未物化的 BE NBT) 无公有读/清/写入口, 且 {@code clearAllBlockEntities()} 不清它 —— 漏了它回滚就非
+ * byte-exact 假绿, 故经 {@link ChunkAccessAccessor} 拿引用后就地还原。
  */
 public final class OnlineChunkRestorer {
 
+    /**
+     * install() 半改态回滚的可注入故障点 (生产恒为 no-op)。gametest 注入 {@code Consumer<ChunkPos>}, 令
+     * install 在 arraycopy 之后、setUnsaved 之前抛, 从而验证回滚把 live chunk 精确还原。抽成 seam 而非在测试
+     * 里另造抛点, 是为把"抛在半改态中段"这一精确时机固定下来 (mirror
+     * ChunkCaptureProcedure#swapSaveEventDispatcher)。
+     *
+     * <p>吃 {@link ChunkPos} 而非无参: GameTest 同类多用例可能并发跑, 静态注入器是共享全局; 传 pos 让测试
+     * 把抛点<b>限定到自己那个 chunk</b>, 避免误伤同批次其它用例的 install (它们退化为 no-op)。
+     */
+    private static volatile java.util.function.Consumer<ChunkPos> faultInjector = pos -> { };
+
     private OnlineChunkRestorer() {
+    }
+
+    /** 仅供 gametest 注入 install 半改态故障点 (按 pos 自限定); 返回原值供 teardown 还原。生产代码不调。 */
+    public static java.util.function.Consumer<ChunkPos> swapFaultInjector(
+            java.util.function.Consumer<ChunkPos> injector) {
+        java.util.function.Consumer<ChunkPos> prev = faultInjector;
+        faultInjector = injector;
+        return prev;
     }
 
     /**
@@ -141,45 +170,121 @@ public final class OnlineChunkRestorer {
             return ChunkRestoreOutcome.INSTALL_FAILED;
         }
 
-        // 替换期间先标光照失效; 安装尾声由光引擎异步置回。
-        live.setLightCorrect(false);
-        // 解绑旧方块实体 (onChunkUnloaded + setRemoved + ticker 重绑 NULL_TICKER 失活), vanilla 卸载语义。
-        live.clearAllBlockEntities();
-        // 整段引用替换 sections (引用拷贝, 非逐方块); source 用后即弃, 浅拷贝即 vanilla 加载语义。
-        System.arraycopy(srcSections, 0, liveSections, 0, liveSections.length);
-        // 用新方块重算高度图 (而非拷快照高度图): 保证与替换后方块自洽, 消除 R3。仅重算 live 已持有的类型。
-        Set<Heightmap.Types> heightmapTypes = EnumSet.noneOf(Heightmap.Types.class);
+        // 事务快照 (mutate 前): install 从 setLightCorrect(false)/arraycopy 起破坏性改 live chunk, 中途抛
+        // 错会停在半改态。抛错须能精确回灌, 故先对 live 拍浅快照。sections 只浅拷引用数组 (回滚 arraycopy
+        // 回去即可, section 对象本身在成功前不被改); BE 表/pending 表/heightmap raw 各存副本。
+        LevelChunkSection[] savedSections = liveSections.clone();
+        Map<BlockPos, BlockEntity> savedBlockEntities = new LinkedHashMap<>(live.getBlockEntities());
+        Map<BlockPos, CompoundTag> livePending =
+                ((ChunkAccessAccessor) live).betterautosave$getPendingBlockEntities();
+        Map<BlockPos, CompoundTag> savedPending = new LinkedHashMap<>(livePending);
+        Map<Heightmap.Types, long[]> savedHeightmapRaw = new EnumMap<>(Heightmap.Types.class);
         for (Map.Entry<Heightmap.Types, Heightmap> entry : live.getHeightmaps()) {
-            heightmapTypes.add(entry.getKey());
+            savedHeightmapRaw.put(entry.getKey(), entry.getValue().getRawData().clone());
         }
-        if (!heightmapTypes.isEmpty()) {
-            Heightmap.primeHeightmaps(live, heightmapTypes);
-        }
-        // 用新方块重建天空光源列 (skyLightSources.fillFrom), 供光引擎跨 section 遮挡判定 (R6)。
-        live.initializeLightSources();
-        // 装入快照方块实体: source 已 runPostLoad, 其 BE 仅 setBlockEntity 过未注册; addAndRegisterBlockEntity
-        // 完成首次注册 (ticker + game event listener + onLoad), 不双挂 (R2/R5)。
-        for (BlockEntity blockEntity : source.getBlockEntities().values()) {
-            live.addAndRegisterBlockEntity(blockEntity);
-        }
-        // keepPacked 形态 BE 仍是 pending NBT, 原样过继 (上面 live BE 在此 getBlockEntityNbt 返回 null 被跳过)。
-        for (BlockPos blockPos : source.getBlockEntitiesPos()) {
-            CompoundTag nbt = source.getBlockEntityNbt(blockPos);
-            if (nbt != null) {
-                live.setBlockEntityNbt(nbt);
+        boolean savedLightCorrect = live.isLightCorrect();
+
+        try {
+            // 替换期间先标光照失效; 安装尾声由光引擎异步置回。
+            live.setLightCorrect(false);
+            // 解绑旧方块实体 (onChunkUnloaded + setRemoved + ticker 重绑 NULL_TICKER 失活), vanilla 卸载语义。
+            // 注意: clearAllBlockEntities 不清 pendingBlockEntities, 下面须显式清后重灌新 pending。
+            live.clearAllBlockEntities();
+            livePending.clear();
+            // 整段引用替换 sections (引用拷贝, 非逐方块); source 用后即弃, 浅拷贝即 vanilla 加载语义。
+            System.arraycopy(srcSections, 0, liveSections, 0, liveSections.length);
+            // 用新方块重算高度图 (而非拷快照高度图): 保证与替换后方块自洽, 消除 R3。仅重算 live 已持有的类型。
+            Set<Heightmap.Types> heightmapTypes = EnumSet.noneOf(Heightmap.Types.class);
+            for (Map.Entry<Heightmap.Types, Heightmap> entry : live.getHeightmaps()) {
+                heightmapTypes.add(entry.getKey());
             }
+            if (!heightmapTypes.isEmpty()) {
+                Heightmap.primeHeightmaps(live, heightmapTypes);
+            }
+            // 用新方块重建天空光源列 (skyLightSources.fillFrom), 供光引擎跨 section 遮挡判定 (R6)。
+            live.initializeLightSources();
+            // 装入快照方块实体: source 已 runPostLoad, 其 BE 仅 setBlockEntity 过未注册; addAndRegisterBlockEntity
+            // 完成首次注册 (ticker + game event listener + onLoad), 不双挂 (R2/R5)。
+            for (BlockEntity blockEntity : source.getBlockEntities().values()) {
+                live.addAndRegisterBlockEntity(blockEntity);
+            }
+            // keepPacked 形态 BE 仍是 pending NBT, 原样过继 (上面 live BE 在此 getBlockEntityNbt 返回 null 被跳过)。
+            for (BlockPos blockPos : source.getBlockEntitiesPos()) {
+                CompoundTag nbt = source.getBlockEntityNbt(blockPos);
+                if (nbt != null) {
+                    live.setBlockEntityNbt(nbt);
+                }
+            }
+            // 测试注入的故障点 (生产恒为 no-op): 令 install 在 arraycopy 之后、setUnsaved 之前抛,
+            // 覆盖"半改态"回滚。仅供 gametest 验证回滚 (按 pos 自限定), 生产代码不设置。
+            faultInjector.accept(pos);
+            // 标脏: 交 vanilla/BAS 正常存盘把 restored 落盘 (in-memory = restored 即真理, 不直写盘)。
+            live.setUnsaved(true);
+        } catch (Throwable installError) {
+            rollback(live, liveSections, livePending, savedSections, savedBlockEntities,
+                    savedPending, savedHeightmapRaw, savedLightCorrect, pos, installError);
+            return ChunkRestoreOutcome.INSTALL_FAILED;
         }
-        // 标脏: 交 vanilla/BAS 正常存盘把 restored 落盘 (in-memory = restored 即真理, 不直写盘)。
-        live.setUnsaved(true);
 
         // 异步点亮 (光引擎独立线程, 不卡主线程): 镜像 vanilla load 的 INITIALIZE_LIGHT + LIGHT 两阶段。
         // 点亮完成后再回主线程重发, 保证 light 包数据完整 (尤其无烘焙光的快照)。
+        // 已知遗留 (本次不修, DESIGN §3.6): 下面 thenCompose/thenAcceptAsync 链无 .exceptionally() —— 异步
+        // 光照/重发若抛, live 会永久停在 lightCorrect=false 且不重发且被静默吞。这是与本次同源的另一缺口,
+        // 建议后续单独补 .exceptionally() 记录并把 lightCorrect 收敛回来。
         ThreadedLevelLightEngine lightEngine = chunkSource(level).getLightEngine();
         boolean hadStoredLight = source.isLightCorrect();
         lightEngine.initializeLight(live, hadStoredLight)
                 .thenCompose(ignored -> lightEngine.lightChunk(live, hadStoredLight))
                 .thenAcceptAsync(ignored -> resend(level, live, pos), mainExec);
         return ChunkRestoreOutcome.OK;
+    }
+
+    /**
+     * 半改态回滚 (install 抛错时): 按与 mutate 相反的依赖顺序把 live chunk 精确还原到 mutate 前快照。
+     *
+     * <p>顺序: arraycopy 还原 sections -> clearAllBlockEntities -> pending.clear() -> 逐个
+     * addAndRegisterBlockEntity(旧 BE) -> 回灌旧 pending -> 逐 type 写回旧 heightmap raw ->
+     * initializeLightSources() 用还原后的方块重建光源列 -> setLightCorrect(旧值) -> setUnsaved。
+     *
+     * <p>二次失败 (回滚本身抛): 第一版不新增枚举 (BB 逐字依赖 ChunkRestoreOutcome, 增删破坏跨仓 API),
+     * 仅在 BAS 日志区分 "install 抛" 与 "回滚也抛", 结果仍归 INSTALL_FAILED。
+     */
+    private static void rollback(
+            LevelChunk live,
+            LevelChunkSection[] liveSections,
+            Map<BlockPos, CompoundTag> livePending,
+            LevelChunkSection[] savedSections,
+            Map<BlockPos, BlockEntity> savedBlockEntities,
+            Map<BlockPos, CompoundTag> savedPending,
+            Map<Heightmap.Types, long[]> savedHeightmapRaw,
+            boolean savedLightCorrect,
+            ChunkPos pos,
+            Throwable installError) {
+        try {
+            System.arraycopy(savedSections, 0, liveSections, 0, liveSections.length);
+            live.clearAllBlockEntities();
+            livePending.clear();
+            for (BlockEntity blockEntity : savedBlockEntities.values()) {
+                live.addAndRegisterBlockEntity(blockEntity);
+            }
+            livePending.putAll(savedPending);
+            for (Map.Entry<Heightmap.Types, long[]> entry : savedHeightmapRaw.entrySet()) {
+                live.setHeightmap(entry.getKey(), entry.getValue());
+            }
+            live.initializeLightSources();
+            live.setLightCorrect(savedLightCorrect);
+            live.setUnsaved(true);
+            BetterAutoSaveMod.LOGGER.error(
+                    "[BetterAutoSave] 在线回退 chunk {} install 抛错, 已回滚到安装前状态 (不留半个 chunk)",
+                    pos, installError);
+        } catch (Throwable rollbackError) {
+            // 回滚路径本身抛: chunk 可能仍处半改态, 无法进一步保证一致性。结果仍归 INSTALL_FAILED,
+            // 但日志显式区分 "install 抛 + 回滚也抛" 以便定位。原始 install 异常挂为 rollback 异常的 suppressed。
+            rollbackError.addSuppressed(installError);
+            BetterAutoSaveMod.LOGGER.error(
+                    "[BetterAutoSave] 在线回退 chunk {} install 抛错后回滚也抛错, chunk 可能仍处半改态; "
+                            + "原 install 异常见 suppressed", pos, rollbackError);
+        }
     }
 
     /** 重发整块给视距内玩家 (纯服务端, 原版客户端整块覆盖); 不需 clearCache (对象 identity 不变)。 */
