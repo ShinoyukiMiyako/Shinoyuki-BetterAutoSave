@@ -16,11 +16,11 @@ run-gametest/
 
 /.idea/
 /.vscode/
-/.eclipse/
-/.settings/
-/.project
-/.classpath
-/eclipse/
+.eclipse/
+.settings/
+.project
+.classpath
+eclipse/
 *.iml
 *.ipr
 *.iws
@@ -47,3 +47,5 @@ AGENTS.md
 
 # ƽ̨����ͼ�������ز�, ����վ�ϴ������ֿ�
 branding/
+
+docs/mcmod-page.txt
