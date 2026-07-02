@@ -59,7 +59,7 @@ class SavedDataDirtyOrderingTest {
         CompoundTag tag = new CompoundTag();
         tag.putInt("v", 1);
         return new SavedDataSnapshot(name, file, AtomicNbtWriter.serializeUncompressed(tag), data,
-                new ConcurrentHashMap<>(), inFlight);
+                new ConcurrentHashMap<>(), name, inFlight);
     }
 
     /**

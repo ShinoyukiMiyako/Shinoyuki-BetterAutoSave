@@ -126,7 +126,7 @@ public final class SavedDataSaveTask implements SaveTask {
 
     private void releaseInFlight() {
         if (snapshot.inFlight() != null) {
-            snapshot.inFlight().remove(snapshot.fileName());
+            snapshot.inFlight().remove(snapshot.inFlightKey());
         }
     }
 

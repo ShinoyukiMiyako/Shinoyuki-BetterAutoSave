@@ -58,7 +58,7 @@ class SavedDataDirtyOrderingTest {
     private SavedDataSnapshot snapshot(String name, File file, SavedData data, Set<String> inFlight) {
         CompoundTag tag = new CompoundTag();
         tag.putInt("v", 1);
-        return new SavedDataSnapshot(name, file, tag, data, new ConcurrentHashMap<>(), inFlight);
+        return new SavedDataSnapshot(name, file, tag, data, new ConcurrentHashMap<>(), name, inFlight);
     }
 
     /**

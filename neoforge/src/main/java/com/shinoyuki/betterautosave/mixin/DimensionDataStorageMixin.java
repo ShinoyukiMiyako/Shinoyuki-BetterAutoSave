@@ -122,12 +122,14 @@ public abstract class DimensionDataStorageMixin {
                 continue;
             }
             File file = invoker.betterautosave$getDataFile(name);
-
-            // 在途文件名去重. savedDataWorkerThreads 可配 1-4, 同名 .dat 被多 worker 并发写会交错损坏.
-            // 上个周期该文件的 worker 还没写完 (in-flight) 就跳过本周期 dispatch, 不清 dirty → 下个
-            // autosave 周期自然重试. add 成功才往下走;
-            // 失败 (已在途) continue 且保持 dirty.
-            if (!pipeline.savedDataInFlight().add(name)) {
+            // 在途去重 key 用目标文件完整路径, 不用裸文件名: savedDataInFlight 是全服单份跨所有维度, 而各
+            // 维度各有一份同名 SavedData (如每维度都有 "chunks"/"Forced"), 落到 <dim>/data/ 下不同文件.
+            // 裸名做 key 会让下界/末地的 "chunks" 撞上主世界已在途的 "chunks" 被整周期跳过, 落盘频率随维度数
+            // 下降; 文件路径做 key 则各维度互不干扰. add 成功才往下走; 失败 (该文件真的在途) continue 且保持
+            // dirty, 下个 autosave 周期自然重试. savedDataWorkerThreads 可配 1-4, 去重防同一 .dat 被多 worker
+            // 并发写交错损坏.
+            String inFlightKey = file.getPath();
+            if (!pipeline.savedDataInFlight().add(inFlightKey)) {
                 continue;
             }
 
@@ -145,7 +147,7 @@ public abstract class DimensionDataStorageMixin {
                 // RuntimeException 会透出) 则 remove(name) 被跳过 → 该名称永久占位, 后续每周期 add 失败被
                 // 跳过, 该 SavedData 失去 BAS 增量保护仅剩关服兜底. SavedDataSyncFallback.syncWrite 用
                 // try-finally 释放占位. 异常仍按 vanilla 等价语义透出.
-                SavedDataSyncFallback.syncWrite(savedData, file, this.registries, pipeline.savedDataInFlight(), name);
+                SavedDataSyncFallback.syncWrite(savedData, file, this.registries, pipeline.savedDataInFlight(), inFlightKey);
                 continue;
             }
 
@@ -172,7 +174,7 @@ public abstract class DimensionDataStorageMixin {
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
                 // mod 序列化抛, 未入 worker, 释放在途占位.
-                pipeline.savedDataInFlight().remove(name);
+                pipeline.savedDataInFlight().remove(inFlightKey);
                 LOGGER.error("[BetterAutoSave] SavedData {} mod serialization threw, skipping this cycle (data still dirty for next cycle)",
                         name, t);
                 continue;
@@ -180,7 +182,7 @@ public abstract class DimensionDataStorageMixin {
 
             try {
                 SavedDataSnapshot snapshot = new SavedDataSnapshot(name, file, tag, savedData,
-                        betterautosave$lastWrittenSize, pipeline.savedDataInFlight());
+                        betterautosave$lastWrittenSize, inFlightKey, pipeline.savedDataInFlight());
                 metrics.recordSavedDataSubmitted();
                 // 乐观清 dirty 必须发生在 enqueue 之前。若放在 offer 之后, 是 lost-update: worker 是独立线程,
                 // offer 把 task 交给 worker 后主线程还要再跑两行才清 dirty; 持续性 IO 故障下 worker 的
@@ -204,7 +206,7 @@ public abstract class DimensionDataStorageMixin {
                 // serializing gauge 已由 SavedDataDispatch.enqueue 在 offer 失败时配平, 此处不再碰。
                 metrics.recordSavedDataFallback();
                 // dispatch 抛, 未成功入 worker, 释放在途占位.
-                pipeline.savedDataInFlight().remove(name);
+                pipeline.savedDataInFlight().remove(inFlightKey);
                 LOGGER.error("[BetterAutoSave] SavedData {} dispatch failed, falling back to direct sync write",
                         name, t);
                 // 用已构好的 tag 直接写盘, 不调 savedData.save(file) 避免 mod

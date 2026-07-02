@@ -152,7 +152,7 @@ class SnapshotPipelineDegradedTest {
         String name = "test_stranded_saveddata";
         pipeline.savedDataInFlight().add(name);
         SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
-                savedData, null, pipeline.savedDataInFlight());
+                savedData, null, name, pipeline.savedDataInFlight());
         metrics.incInFlightSerializing();
         pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
 

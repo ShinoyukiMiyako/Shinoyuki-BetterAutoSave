@@ -41,7 +41,7 @@ class SavedDataInFlightDedupTest {
         CompoundTag tag = new CompoundTag();
         tag.putInt("v", 1);
         return new SavedDataSnapshot(name, file, AtomicNbtWriter.serializeUncompressed(tag), new StubSavedData(),
-                new ConcurrentHashMap<>(), inFlight);
+                new ConcurrentHashMap<>(), name, inFlight);
     }
 
     @Test
@@ -92,5 +92,43 @@ class SavedDataInFlightDedupTest {
         SaveMetrics.Snapshot s = metrics.snapshot();
         assertEquals(1L, s.savedDataFailed(), "写盘失败必须计 savedDataFailed");
         assertEquals(0L, s.savedDataCompleted());
+    }
+
+    /**
+     * 多维度同名 SavedData 回归: savedDataInFlight 全服单份跨所有维度, 各维度各有一份同名 SavedData
+     * (如每维度都有 "chunks") 落到不同文件. 去重 key 必须是目标文件完整路径, 否则下界/末地的同名会撞上
+     * 主世界已在途的同名被整周期跳过 (落盘频率随维度数下降), 释放时又会连带误放.
+     *
+     * <p>判定标准: 把 mixin 去重 key 或 SavedDataSaveTask.releaseInFlight 从 file.getPath() 改回裸
+     * fileName -> 两维度同名文件 key 相同: 第二个 add 失败 (下界被跳过) / 释放其一即连带释放另一, 断言挂.
+     */
+    @Test
+    void same_name_saveddata_in_different_dimensions_tracked_independently(@TempDir Path dir) {
+        Set<String> inFlight = ConcurrentHashMap.newKeySet();
+        String name = "chunks"; // 各维度同名 .dat
+        File overworld = dir.resolve("overworld").resolve(name + ".dat").toFile();
+        File nether = dir.resolve("DIM-1").resolve(name + ".dat").toFile();
+        String keyOverworld = overworld.getPath();
+        String keyNether = nether.getPath();
+
+        // 以文件路径为 key: 两维度同名文件必须都能独立进入在途 (裸名 key 下下界的 add 会失败被整周期跳过).
+        assertTrue(inFlight.add(keyOverworld), "主世界 chunks 入在途");
+        assertTrue(inFlight.add(keyNether),
+                "下界同名 chunks 必须能独立入在途, 不被主世界的同名占位挡下");
+
+        SaveMetrics metrics = new SaveMetrics();
+        metrics.incInFlightSerializing();
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("v", 1);
+        SavedDataSnapshot snap = new SavedDataSnapshot(name, overworld,
+                AtomicNbtWriter.serializeUncompressed(tag), new StubSavedData(),
+                new ConcurrentHashMap<>(), keyOverworld, inFlight);
+        new SavedDataSaveTask(snap, metrics).execute();
+
+        // 释放按 inFlightKey (路径): 只放主世界那份, 下界那份仍在途 (不被同名连带释放).
+        assertFalse(inFlight.contains(keyOverworld), "主世界 task 跑完释放自己的在途占位");
+        assertTrue(inFlight.contains(keyNether),
+                "释放必须按文件路径, 不得因同名连带释放下界那份 (否则下界 .dat 会被并发写交错损坏)");
+        assertTrue(overworld.exists(), "主世界 chunks 应已落盘");
     }
 }

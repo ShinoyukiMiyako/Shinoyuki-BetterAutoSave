@@ -30,14 +30,14 @@ public final class SavedDataSyncFallback {
      * @param savedData  目标 SavedData (调其 save(File, registries))
      * @param file       落盘目标文件
      * @param registries 1.21.1 SavedData.save(File, HolderLookup.Provider) 必需的注册表
-     * @param inFlight   在途文件名去重集合
-     * @param name       该 SavedData 的文件名 (在途占位 key)
+     * @param inFlight    在途去重集合 (全服单份, 跨所有维度)
+     * @param inFlightKey 该 .dat 的在途占位 key (= 目标文件完整路径, 跨维度唯一)
      */
-    public static void syncWrite(SavedData savedData, File file, HolderLookup.Provider registries, Set<String> inFlight, String name) {
+    public static void syncWrite(SavedData savedData, File file, HolderLookup.Provider registries, Set<String> inFlight, String inFlightKey) {
         try {
             savedData.save(file, registries);
         } finally {
-            inFlight.remove(name);
+            inFlight.remove(inFlightKey);
         }
     }
 }

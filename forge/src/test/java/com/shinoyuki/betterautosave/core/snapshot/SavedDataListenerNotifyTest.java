@@ -52,7 +52,7 @@ class SavedDataListenerNotifyTest {
 
     private static SavedDataSnapshot snapshot(String name, File file, CompoundTag tag) {
         return new SavedDataSnapshot(name, file, AtomicNbtWriter.serializeUncompressed(tag),
-                new StubSavedData(), new ConcurrentHashMap<>(), ConcurrentHashMap.newKeySet());
+                new StubSavedData(), new ConcurrentHashMap<>(), name, ConcurrentHashMap.newKeySet());
     }
 
     /**

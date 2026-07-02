@@ -153,7 +153,7 @@ class SnapshotPipelineDegradedTest {
         pipeline.savedDataInFlight().add(name);
         SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"),
                 AtomicNbtWriter.serializeUncompressed(new CompoundTag()),
-                savedData, null, pipeline.savedDataInFlight());
+                savedData, null, name, pipeline.savedDataInFlight());
         metrics.incInFlightSerializing();
         pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
 

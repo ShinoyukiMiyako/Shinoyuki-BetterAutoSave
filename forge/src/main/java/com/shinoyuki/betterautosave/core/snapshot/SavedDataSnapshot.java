@@ -32,9 +32,12 @@ import java.util.concurrent.ConcurrentHashMap;
  *                        worker 写盘成功后回写 size, 让 mixin 下次守卫优先用历史 size 而非
  *                        file.length() (后者在 NFS / SMB 不可靠, 且首次写无值). null 表示
  *                        未启用 (向后兼容).
- * @param inFlight        pipeline 共享的在途文件名集合. mixin 入队前 add(fileName)
- *                        成功才 dispatch, worker task finally remove(fileName). 防多 worker
- *                        并发写同名 .dat. null 表示未启用 (向后兼容).
+ * @param inFlightKey     在途去重 key = 目标 .dat 完整路径 (file.getPath()). 各维度各有一份同名
+ *                        SavedData (如每维度都有 "chunks") 落到不同文件, 必须用文件路径而非裸文件名做
+ *                        key, 否则跨维度同名会相互误判在途、非首维度整周期被跳过 (savedDataInFlight 全服单份).
+ * @param inFlight        pipeline 共享的在途去重集合 (全服单份, 跨所有维度). mixin 入队前
+ *                        add(inFlightKey) 成功才 dispatch, worker task finally remove(inFlightKey). 防多
+ *                        worker 并发写同一 .dat. null 表示未启用 (向后兼容).
  */
 public record SavedDataSnapshot(
         String fileName,
@@ -42,6 +45,7 @@ public record SavedDataSnapshot(
         byte[] nbtBytes,
         SavedData savedData,
         ConcurrentHashMap<String, Long> historySizeMap,
+        String inFlightKey,
         Set<String> inFlight
 ) {
 }
