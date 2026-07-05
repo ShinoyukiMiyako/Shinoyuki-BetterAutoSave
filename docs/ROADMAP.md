@@ -32,10 +32,10 @@
 | v0.7.0 | 已落地 | SavedData / DimensionDataStorage 异步化 + SaveListener 公开 API | `DimensionDataStorage.save` 主线程同步 NBT/IO 移到 worker; chunk/entity/SavedData 三类 listener API 解锁 BetterBackup |
 | v0.7.1 | 已落地 | 4 agent 审查 + 1 验证 agent 后的 9 项修复 (4 Critical/Major + 5 Minor) | C1 entity emptyChunks 数据丢失 / C2 SaveTask gauge 配对 / C3 drainPending 加 inFlightSerializing / M3 capture 异常复位 phase / M1 POI flush / M7 大文件历史 size / M8 异常路径不双重 save / M9 worker 直接 setDirty / M11 wasAccessibleSinceLastSave |
 | **v0.9.0** | **已落地** | 工具化与监控: Prometheus exporter + hottest-chunks 命令 | 服主自助定位 mod / vanilla 瓶颈, 不再依赖外接 spark profiler |
-| ~~v0.8~~ | 已废弃 (2026-05) | ~~chunk load 路径异步化~~ | 2026-05 生态调研后决定不做, 见专门小节 |
+| v0.8 (完整版) | 废弃; 收窄版 0.16.0 落地 | chunk load 路径异步化 | 铺开整个 ChunkStatus 升级链 + worldgen 的完整版 2026-05 弃; 只搬 read 阶段的收窄版 0.16.0 opt-in 落地 (`load.enabled`), 见专门小节 |
 
 > **当前**: v0.10 已落地. 后续路线参考[候选版本](#候选版本)段.
-> 顺序原则: v0.8 chunk load 已废弃, 不在路线图; mod-tick-trace / WebUI 推迟, 等系列其他 mod (BetterBackup) 上线后做统一面板更划算.
+> 顺序原则: v0.8 chunk load 完整版 (整条升级链) 已废弃, 但收窄的 read 阶段异步化已在 0.16.0 opt-in 落地; mod-tick-trace / WebUI 推迟, 等系列其他 mod (BetterBackup) 上线后做统一面板更划算.
 > **多版本**: 自 2026-06 起 BAS 同源维护 Forge 1.20.1 + NeoForge 1.21.1 双加载器 (单仓 common/forge/neoforge 多模块 source-merge). 本路线图记录 1.20.1 演进史; NeoForge 1.21.1 端口设计、移植破坏点与执行结果见 [MULTIVERSION_PLAN.md](MULTIVERSION_PLAN.md).
 
 > **实施顺序调整**: 原计划 v0.3 (实体路径异步化) → v0.4 (unload). 实施时跳过 v0.3 直接做 v0.4, 因 unload spike 是用户最痛点 (实战 0.55% spike + teleport 集中场景 50-200ms). v0.3 实体路径转为 v0.6 候选 (路线图后挪一档).
@@ -71,7 +71,7 @@ spark `--only-ticks-over 50`, 10 分钟, max=206ms
 | 嫌疑 | spike-only frame | 性质 | BAS 路线图覆盖 |
 |---|---|---|---|
 | MTR `RailwayData.simulateTrains` | 0.52% | mod hot path, 列车 forEach 全表扫 | 否 (mod 配置层解决) |
-| `ChunkSerializer.read` (chunk load 同步) | 0.29% | vanilla 加载新 chunk 反序列化 | 原 v0.5 (现 v0.8 已废弃) |
+| `ChunkSerializer.read` (chunk load 同步) | 0.29% | vanilla 加载新 chunk 反序列化 | v0.8 完整版废弃, 收窄版 (read 阶段) 0.16.0 opt-in 落地 |
 | `DistanceManager.runAllUpdates` (光照传播) | 1.01% | vanilla chunk 距离重排 + light propagation | 间接缓解 |
 | `processUnloads` → `saveChunkIfNeeded` | 0.55% | vanilla unload 同步保存 | v0.4 (已落地) |
 | Lightman's Currency `BankAPIImpl.GetAllBankAccounts` | 0.16% | mod hot path, 每 tick 全表扫 | 否 |
@@ -79,7 +79,7 @@ spark `--only-ticks-over 50`, 10 分钟, max=206ms
 
 v0.2 已 100% 解决其能解决的部分 (`saveAllChunks(false)` 路径主线程 NBT). 剩余 spike 元凶分两类:
 1. mod hot path 需 mod 自身或社区 fork 解决
-2. vanilla `read` / unload 路径同步 IO, BAS v0.4 (已落地) 接管 unload, chunk load 路径已废弃 (见 v0.8 废弃节)
+2. vanilla `read` / unload 路径同步 IO, BAS v0.4 (已落地) 接管 unload, chunk load 完整版废弃、收窄的 read 阶段 0.16.0 opt-in 落地 (见 v0.8 节)
 
 ## 已落地版本详解
 
@@ -443,7 +443,7 @@ scrape_configs:
 
 ## Forge 1.20.1 生态调研与 BAS 定位 (2026-05)
 
-调研了 Forge 1.20.1 上 chunk 异步化方向的现有 mod 后, 确认这块活跃维护的同类项目不多, 并据此**放弃 v0.8 chunk load 异步化方向** (详见已废弃节).
+调研了 Forge 1.20.1 上 chunk 异步化方向的现有 mod 后, 确认这块活跃维护的同类项目不多, 并据此**放弃 v0.8 铺开整个 chunk load 流水线 (ChunkStatus 升级链 + worldgen) 异步化的方向** (详见已废弃节). 但其中**风险最小的单一阶段 —— 反序列化 (read) 阶段离开主线程 —— 已在 0.16.0 作为 opt-in 功能落地** (`load.enabled`, 默认关), 正是废弃节"替代方向"里预留的收窄路径.
 
 ### 主流 chunk 异步化 mod 状态
 
@@ -453,7 +453,7 @@ scrape_configs:
 | C2ME (Fabric, ishland) | Fabric | n/a | 活跃维护 | chunk gen + IO + load 全套 |
 | C2MEF ([RelativityMC/C2ME-forge](https://github.com/RelativityMC/C2ME-forge)) | Forge | 是 (0.2.0+alpha.12) | 2025-07-12 已 archived | chunk gen + IO + load, 不碰 SavedData |
 | Starlight Forge | Forge | 是 (1.1.2) | 已 archived | LightEngine 重写 |
-| BAS | Forge | 是, 活跃维护 | 当前 v0.10 | chunk save + entity save + SavedData |
+| BAS | Forge | 是, 活跃维护 | 当前 v0.16 | chunk save + entity save + SavedData + chunk load (0.16.0 起, opt-in 仅 read 阶段) |
 
 **结论**: 截至 2026-05 调研, Forge 1.20.1 上专做 chunk save 异步化且仍活跃维护的同类不多 (C2MEF / Starlight Forge 均已 archived, Moonrise 专注 Fabric / NeoForge). SavedData (`DimensionDataStorage.save()`) 异步化目前也少见同类覆盖, 是相对新的方向. BAS 的定位是把 Forge 1.20.1 这条 save 路径持续做下去 — 异步存档是整个社区共同的课题, 哪天出现更成熟的方案对用户都是好事.
 
@@ -463,14 +463,15 @@ BAS mixin 拦截点 (1.20.1 Forge 版, 见 [shinoyuki_betterautosave.mixins.json
 - `ChunkMap.saveAllChunks(boolean)` HEAD
 - `ChunkMap.save(ChunkAccess)` HEAD
 - `EntityStorage.storeEntities(ChunkEntities)` HEAD
+- `ChunkMap.scheduleChunkLoad` 内 `thenApplyAsync` (0.16.0 异步加载, `load.enabled=false` 默认关时不激活) — 配套 `ChunkSerializerLoadMixin` / `SectionStorageLoadMixin` / `LevelChunkCapsLoadMixin` 截 read 阶段副作用回主线程
 - 几个 Accessor / Invoker (纯 getter, 无业务逻辑撞车)
 
-BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升级链 / entity tick / 网络包 / 渲染.
+BAS 不碰: LightEngine 内部状态 / worldgen / ChunkStatus 升级链 / entity tick / 网络包 / 渲染. chunk 加载调度在 `load.enabled=false` (默认) 时同样不碰; 开启异步加载后仅接管 `scheduleChunkLoad` 的反序列化 (read) 阶段, 不触碰 ChunkStatus 升级链与 worldgen.
 
 | 优化 mod | 兼容性 | 理由 |
 |---|---|---|
 | Starlight (Forge 1.20.1) | 兼容 | BAS 只用公共 API `getDataLayerData()` 读 DataLayer, Starlight 必须保持该 API 契约 (vanilla save 也用), `DataLayer.copy()` 是 `byte[].clone` 与底层引擎实现解耦 |
-| C2MEF (Forge 1.20.1 alpha) | 直接冲突 | 都拦 `ChunkMap.save()`, 同装会双层 mixin, 二选一. C2MEF 已 archived, 实际同装的情况应该很少 |
+| C2MEF (Forge 1.20.1 alpha) | 存档侧直接冲突; 加载侧条件冲突 | 都拦 `ChunkMap.save()`, 存档路径同装双层 mixin, 二选一. 加载路径: BAS `load.enabled=false` (默认) 下不碰, 与 C2MEF 并行加载互补; 一旦 `load.enabled=true`, 两者都改 `scheduleChunkLoad` 加载调度, 加载侧也需二选一. C2MEF 已 archived, 实际同装的情况应该很少 |
 | Modernfix | 兼容 | 内存 / 启动优化, 不碰 chunk save 路径 |
 | FerriteCore | 兼容 | 改 BlockState 内存表示, BAS 用 `PalettedContainer.copy()` 走标准路径 |
 | Radium / Canary (Lithium 移植) | 兼容 | 改 entity / block tick, 不碰 save 路径 |
@@ -487,9 +488,9 @@ BAS 不碰: LightEngine 内部状态 / chunk 加载 / worldgen / ChunkStatus 升
 
 ### v0.8.0 — chunk load 路径异步化 [已废弃]
 
-**状态**: 废弃 (2026-05 生态调研后决定不做)
+**状态**: 原完整版 (铺开整个 ChunkStatus 升级链 + worldgen 异步化) 废弃 (2026-05 生态调研后决定不做). 但下方"替代方向"预留的收窄路径 —— 只把反序列化 (read) 阶段搬离主线程 —— 已在 **0.16.0 作为 opt-in 功能落地** (`load.enabled`, 默认关): `ChunkMapLoadMixin` 用 `@Redirect` 截 `scheduleChunkLoad` 的 `thenApplyAsync`, read lambda 拆出的纯解析投 load worker, POI/光照/`ChunkDataEvent.Load` 副作用经主线程 replay 回放, 全程无 join 非阻塞; 后台解析失败用同一份字节主线程重读兜底, 零数据丢失. 本节以下记录的是**被废弃的完整版**理由, 收窄版的存在不推翻这些理由 —— 恰恰是因为完整版三条难点成立, 才只做了风险最小的 read 阶段.
 
-#### 放弃理由
+#### 放弃理由 (完整版)
 
 1. **vanilla 1.20.1 已经把容易的部分异步化了**: `IOWorker.loadAsync` 已异步, `ChunkSerializer.read` 已在 `Util.backgroundExecutor`, `ProtoChunk` 构造已在 worker 池. 真正还在主线程的是 ChunkStatus 升级链 + LightEngine 增量 + PoiManager 加载 + EntityStorage 注入, 不是简单"丢线程池"能解决.
 
