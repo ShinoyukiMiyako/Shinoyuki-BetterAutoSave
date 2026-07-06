@@ -134,13 +134,15 @@ public abstract class DimensionDataStorageMixin {
                 continue;
             }
 
-            // 大文件 fallback: 现存文件已超阈值, 走 vanilla 同步避免 worker queue
-            // 被几十 MB 单文件堵死.
-            // 优先用历史 size (worker 上次写完回写), 兜底再用
-            // file.length(). 历史 size 在 NFS / SMB 远程 fs 上比 file.length() 可靠.
-            // 首次写仍无保护 (没有历史也没有现存文件), 文档化为已知限制.
+            // 大文件 fallback: 超阈值走 vanilla 同步避免主线程分配巨型未压缩 byte[] + 堵 worker queue。
+            // 守卫判据 = 主线程 serializeUncompressed 将分配的未压缩内存足迹 (非 gzip 后磁盘尺寸)。历史 size 由
+            // worker 回写本进程上次的未压缩字节长度, 精确; 无历史 (进程刚启动/首次) 时从磁盘 gzip 后尺寸按保守压缩比
+            // (10x, NBT gzip 常 5-10x) 上估未压缩, 防 49MB 磁盘文件 (未压缩可达几百 MB) 在无历史窗口漏过闸门在
+            // 主线程炸内存。真首写 (无历史无文件) 无从估计仍为 0, 文档化为已知限制 (常规 SavedData 均 KB-低 MB, 够不到门槛)。
             Long historySize = betterautosave$lastWrittenSize.get(name);
-            long sizeForGuard = historySize != null ? historySize : (file.exists() ? file.length() : 0L);
+            long sizeForGuard = historySize != null
+                    ? historySize
+                    : (file.exists() ? file.length() * 10L : 0L);
             if (sizeForGuard > maxBytes) {
                 metrics.recordSavedDataFallback();
                 // 同步 fallback 不入 worker, 占位释放责任在本地. 若 save(file) 无 finally, 抛 Throwable
@@ -172,7 +174,8 @@ public abstract class DimensionDataStorageMixin {
                 // (字节不可能 alias 任何 live 对象), 取代过去的 tag.copy() 深拷贝: 同样安全且更彻底, 但不分配平行 NBT
                 // 对象树, 对超大 SavedData 不再是主线程秒级尖峰 (issue #12); worker 端只 gzip + 写。序列化抛
                 // (病态 mod tag) 走下方同一 fallback。
-                nbtBytes = AtomicNbtWriter.serializeUncompressed(tag);
+                nbtBytes = AtomicNbtWriter.serializeUncompressed(tag,
+                        historySize != null ? (int) Math.min(historySize, Integer.MAX_VALUE) : 0);
             } catch (Throwable t) {
                 metrics.recordSavedDataFallback();
                 // mod 序列化抛, 未入 worker, 释放在途占位.

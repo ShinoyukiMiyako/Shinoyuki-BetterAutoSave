@@ -28,10 +28,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * @param nbtBytes        主线程序列化好的未压缩 NBT 字节 (外层 tag 含 {@code data} 子 tag + DataVersion)
  * @param savedData       反引用, 失败时 worker 通过 server.execute 调
  *                        {@link SavedData#setDirty()} 重新 mark dirty 让下个周期重试
- * @param historySizeMap  mixin 实例共享的 fileName -> 上次落盘 size map.
- *                        worker 写盘成功后回写 size, 让 mixin 下次守卫优先用历史 size 而非
- *                        file.length() (后者在 NFS / SMB 不可靠, 且首次写无值). null 表示
- *                        未启用 (向后兼容).
+ * @param historySizeMap  mixin 实例共享的 fileName -> 上次落盘的未压缩字节长度 map.
+ *                        worker 写盘成功后回写 {@code nbtBytes.length} (未压缩, 非 gzip 后磁盘尺寸), 让 mixin
+ *                        下次的大文件守卫按主线程真实内存足迹判据 (守卫要拦的正是 serializeUncompressed 分配的
+ *                        未压缩 byte[])。null 表示未启用 (向后兼容).
  * @param inFlightKey     在途去重 key = 目标 .dat 完整路径 (file.getPath()). 各维度各有一份同名
  *                        SavedData (如每维度都有 "chunks") 落到不同文件, 必须用文件路径而非裸文件名做
  *                        key, 否则跨维度同名会相互误判在途、非首维度整周期被跳过 (savedDataInFlight 全服单份).

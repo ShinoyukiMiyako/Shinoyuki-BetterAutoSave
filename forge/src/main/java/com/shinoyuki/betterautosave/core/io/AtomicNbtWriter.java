@@ -52,7 +52,19 @@ public final class AtomicNbtWriter {
      * @return 未压缩 NBT 字节 (与 {@link NbtIo#write(CompoundTag, java.io.DataOutput)} 同格式)
      */
     public static byte[] serializeUncompressed(CompoundTag tag) {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        return serializeUncompressed(tag, 0);
+    }
+
+    /**
+     * 同 {@link #serializeUncompressed(CompoundTag)}, 但用 {@code sizeHint} 预设 ByteArrayOutputStream 初始容量.
+     *
+     * <p>默认容量 (32B) 起步在写超大 SavedData 时要反复翻倍扩容, 每次翻倍拷贝整段已写字节, 对几百 MB 的
+     * SavedData 是主线程上一串递增的大拷贝尖峰。用上次落盘的未压缩字节长度做提示一次性开够, 避免反复扩容。
+     *
+     * @param sizeHint 初始容量提示 (通常传上次落盘的未压缩字节长度); &lt;=0 用默认容量
+     */
+    public static byte[] serializeUncompressed(CompoundTag tag, int sizeHint) {
+        ByteArrayOutputStream baos = sizeHint > 0 ? new ByteArrayOutputStream(sizeHint) : new ByteArrayOutputStream();
         try {
             NbtIo.write(tag, new DataOutputStream(baos));
         } catch (IOException e) {

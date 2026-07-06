@@ -118,10 +118,15 @@ public final class ConfigSpec {
                 .defineInRange("maxRetries", 3, 0, 10);
 
         SAVED_DATA_MAX_FILE_SIZE_MB = BUILDER
-                .comment("v0.7: SavedData files larger than this threshold are written synchronously (vanilla path)",
-                         "instead of dispatched to the worker queue.",
-                         "Prevents a single oversized file (e.g. corrupted MTR train data) from blocking",
-                         "the savedData worker queue for many seconds.",
+                .comment("v0.7: SavedData whose UNCOMPRESSED serialized size exceeds this threshold are written",
+                         "synchronously (vanilla streaming path) instead of dispatched to the worker queue.",
+                         "The threshold bounds the main-thread memory footprint (the uncompressed byte[] that",
+                         "serialize-once allocates), NOT the on-disk .dat size: it is compared against the last",
+                         "written uncompressed length, or - with no history yet - the on-disk gzip size scaled up",
+                         "by a conservative ratio to estimate the uncompressed footprint. So a compressible file",
+                         "far under this in MB on disk can still be routed sync when its in-memory form is large.",
+                         "Prevents a single oversized SavedData from spiking main-thread allocation / blocking the",
+                         "savedData worker queue for many seconds.",
                          "Default 50 MB covers typical mod-registered SavedData; raise if you have legitimate",
                          "files larger than this and confirmed your worker IO can handle them.")
                 .defineInRange("savedDataMaxFileSizeMB", 50, 1, 1024);

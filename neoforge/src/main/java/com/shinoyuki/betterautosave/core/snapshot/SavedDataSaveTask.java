@@ -62,9 +62,10 @@ public final class SavedDataSaveTask implements SaveTask {
             metrics.recordIoStoreNs(System.nanoTime() - submitNs);
             metrics.decInFlightIoPending();
             metrics.recordSavedDataCompleted();
-            // 回写历史 size, 让 mixin 守卫下次有可靠数据.
+            // 回写历史 size = 本次未压缩字节长度 (非 gzip 后磁盘尺寸), 让 mixin 守卫按主线程真实内存足迹判据:
+            // 大文件闸门要拦的是主线程 serializeUncompressed 分配的未压缩 byte[], 用压缩后尺寸会低估 5-10 倍放行超标文件。
             if (snapshot.historySizeMap() != null) {
-                snapshot.historySizeMap().put(snapshot.fileName(), snapshot.targetFile().length());
+                snapshot.historySizeMap().put(snapshot.fileName(), (long) snapshot.nbtBytes().length);
             }
             // BAS 公开 API: SavedData 已成功落盘. 触发外部 listener (BetterBackup 等).
             fireListenersIfAny();
