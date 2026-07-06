@@ -140,7 +140,12 @@ public final class ConfigSpec {
                          "  100% vanilla-equivalent semantics. Worker only does IO. Perf gain reduced (sections encoded on main thread).",
                          "DISABLED: skip the event entirely. Worker assembles sections (same path as PARTIAL).",
                          "  Use only when you are certain no listener mod relies on ChunkDataEvent.Save.",
-                         "  Saves the per-chunk event dispatch overhead but breaks any mod that hooks Save.")
+                         "  Saves the per-chunk event dispatch overhead but breaks any mod that hooks Save.",
+                         "COMPAT WARNING: PARTIAL/DISABLED assemble sections without calling ChunkSerializer.write, so a mod",
+                         "  that injects extra chunk NBT by mixing into ChunkSerializer.write directly (instead of via",
+                         "  ChunkDataEvent.Save or Forge capabilities, both of which PARTIAL still honors) has its serialization",
+                         "  bypassed and that data silently dropped every save, with no error. Flip to FULL if you run such a mod",
+                         "  (FULL invokes the real write()).")
                 .defineEnum("eventCompatMode", EventCompatMode.PARTIAL);
 
         BUILDER.pop();

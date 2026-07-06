@@ -88,6 +88,8 @@ A few mods listen to the "chunk save" event. This switch controls how complete t
 
 When unsure, stay on PARTIAL.
 
+> Note: under PARTIAL/DISABLED, BAS assembles sections itself and never calls vanilla `ChunkSerializer.write`. If a mod injects custom chunk data by mixing into `ChunkSerializer.write` directly (rather than via `ChunkDataEvent.Save` or Forge capabilities — both still honored under PARTIAL), its serialization is bypassed and that data is silently dropped on every save with no error. Switch to FULL if you run such a mod.
+
 ### Async chunk loading (experimental, off by default)
 
 > Back up your entire world folder before enabling this. It is experimental and changes the chunk *loading* path — moving the step that parses save bytes into game objects (deserialization) onto background threads. By design, even if background parsing fails it falls back to re-reading the same bytes on the main thread and loses no data; but any feature that touches the loading path may hit an edge case not covered under your specific mod combination. Backing up first is taking responsibility for your own saves.
