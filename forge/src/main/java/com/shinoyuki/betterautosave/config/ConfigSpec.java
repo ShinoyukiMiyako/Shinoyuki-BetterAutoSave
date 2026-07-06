@@ -165,7 +165,15 @@ public final class ConfigSpec {
                          "load time (a MixinConfigPlugin reads it from disk), so the load-side bytecode is absent entirely",
                          "when off - this keeps it from clashing at startup with mods that rewrite scheduleChunkLoad /",
                          "ChunkSerializer.read (e.g. C2ME-forge). Because of that, toggling this on/off requires a server",
-                         "restart to change mixin application; a runtime config hot-reload alone will not enable it.")
+                         "restart to change mixin application; a runtime config hot-reload alone will not enable it.",
+                         "COMPAT CONTRACT: when on, ChunkSerializer.read runs on a load worker. BAS defers all KNOWN",
+                         "vanilla/Forge main-thread side effects (POI, light, ForgeCaps, ChunkDataEvent.Load) back to the",
+                         "main thread, but any OTHER mod that injects into ChunkSerializer.read (or the LevelChunk ctor / the",
+                         "Codecs it uses) runs on that worker. A third-party injection that THROWS self-heals (the worker",
+                         "throws, the terminal fallback re-reads on the main thread, no data lost); one that does NOT throw",
+                         "but assumes the main thread (writes a non-concurrent collection, fires a main-thread-only event) can",
+                         "silently race/corrupt and the fallback will not fire. Before enabling, confirm no mod injects",
+                         "main-thread state into ChunkSerializer.read, or keep this off / use loadEventCompatMode=FULL.")
                 .define("enabled", false);
 
         LOAD_EVENT_COMPAT_MODE = BUILDER

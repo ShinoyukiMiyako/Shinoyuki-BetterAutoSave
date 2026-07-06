@@ -108,6 +108,8 @@ Off by default; enable it manually in the config. The relevant settings are in t
 
 If something goes wrong, set `load.enabled` back to `false`, or switch `loadEventCompatMode` to `FULL`, to return to vanilla loading behavior immediately (config hot-reload, no restart needed).
 
+> Note: `load.enabled` only takes effect at startup — while off, the async-load mixins are not injected at all (so they cannot clash at startup with mods that rewrite the load path, e.g. C2ME), which means turning it from off to on requires a server restart (turning it back off hot-reloads instantly). Once on, chunk deserialization runs on a background thread: vanilla and ordinary mods that use ForgeCaps / events are safe, but a mod that mixes into `ChunkSerializer.read` directly and assumes the main thread (writing a non-concurrent collection, firing a main-thread-only event) can silently misbehave without triggering the fallback. If unsure, keep it off or use `loadEventCompatMode=FULL`.
+
 ## In-game commands (OP required)
 
 | Command | Effect |
