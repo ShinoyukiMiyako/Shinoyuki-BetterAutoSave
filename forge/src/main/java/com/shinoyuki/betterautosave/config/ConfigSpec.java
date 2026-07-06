@@ -155,7 +155,12 @@ public final class ConfigSpec {
         LOAD_ENABLED = BUILDER
                 .comment("Master switch for async chunk loading. When false, ChunkSerializer.read stays entirely on",
                          "the main thread (vanilla behavior), independent of the global 'enabled' save switch.",
-                         "Default false: opt-in until the off-thread load path is proven on your modpack.")
+                         "Default false: opt-in until the off-thread load path is proven on your modpack.",
+                         "TAKES EFFECT AT STARTUP: the async-load mixins are applied (or skipped) based on this value at",
+                         "load time (a MixinConfigPlugin reads it from disk), so the load-side bytecode is absent entirely",
+                         "when off - this keeps it from clashing at startup with mods that rewrite scheduleChunkLoad /",
+                         "ChunkSerializer.read (e.g. C2ME-forge). Because of that, toggling this on/off requires a server",
+                         "restart to change mixin application; a runtime config hot-reload alone will not enable it.")
                 .define("enabled", false);
 
         LOAD_EVENT_COMPAT_MODE = BUILDER

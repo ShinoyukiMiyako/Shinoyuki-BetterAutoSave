@@ -2,6 +2,7 @@
   "required": true,
   "minVersion": "0.8.5",
   "package": "com.shinoyuki.betterautosave.mixin",
+  "plugin": "com.shinoyuki.betterautosave.mixin.BetterAutoSaveMixinPlugin",
   "compatibilityLevel": "JAVA_17",
   "refmap": "shinoyuki_betterautosave.refmap.json",
   "mixins": [
