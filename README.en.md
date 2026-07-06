@@ -176,4 +176,4 @@ Technical deep dive, ecosystem research, full compatibility matrix and the versi
 
 ## License
 
-See the LICENSE file.
+AGPL-3.0-or-later, with a modpack distribution exception ([LICENSE-EXCEPTION.md](LICENSE-EXCEPTION.md)): unmodified official release jars may be included verbatim in modpacks and server packs with no obligation beyond keeping the project name and a repository link. Modified versions are not covered by the exception and remain under the full AGPL, including its section 13 network terms.

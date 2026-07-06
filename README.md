@@ -176,4 +176,4 @@ port = 9450
 
 ## 许可
 
-见 LICENSE 文件。
+AGPL-3.0-or-later，附整合包分发例外（[LICENSE-EXCEPTION.md](LICENSE-EXCEPTION.md)）：官方发布的未修改 jar 可原样收录进整合包 / 服务端包，保留项目名与仓库链接即可，无额外义务。修改后的版本不适用例外，仍受 AGPL 全部条款约束（含第 13 条网络条款）。
