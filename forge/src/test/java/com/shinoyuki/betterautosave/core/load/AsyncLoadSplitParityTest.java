@@ -137,16 +137,18 @@ class AsyncLoadSplitParityTest {
 
     @Test
     void worker_calls_read_without_bracketing_whole_read_in_lock() throws IOException {
-        // v2.1 L1: execute 直接调 ChunkSerializer.read 跑 vanilla 解析, 但<b>整段不再持锁</b> (锁收缩进 read 内部的
-        // 结构解码 @WrapOperation, 见 structure_decode_handlers_bracket_codec_lock)。execute 自身既不 lock 也不 unlock。
-        MethodNode m = loadMethod("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "execute");
-        assertTrue(countCalls(m, "read") >= 1,
-                "ChunkLoadTask.execute 必须直接调 ChunkSerializer.read 跑 vanilla 纯解析");
-        assertEquals(0, countCalls(m, "lock"),
-                "v2.1 L1: execute 不得再 LoadCodecGuard.lock() 包整段 read (锁已收缩到 read 内结构解码 handler); "
+        // v2.1 L1: read 跑 vanilla 解析, 但<b>整段不再持锁</b> (锁收缩进 read 内部的结构解码 @WrapOperation, 见
+        // structure_decode_handlers_bracket_codec_lock)。重试编排抽到 readWithRetry seam 后 read 在 execute 传给 seam 的
+        // lambda 内, 故按 execute + 其 lambda 聚合统计; execute 及其 lambda 既不 lock 也不 unlock。
+        List<MethodNode> executeAndLambdas =
+                chainMethodAndItsLambdas("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "execute");
+        assertTrue(totalCalls(executeAndLambdas, "read") >= 1,
+                "ChunkLoadTask.execute (含其 lambda) 必须调 ChunkSerializer.read 跑 vanilla 纯解析");
+        assertEquals(0, totalCalls(executeAndLambdas, "lock"),
+                "v2.1 L1: read 不得再被 LoadCodecGuard.lock() 包整段 (锁已收缩到 read 内结构解码 handler); "
                         + "若此处仍 lock 则退回 v2 粗粒度串行 '一次只解一个'");
-        assertEquals(0, countCalls(m, "unlock"),
-                "v2.1 L1: execute 不得再 unlock (锁不在此); lock/unlock 均应只出现在结构解码 @WrapOperation handler 内");
+        assertEquals(0, totalCalls(executeAndLambdas, "unlock"),
+                "v2.1 L1: execute 及其 lambda 不得 unlock (锁不在此); lock/unlock 只应出现在结构解码 @WrapOperation handler 内");
     }
 
     /**

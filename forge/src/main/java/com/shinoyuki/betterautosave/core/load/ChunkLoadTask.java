@@ -101,59 +101,79 @@ public final class ChunkLoadTask implements SaveTask {
         LoadDeferredActions sink = new LoadDeferredActions();
         LoadDeferredActions.beginCapture(sink);
         try {
-            // 尝试上限 = 首次 + maxRetries 次重试。off-thread 解析抛几乎都是瞬态 (Codec 分发缓存竞态 / DFU 抖动),
-            // 在 worker 内先重试若干次再退主线程, 省去整段主线程 fallback read 的开销。终态仍抛 -> 由
-            // SerializationWorker 升级到 onUnhandledError 异常完成 future -> replay-stage exceptionallyAsync 退回
-            // vanilla 主线程 read (零丢失)。
-            int attempt = 0;
-            while (true) {
-                // 每次尝试前清空上一次失败尝试残留的延迟副作用, 防成功那次带出叠加陈旧 POI/光照写 (脏写)。
-                sink.clearForRetry();
+            // read-stage 的重试编排抽到可单测 seam readWithRetry (与 MC 解耦): 每次尝试前 clearForRetry 复位上一次
+            // 失败尝试残留的延迟副作用, 防成功那次带出叠加陈旧 POI/光照写 (脏写); 终态仍抛 -> 交 worker 走
+            // onUnhandledError 异常完成 future -> replay-stage 退回 vanilla 主线程 read (零丢失)。
+            // v2.1 L1: read 整段不再持锁, 唯一跨线程竞态 (结构拼图解码经共享 dispatch Codec / RegistryOps 缓存) 由
+            // ChunkSerializerLoadMixin 的 @WrapOperation 在 read 内精确包住 unpackStructureStart/References 时取
+            // LoadCodecGuard, 其余解码 thread-confined 无锁并行。
+            ProtoChunk parsed = readWithRetry(sink, maxRetries,
+                    () -> ChunkSerializer.read(level, poiManager, pos, tag),
+                    (attempt, t) -> {
+                        metrics.recordChunkLoadRetried();
+                        LOGGER.warn("[BetterAutoSave] async load deserialize threw for chunk {} dim={} (attempt {}/{}), "
+                                        + "retrying on worker before main-thread fallback",
+                                pos, level.dimension().location(), attempt, maxRetries, t);
+                    });
+            // 成功那刻取走截走副作用的快照 (此刻 sink 只含成功那次 read 的捕获, redirect 全部命中完毕、结构解码锁已释放),
+            // 与 chunk 一并封进 LoadResult 显式交给 future (不靠 join 隐式共享)。
+            List<Runnable> deferred = sink.drainCaptured();
+            // Tier A: read 已成功, 在 worker 上 join 预读的 POI 字节 (worker 闲, 阻塞无害)。POI 预读失败严格隔离:
+            // 退回 null 让主线程 replay 按 vanilla 自己读 POI (零数据影响), 绝不让 POI 故障触发上面区块 read 的重试
+            // —— 故此 join 的 try/catch 在区块 read 成功之后、与 read 的重试路径分离。
+            Optional<CompoundTag> poiNbt = null;
+            if (poiFuture != null) {
                 try {
-                    // v2.1 L1: read 整段不再持锁。worker 间唯一跨线程竞态 (结构拼图解码经共享 dispatch Codec /
-                    // RegistryOps 缓存) 由 ChunkSerializerLoadMixin 的 @WrapOperation 在 read 内部精确包住
-                    // unpackStructureStart/unpackStructureReferences 时才取 LoadCodecGuard, 其余 section/调色板/biome/
-                    // heightmap/方块实体/ForgeCaps 解码 thread-confined 无锁并行 (取代 v2 "一次只解一个" 的粗粒度串行)。
-                    ProtoChunk parsed = ChunkSerializer.read(level, poiManager, pos, tag);
-                    // 成功那刻取走截走副作用的快照, 与 chunk 一并封进 LoadResult 显式交给 future (不靠 join 隐式共享)。
-                    // 此刻本次 read 的 redirect 全部命中完毕 (结构解码锁也已在 read 内释放), 捕获列表完整。
-                    List<Runnable> deferred = sink.drainCaptured();
-                    // Tier A: read 已成功, 在 worker 上 join 预读的 POI 字节 (worker 闲, 阻塞无害)。POI 预读失败
-                    // 严格隔离: 退回 null 让主线程 replay 按 vanilla 自己读 POI (零数据影响), 绝不让 POI 故障触发
-                    // 上面区块 read 的重试 —— 故此 join 的 try/catch 在区块 read 成功之后、与 read 的 catch 分离。
-                    Optional<CompoundTag> poiNbt = null;
-                    if (poiFuture != null) {
-                        try {
-                            // 有限超时 join (非无界 join()): 关服窄窗下 IOWorker 已关、tryRead 的 future 可能永不完成,
-                            // 无界等会把本 load worker 永久钉死拖死关服 (inFlightLoadParsing 永不归零)。超时即放弃预读。
-                            poiNbt = poiFuture.get(POI_PREFETCH_JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                        } catch (TimeoutException poiTimeout) {
-                            LOGGER.warn("[BetterAutoSave] async POI prefetch timed out after {}s for chunk {} dim={} "
-                                            + "(IOWorker likely closing during shutdown), main thread will read POI inline",
-                                    POI_PREFETCH_JOIN_TIMEOUT_SECONDS, pos, level.dimension().location());
-                        } catch (Throwable poiErr) {
-                            LOGGER.warn("[BetterAutoSave] async POI prefetch failed for chunk {} dim={}, main thread "
-                                    + "will read POI inline", pos, level.dimension().location(), poiErr);
-                        }
-                    }
-                    result.complete(new LoadResult(parsed, deferred, poiNbt));
-                    return;
-                } catch (Throwable t) {
-                    if (attempt >= maxRetries) {
-                        // 重试耗尽: 上抛交 worker 走 onUnhandledError -> replay-stage fallback。不在此生吞。
-                        throw t;
-                    }
-                    attempt++;
-                    metrics.recordChunkLoadRetried();
-                    LOGGER.warn("[BetterAutoSave] async load deserialize threw for chunk {} dim={} (attempt {}/{}), "
-                                    + "retrying on worker before main-thread fallback",
-                            pos, level.dimension().location(), attempt, maxRetries, t);
+                    // 有限超时 join (非无界 join()): 关服窄窗下 IOWorker 已关、tryRead 的 future 可能永不完成, 无界等会把
+                    // 本 load worker 永久钉死拖死关服 (inFlightLoadParsing 永不归零)。超时即放弃预读。
+                    poiNbt = poiFuture.get(POI_PREFETCH_JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (TimeoutException poiTimeout) {
+                    LOGGER.warn("[BetterAutoSave] async POI prefetch timed out after {}s for chunk {} dim={} "
+                                    + "(IOWorker likely closing during shutdown), main thread will read POI inline",
+                            POI_PREFETCH_JOIN_TIMEOUT_SECONDS, pos, level.dimension().location());
+                } catch (Throwable poiErr) {
+                    LOGGER.warn("[BetterAutoSave] async POI prefetch failed for chunk {} dim={}, main thread "
+                            + "will read POI inline", pos, level.dimension().location(), poiErr);
                 }
             }
+            result.complete(new LoadResult(parsed, deferred, poiNbt));
         } finally {
             LoadDeferredActions.endCapture();
             metrics.recordLoadDeserializeNs(System.nanoTime() - t0);
             metrics.decInFlightLoadParsing();
+        }
+    }
+
+    /** read-stage 的一次尝试 (跑 vanilla {@code ChunkSerializer.read}); 抽成接口让重试 seam 与 MC 解耦可单测。 */
+    @FunctionalInterface
+    interface ReadAttempt<T> {
+        T read() throws Exception;
+    }
+
+    /**
+     * read-stage 的重试编排 (与 MC 解耦的可单测 seam)。尝试上限 = 首次 + {@code maxRetries} 次重试; off-thread 解析
+     * 抛几乎都是瞬态 (Codec 分发缓存竞态 / DFU 抖动), 在 worker 内先重试再退主线程, 省整段主线程 fallback read 开销。
+     *
+     * <p>每次尝试<b>前</b> {@link LoadDeferredActions#clearForRetry} 复位上一次失败尝试残留的延迟副作用, 保证成功那次
+     * 返回后 sink 只含该次的捕获 (不叠加失败尝试的陈旧 POI/光照写 = 脏写)。成功即返回其值; 重试耗尽<b>原样上抛</b>
+     * 最后一次异常 (不包装不吞), 交 worker 走 onUnhandledError 触发主线程 fallback。
+     *
+     * @param onRetry 每次决定重试 (非终态) 时回调一次, 入参为本次重试序号 (从 1 起) 与该次异常 (用于计数 + 诊断日志)
+     */
+    static <T> T readWithRetry(LoadDeferredActions sink, int maxRetries, ReadAttempt<T> attempt,
+                               java.util.function.BiConsumer<Integer, Throwable> onRetry) throws Exception {
+        int n = 0;
+        while (true) {
+            sink.clearForRetry();
+            try {
+                return attempt.read();
+            } catch (Throwable t) {
+                if (n >= maxRetries) {
+                    throw t;
+                }
+                n++;
+                onRetry.accept(n, t);
+            }
         }
     }
 

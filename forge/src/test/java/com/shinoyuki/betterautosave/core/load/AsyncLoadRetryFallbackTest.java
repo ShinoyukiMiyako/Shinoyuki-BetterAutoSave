@@ -77,15 +77,35 @@ class AsyncLoadRetryFallbackTest {
         return n;
     }
 
-    /** 重试路径必须存在且每次尝试前复位延迟列表 (防成功那次回放叠加上次失败残留 = POI/光照脏写)。 */
+    /**
+     * 重试路径必须存在且每次尝试前复位延迟列表 (防成功那次回放叠加上次失败残留 = POI/光照脏写)。重试编排抽到可单测
+     * seam {@code readWithRetry} 后, clearForRetry 在 seam 内、recordChunkLoadRetried 在 execute 传给 seam 的
+     * onRetry lambda (execute 的合成方法) 内; 结构断言随之改到 seam / 类级, 行为断言见
+     * {@link ChunkLoadRetryLoopTest} (真跑 seam 验证 clearForRetry 前置 + 重试计数 + 原样上抛)。
+     */
     @Test
     void worker_retries_and_clears_deferred_between_attempts() throws IOException {
-        MethodNode m = loadMethod("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "execute");
-        assertEquals(1, countCalls(m, "recordChunkLoadRetried"),
-                "execute 必须在重试分支 recordChunkLoadRetried (worker 内重试 read, 省主线程 fallback 开销)");
-        assertEquals(1, countCalls(m, "clearForRetry"),
-                "execute 每次尝试前必须 clearForRetry 复位 deferred 列表; 缺失则重试成功后回放叠加上次失败尝试的"
+        MethodNode seam = loadMethod("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "readWithRetry");
+        assertEquals(1, countCalls(seam, "clearForRetry"),
+                "readWithRetry 每次尝试前必须 clearForRetry 复位 deferred 列表; 缺失则重试成功后回放叠加上次失败尝试的"
                         + "残留 POI/光照副作用 (脏写)");
+        assertTrue(countCallsInClass("com.shinoyuki.betterautosave.core.load.ChunkLoadTask", "recordChunkLoadRetried") >= 1,
+                "ChunkLoadTask 必须在重试回调 recordChunkLoadRetried (worker 内重试 read, 省主线程 fallback 开销)");
+    }
+
+    /** 跨 method (含 lambda 合成方法) 统计整个类内对 calleeName 的调用。 */
+    private int countCallsInClass(String className, String calleeName) throws IOException {
+        Path classFile = mainClassesDir().resolve(className.replace('.', '/') + ".class");
+        assertTrue(Files.exists(classFile), "编译产物缺失 (先跑 compileJava): " + classFile.toAbsolutePath());
+        ClassNode node = new ClassNode();
+        try (InputStream in = Files.newInputStream(classFile)) {
+            new ClassReader(in).accept(node, 0);
+        }
+        int n = 0;
+        for (MethodNode m : node.methods) {
+            n += countCalls(m, calleeName);
+        }
+        return n;
     }
 
     /** 重试耗尽不静默吞错: 经 onUnhandledError -> completeExceptionally 把失败异常完成 future, 触发主线程 fallback。 */
