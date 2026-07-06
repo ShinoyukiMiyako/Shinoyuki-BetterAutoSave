@@ -95,6 +95,7 @@ public final class BetterAutoSaveMod {
             LOGGER.warn("[BetterAutoSave] eventCompatMode=DISABLED: ChunkDataEvent.Save listeners will NOT fire. "
                     + "Switch to PARTIAL or FULL if any mod depends on Save event.");
         }
+        warnOnConflictingSaveMods();
 
         if (BetterAutoSaveConfig.prometheusEnabled()) {
             String bind = BetterAutoSaveConfig.prometheusBindAddress();
@@ -110,6 +111,23 @@ public final class BetterAutoSaveMod {
         }
 
         LOGGER.info("[BetterAutoSave] pipeline installed");
+    }
+
+    // 与 BAS 结构性互斥的其它异步/分 tick 存盘 mod: 它们同样以 HEAD-cancellable @Inject 争夺 ChunkMap.save /
+    // saveAllChunks, 同装时按 mixin 优先级决定谁先 cancel, 另一方静默失效, 极端交错下存在写盘语义错乱风险,
+    // 属"二选一"不受支持。此处只探测能确证 modId 的 (fastasyncworldsave); SmoothChunkSave 等按名在兼容矩阵披露。
+    private static final String[] CONFLICTING_SAVE_MODS = {
+            "fastasyncworldsave"
+    };
+
+    private void warnOnConflictingSaveMods() {
+        for (String modId : CONFLICTING_SAVE_MODS) {
+            if (net.minecraftforge.fml.ModList.get().isLoaded(modId)) {
+                LOGGER.warn("[BetterAutoSave] detected '{}', another async/chunked save mod that also takes over "
+                        + "ChunkMap.save; two mods intercepting the same save path is unsupported and may cause one "
+                        + "to silently stop working or corrupt save semantics. Run only one of them.", modId);
+            }
+        }
     }
 
     @SubscribeEvent

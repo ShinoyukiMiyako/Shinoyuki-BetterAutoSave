@@ -148,6 +148,7 @@ port = 9450
 
 - **Smooth Chunk Save**：二选一。两者都改了区块卸载时的存档路径。相比之下 BAS 不延迟落盘（没有数据丢失窗口）、不取消原版定时存档、不吞异常。
 - **C2ME-Forge / C2ME**：按功能拆开看。它的 IO / 存档侧功能（异步存档 `ioSystem.async`、序列化器重写 `gcFreeChunkSerializer`）和 BAS 抢同一条存档路径，需二选一；它的**并行加载**在 BAS 默认配置（`load.enabled=false`）下与 BAS 互补、不冲突，但一旦开启 BAS 的异步加载（`load.enabled=true`，0.16.0 起），两者都会改写区块加载调度，此时加载路径也需二选一；它的 worldgen / `midTickChunkTasksInterval` 与 BAS 始终互补（BAS 从不碰 worldgen 与 ChunkStatus 升级链）。共存办法：关掉 C2ME 的 IO / 存档侧功能、把 `autoSave` 设为 `VANILLA`，让 BAS 管存档、C2ME 管加载；若同时想开 BAS 异步加载，则再关掉 C2ME 的并行加载，让 BAS 管存档+加载、C2ME 只管 worldgen。C2ME-Forge 已停更，实际同装少见。
+- **Fast Async World Save（`fastasyncworldsave`）/ SmoothChunkSave 等其它异步 / 分 tick 存盘 mod**：与 BAS 抢同一条 `ChunkMap.save` / `saveAllChunks` 接管路径，结构性二选一，不可同装——同装时按 mixin 优先级决定谁先 cancel，另一方静默失效，极端交错下写盘语义可能错乱。BAS 启动探测到 `fastasyncworldsave` 会打 WARN 提示（SmoothChunkSave 等按名在此披露，不逐一硬编码 modId）。
 - **Lithium 移植版（Radium / Canary）、Starlight Forge**：兼容。
 - 其他同样改了区块存档的 mod：可能让 BAS 的接管偶尔失败，这种情况 BAS 会自动退回原版处理，不影响数据安全，只是少了点性能收益。
 
