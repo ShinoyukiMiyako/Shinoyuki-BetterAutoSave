@@ -228,14 +228,17 @@ public final class OnlineChunkRestorer {
 
         // 异步点亮 (光引擎独立线程, 不卡主线程): 镜像 vanilla load 的 INITIALIZE_LIGHT + LIGHT 两阶段。
         // 点亮完成后再回主线程重发, 保证 light 包数据完整 (尤其无烘焙光的快照)。
-        // 已知遗留 (本次不修, DESIGN §3.6): 下面 thenCompose/thenAcceptAsync 链无 .exceptionally() —— 异步
-        // 光照/重发若抛, live 会永久停在 lightCorrect=false 且不重发且被静默吞。这是与本次同源的另一缺口,
-        // 建议后续单独补 .exceptionally() 记录并把 lightCorrect 收敛回来。
+        // 尾段挂 exceptionallyAsync(mainExec): 光照/重发若抛不再静默吞, 交 onAsyncTailFailure 在主线程记 ERROR
+        // 并尽力补发, 使异步阶段的失败可观测且不让客户端长期停在回退前渲染。
         ThreadedLevelLightEngine lightEngine = chunkSource(level).getLightEngine();
         boolean hadStoredLight = source.isLightCorrect();
         lightEngine.initializeLight(live, hadStoredLight)
                 .thenCompose(ignored -> lightEngine.lightChunk(live, hadStoredLight))
-                .thenAcceptAsync(ignored -> resend(level, live, pos), mainExec);
+                .thenAcceptAsync(ignored -> resend(level, live, pos), mainExec)
+                .exceptionallyAsync(error -> {
+                    onAsyncTailFailure(level, live, pos, unwrap(error));
+                    return null;
+                }, mainExec);
         return ChunkRestoreOutcome.OK;
     }
 
@@ -306,6 +309,28 @@ public final class OnlineChunkRestorer {
             for (Packet<?> bePacket : bePackets) {
                 player.connection.send(bePacket);
             }
+        }
+    }
+
+    /**
+     * install 已 return OK 后的尾段异步链 (光照 initialize/lightChunk + 主线程 resend) 失败收敛。
+     *
+     * <p>方块/BE 内容已随 {@code setUnsaved(true)} 进入正常存盘 (非数据丢失), 真实损害是: 光引擎或重发抛错时
+     * live 会停在 {@code lightCorrect=false} 且不重发, 视距内玩家看到回退前的旧渲染直到该 chunk 被重新加载。
+     * 本方法不再让该异常被 CompletableFuture 静默吞: 先记 ERROR (带维度+坐标+异常), 再尽最大努力补一次 resend
+     * 把正确方块内容推给玩家 (即便光照可能陈旧, 也优于停在回退前渲染); resend 再抛则一并记 ERROR 收尾, 不二次静默。
+     */
+    private static void onAsyncTailFailure(ServerLevel level, LevelChunk live, ChunkPos pos, Throwable error) {
+        BetterAutoSaveMod.LOGGER.error(
+                "[BetterAutoSave] 在线回退 chunk {} (dim {}) 尾段异步光照/重发链抛错; 方块内容已落盘, 但 lightCorrect "
+                        + "可能停在 false 且未重发, 尝试补发一次", pos, level.dimension().location(), error);
+        try {
+            resend(level, live, pos);
+        } catch (Throwable resendError) {
+            resendError.addSuppressed(error);
+            BetterAutoSaveMod.LOGGER.error(
+                    "[BetterAutoSave] 在线回退 chunk {} (dim {}) 失败收敛补发也抛错; 原异常见 suppressed",
+                    pos, level.dimension().location(), resendError);
         }
     }
 

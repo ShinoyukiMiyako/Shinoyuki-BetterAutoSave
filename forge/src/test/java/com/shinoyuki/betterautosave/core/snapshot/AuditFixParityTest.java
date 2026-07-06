@@ -113,4 +113,19 @@ class AuditFixParityTest {
                 "m6: interceptStoreEntities 的 inc-offer 之间须有 decInFlightSerializing 补偿 (offer 抛时)");
     }
 
+    @Test
+    void restore_async_tail_has_exceptionally_handler() throws IOException {
+        MethodNode m = loadMethod("com.shinoyuki.betterautosave.core.restore.OnlineChunkRestorer", "install");
+        assertTrue(countCalls(m, "exceptionallyAsync") >= 1,
+                "restore: install 的光照/重发尾段异步链须挂 exceptionallyAsync, 否则光引擎或重发抛错被 "
+                        + "CompletableFuture 静默吞, live 永久 lightCorrect=false 且不重发 (违反异常必须痛)");
+    }
+
+    @Test
+    void restore_async_tail_failure_logs_error() throws IOException {
+        MethodNode m = loadMethod("com.shinoyuki.betterautosave.core.restore.OnlineChunkRestorer",
+                "onAsyncTailFailure");
+        assertTrue(countCalls(m, "error") >= 1,
+                "restore: 尾段失败收敛 onAsyncTailFailure 须至少记一次 LOGGER.error (带维度+坐标), 不得静默");
+    }
 }
