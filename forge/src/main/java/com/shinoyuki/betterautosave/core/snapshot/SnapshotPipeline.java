@@ -229,6 +229,9 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
             metrics.decInFlightSerializing();
             throw t;
         }
+        // degraded 残窗兜底: 本次 dispatch 已过 :192 闸门, 若 capture 期间 triggerDegraded 抢先 drain 完,
+        // 此 task 会滞留无存活 worker 的队列; 抢下并 abandon 还原 isUnsaved 走 vanilla 兜底 (消除静默丢失窗)。
+        reclaimIfDegradedAfterOffer(task, chunkWorkerQueue);
         return true;
     }
 
@@ -331,8 +334,8 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
     /**
      * degraded 翻转后逐出三条 worker 队列里已 capture 未 execute 的残留 task 并善后。与存活 worker 的 poll
      * 天然互斥 (LinkedBlockingQueue.poll 原子, 每个 task 只被存活 worker execute 或本 drain 二选一处理, 无双发),
-     * 故无需额外锁。残窗: 某 dispatch 已过 degraded 闸门但尚未 offer 的 task 可能在本 drain 之后入队而漏掉,
-     * 概率极低 (须与 worker 全灭精确同窗), 不为此引主线程锁。
+     * 故无需额外锁。某 dispatch 已过 degraded 闸门但在本 drain 之后才 offer 的 task, 由各 dispatch 站点 offer 后的
+     * reclaimIfDegradedAfterOffer 补捞 (queue.remove 与本 poll 原子互斥, 恰一方消费), 该残窗已闭合。
      */
     private void drainStrandedOnDegrade() {
         int chunkN = drainQueueOnDegrade(chunkWorkerQueue);
@@ -351,18 +354,41 @@ public final class SnapshotPipeline implements ChunkSubmissionSink {
         int n = 0;
         SaveTask t;
         while ((t = queue.poll()) != null) {
-            if (t instanceof ChunkSaveTask cst) {
-                cst.abandonToRecoveryOnDegrade();
-            } else if (t instanceof EntitySaveTask est) {
-                est.abandonOnDegrade();
-            } else if (t instanceof SavedDataSaveTask sdt) {
-                sdt.abandonOnDegrade();
-            } else if (t instanceof ChunkLoadTask clt) {
-                clt.abandonOnDegrade();
-            }
+            abandonStrandedTask(t);
             n++;
         }
         return n;
+    }
+
+    /** 按 task 类型路由到对应的 degraded 善后: chunk 还原坐标走 vanilla 兜底 / entity+savedData ERROR / load 退 vanilla read。 */
+    private static void abandonStrandedTask(SaveTask t) {
+        if (t instanceof ChunkSaveTask cst) {
+            cst.abandonToRecoveryOnDegrade();
+        } else if (t instanceof EntitySaveTask est) {
+            est.abandonOnDegrade();
+        } else if (t instanceof SavedDataSaveTask sdt) {
+            sdt.abandonOnDegrade();
+        } else if (t instanceof ChunkLoadTask clt) {
+            clt.abandonOnDegrade();
+        }
+    }
+
+    /**
+     * dispatch offer 之后的 degraded 残窗兜底。某次 dispatch 可能已过 degraded 闸门 (captureAndDispatchChunk
+     * :192 / mixin 顶部), 在主线程 capture 期间被 triggerDegraded -> drainStrandedOnDegrade 抢先 drain 完,
+     * 随后才走到 offer, 该 task 落入无存活 worker 的队列永不 execute —— chunk/savedData 乐观清掉的 isUnsaved/dirty
+     * 永不还原, vanilla flush 按门跳过, 本周期增量静默丢失 (全链唯一无 ERROR 的丢失点)。offer 后调本方法再读一次
+     * degraded: 若已降级则抢在 drain 的 poll 之外把 task 移出队列并自行 abandon 善后。queue.remove 与 drain 的
+     * poll 均原子, 对同一 task 恰一方成功 (谁抢到谁 abandon), 无双发无漏接。
+     *
+     * @return true 表示本方法抢下并 abandon 了该 task (调用方不再依赖 worker execute)
+     */
+    public boolean reclaimIfDegradedAfterOffer(SaveTask task, BlockingQueue<SaveTask> queue) {
+        if (degraded.get() && queue.remove(task)) {
+            abandonStrandedTask(task);
+            return true;
+        }
+        return false;
     }
 
     public boolean isDegraded() {

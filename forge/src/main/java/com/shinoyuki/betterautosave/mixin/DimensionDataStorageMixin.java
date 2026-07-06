@@ -192,8 +192,12 @@ public abstract class DimensionDataStorageMixin {
                 // 入队成功后在途占位的释放责任移交 worker task 的 finally (SavedDataSaveTask); inc 抵消
                 // 责任移交 worker execute 首行 dec。offer 阶段抛异常时 enqueue 内部已先补 dec 再上抛,
                 // 故下面 dispatch catch 不得再碰 serializing (已配平), 仅走同步兜底写。
-                SavedDataDispatch.enqueue(pipeline.savedDataWorkerQueue(),
-                        new SavedDataSaveTask(snapshot, metrics), metrics);
+                SavedDataSaveTask savedDataTask = new SavedDataSaveTask(snapshot, metrics);
+                SavedDataDispatch.enqueue(pipeline.savedDataWorkerQueue(), savedDataTask, metrics);
+                // degraded 残窗兜底: 本次 dispatch 已过顶部闸门且乐观清了 dirty, 若 capture/序列化期间 triggerDegraded
+                // 抢先 drain 完, 此 task 会滞留无存活 worker 的队列使 dirty=false 永不还原 -> vanilla flush 跳过静默丢失;
+                // 抢下并 abandon 重新 setDirty 走 vanilla 兜底。
+                pipeline.reclaimIfDegradedAfterOffer(savedDataTask, pipeline.savedDataWorkerQueue());
                 // SavedData 队列深度入指标. 与 chunk/entity 不同, SavedData
                 // 不走 SaveScheduler 的 tick 节流队列 (无逐 tick drain 回写时机), 只能在 offer
                 // 后即时回写 queue.size() — worker 消费后的回落由下一周期 offer 重新采样.

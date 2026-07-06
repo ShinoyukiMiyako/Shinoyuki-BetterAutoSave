@@ -169,6 +169,81 @@ class SnapshotPipelineDegradedTest {
     }
 
     /**
+     * degraded 翻转残窗: 某 dispatch 已过 degraded 闸门, 却在 drainStrandedOnDegrade 跑完之后才 offer, 该 task
+     * 会滞留无存活 worker 的队列永不 execute (乐观清掉的 dirty 永不还原 -> vanilla flush 跳过 -> 静默丢增量)。
+     * reclaimIfDegradedAfterOffer 是 offer 后的补捞: 已降级则抢下 task 自行 abandon。这里先 triggerDegraded (drain
+     * 跑完队列已空), 再模拟迟到 offer, 断言 reclaim 抢下并把 SavedData 重新 setDirty + 释放占位 + 配平 gauge。
+     * 删 reclaim 的 abandon 分支 (退化为 return false) -> savedData 仍 dirty=false -> 断言挂。
+     */
+    @Test
+    void reclaim_after_offer_abandons_task_stranded_past_degraded_gate() {
+        SaveMetrics metrics = new SaveMetrics();
+        SnapshotPipeline pipeline = new SnapshotPipeline(null, null, metrics);
+        pipeline.triggerDegraded();
+        assertTrue(pipeline.isDegraded(), "前置: pipeline 已降级 (drainStranded 已跑完, 队列空)");
+
+        SavedData savedData = new SavedData() {
+            @Override
+            public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
+                return tag;
+            }
+        };
+        savedData.setDirty(false);
+        String name = "test_reclaim_stranded";
+        pipeline.savedDataInFlight().add(name);
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+                savedData, null, name, pipeline.savedDataInFlight());
+        SavedDataSaveTask task = new SavedDataSaveTask(snapshot, metrics);
+        // 模拟 "已过闸门但 drain 之后才 offer": 主线程 inc serializing + offer 到已无 worker 的队列.
+        metrics.incInFlightSerializing();
+        pipeline.savedDataWorkerQueue().offer(task);
+
+        boolean reclaimed = pipeline.reclaimIfDegradedAfterOffer(task, pipeline.savedDataWorkerQueue());
+
+        assertTrue(reclaimed, "已降级 + task 仍在队 -> reclaim 必抢下并 abandon");
+        assertTrue(savedData.isDirty(),
+                "reclaim abandon 必须重新 setDirty 走 vanilla 兜底, 否则本周期增量静默丢失");
+        assertFalse(pipeline.savedDataInFlight().contains(name), "reclaim abandon 必须释放在途占位");
+        assertEquals(0L, metrics.snapshot().inFlightSerializing(),
+                "reclaim abandon 必须配平 serializing gauge (dispatch 的 inc 由 abandon dec)");
+        assertEquals(0, pipeline.savedDataWorkerQueue().size(), "reclaim 后 task 已移出队列");
+    }
+
+    /**
+     * reclaim 的负向不变式: 未降级时绝不得触碰刚 offer 的 task (它归存活 worker 正常消费)。删 degraded.get() 门控
+     * 使 reclaim 无条件 abandon -> 稳态每次 dispatch 都被误 abandon 走同步兜底, 此断言 (dirty 仍 false / task 仍在队) 挂。
+     */
+    @Test
+    void reclaim_after_offer_is_noop_when_not_degraded() {
+        SaveMetrics metrics = new SaveMetrics();
+        SnapshotPipeline pipeline = new SnapshotPipeline(null, null, metrics);
+        assertFalse(pipeline.isDegraded(), "前置: pipeline 未降级");
+
+        SavedData savedData = new SavedData() {
+            @Override
+            public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
+                return tag;
+            }
+        };
+        savedData.setDirty(false);
+        String name = "test_reclaim_noop";
+        pipeline.savedDataInFlight().add(name);
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+                savedData, null, name, pipeline.savedDataInFlight());
+        SavedDataSaveTask task = new SavedDataSaveTask(snapshot, metrics);
+        metrics.incInFlightSerializing();
+        pipeline.savedDataWorkerQueue().offer(task);
+
+        boolean reclaimed = pipeline.reclaimIfDegradedAfterOffer(task, pipeline.savedDataWorkerQueue());
+
+        assertFalse(reclaimed, "未降级 -> reclaim 不得触碰 task");
+        assertFalse(savedData.isDirty(), "未降级 -> 不得 abandon (dirty 仍 false, 交 worker 落盘)");
+        assertEquals(1, pipeline.savedDataWorkerQueue().size(), "未降级 -> task 仍在队列");
+        assertEquals(1L, metrics.snapshot().inFlightSerializing(),
+                "未降级 -> serializing gauge 保持 (worker execute 才 dec)");
+    }
+
+    /**
      * JVM 关闭兜底 hook 的接管语义: worker 改 daemon 后, JVM 退出不再被 worker 钉死, 由本兜底 hook 在 halt
      * 前补 drain+join 保证落盘。但正常关服 (onServerStopping) 已自己 drain, 故一旦 detachShutdownHook
      * 接管, 兜底 hook 必须变 no-op, 不重复 drain。删掉 managedShutdownDone 守卫 -> 第二次断言挂。

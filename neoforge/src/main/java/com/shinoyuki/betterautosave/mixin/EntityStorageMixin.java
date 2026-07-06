@@ -195,6 +195,9 @@ public abstract class EntityStorageMixin implements EntitySaveStateAccess {
                 metrics.decInFlightSerializing();
                 throw offerError;
             }
+            // degraded 残窗兜底: 本次 dispatch 已过顶部闸门, 若 capture 期间 triggerDegraded 抢先 drain 完,
+            // 此 task 会滞留无存活 worker 的队列且无 ERROR; 抢下并 abandon (配平 gauge + ERROR 明示增量丢失)。
+            pipeline.reclaimIfDegradedAfterOffer(task, pipeline.entityWorkerQueue());
             // 复制 vanilla 在 storeEntities 非空分支末尾的副作用
             // (vanilla EntityStorage.java:108 emptyChunks.remove). 漏调会让该 chunk
             // 后续 unload→reload 时 vanilla loadEntities 命中 emptyChunks 快速路径

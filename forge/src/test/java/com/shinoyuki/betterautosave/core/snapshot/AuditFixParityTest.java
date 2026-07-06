@@ -87,12 +87,13 @@ class AuditFixParityTest {
 
     @Test
     void m2_degraded_drain_abandons_all_three_task_types() throws IOException {
+        // 善后路由抽到 abandonStrandedTask (drainStrandedOnDegrade 与 offer 后的 reclaimIfDegradedAfterOffer 共用)。
         MethodNode m = loadMethod("com.shinoyuki.betterautosave.core.snapshot.SnapshotPipeline",
-                "drainQueueOnDegrade");
+                "abandonStrandedTask");
         assertTrue(countCalls(m, "abandonToRecoveryOnDegrade") >= 1,
-                "M2: degraded drain 必须对 chunk task 调 abandonToRecoveryOnDegrade 还原坐标走 vanilla 兜底");
+                "M2: degraded 善后必须对 chunk task 调 abandonToRecoveryOnDegrade 还原坐标走 vanilla 兜底");
         assertTrue(countCalls(m, "abandonOnDegrade") >= 2,
-                "M2: degraded drain 必须对 entity + savedData task 各调 abandonOnDegrade 善后 (>=2)");
+                "M2: degraded 善后必须对 entity + savedData task 各调 abandonOnDegrade 善后 (>=2)");
     }
 
     @Test
@@ -111,4 +112,5 @@ class AuditFixParityTest {
         assertTrue(countCalls(m, "decInFlightSerializing") >= 1,
                 "m6: interceptStoreEntities 的 inc-offer 之间须有 decInFlightSerializing 补偿 (offer 抛时)");
     }
+
 }
