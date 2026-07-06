@@ -76,7 +76,6 @@ public final class BetterAutoSaveCommand {
         out.append("MustDrain pending: ").append(s.mustDrainPending()).append('\n');
         out.append("\n-- Entity (v0.6) --\n");
         out.append("EntityWorkerThreads: ").append(BetterAutoSaveConfig.entityWorkerThreads()).append('\n');
-        out.append("EntityChunksPerTickBase: ").append(BetterAutoSaveConfig.entityChunksPerTickBase()).append('\n');
         out.append("Submitted: ").append(s.entitiesSubmitted()).append('\n');
         out.append("Completed: ").append(s.entitiesCompleted()).append('\n');
         out.append("Failed: ").append(s.entitiesFailed()).append('\n');

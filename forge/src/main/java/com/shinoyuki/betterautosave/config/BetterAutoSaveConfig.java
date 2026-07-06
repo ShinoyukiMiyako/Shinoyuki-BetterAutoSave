@@ -10,7 +10,6 @@ public final class BetterAutoSaveConfig {
 
     private static volatile boolean enabled;
     private static volatile int chunksPerTickBase;
-    private static volatile int entityChunksPerTickBase;
     private static volatile int workerThreads;
     private static volatile int entityWorkerThreads;
     private static volatile int savedDataWorkerThreads;
@@ -40,10 +39,6 @@ public final class BetterAutoSaveConfig {
 
     public static int chunksPerTickBase() {
         return chunksPerTickBase;
-    }
-
-    public static int entityChunksPerTickBase() {
-        return entityChunksPerTickBase;
     }
 
     public static int workerThreads() {
@@ -149,7 +144,6 @@ public final class BetterAutoSaveConfig {
     private static void refresh() {
         enabled = ConfigSpec.ENABLED.get();
         chunksPerTickBase = ConfigSpec.CHUNKS_PER_TICK_BASE.get();
-        entityChunksPerTickBase = ConfigSpec.ENTITY_CHUNKS_PER_TICK_BASE.get();
         workerThreads = ConfigSpec.WORKER_THREADS.get();
         entityWorkerThreads = ConfigSpec.ENTITY_WORKER_THREADS.get();
         savedDataWorkerThreads = ConfigSpec.SAVED_DATA_WORKER_THREADS.get();

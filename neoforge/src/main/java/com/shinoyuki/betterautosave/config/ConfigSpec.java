@@ -14,7 +14,6 @@ public final class ConfigSpec {
 
     public static final ModConfigSpec.BooleanValue ENABLED;
     public static final ModConfigSpec.IntValue CHUNKS_PER_TICK_BASE;
-    public static final ModConfigSpec.IntValue ENTITY_CHUNKS_PER_TICK_BASE;
     public static final ModConfigSpec.IntValue WORKER_THREADS;
     public static final ModConfigSpec.IntValue ENTITY_WORKER_THREADS;
     public static final ModConfigSpec.IntValue SAVED_DATA_WORKER_THREADS;
@@ -49,10 +48,6 @@ public final class ConfigSpec {
                 .comment("Base limit on chunks the scheduler will start capturing per server tick.",
                          "Adaptive throttling may halve or skip based on TPS unless the deadline guard fires.")
                 .defineInRange("chunksPerTickBase", 4, 1, 64);
-
-        ENTITY_CHUNKS_PER_TICK_BASE = BUILDER
-                .comment("Same as chunksPerTickBase, but for entity-section snapshots which run on an independent budget.")
-                .defineInRange("entityChunksPerTickBase", 2, 1, 64);
 
         ADAPTIVE_ENABLED = BUILDER
                 .comment("Reduce per-tick budget when avg tick time exceeds 51.3ms (TPS<19.5) and skip ticks when above 52.6ms (TPS<19).",

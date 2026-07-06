@@ -245,7 +245,7 @@ worker 线程做:
 |---|---|
 | Entity AI / Goal / Brain 在主线程 tick 与序列化竞争 | 主线程预序列化时调 `Entity.saveWithoutId` 必须在 entity tick 完成后做; mixin 在 PersistentEntitySectionManager.autoSave HEAD 注入而非 entity tick 路径 |
 | 持久化实体 (mob, item, vehicle) 与 LootTable / EntityType 注册时序 | 引用持有 RegistryAccess.Frozen, 与 v0.2 同处理 |
-| 大批量实体 (刷怪塔) 主线程预序列化时间过长 | 可配置每 tick 实体上限 (复用 entityChunksPerTickBase) |
+| 大批量实体 (刷怪塔) 主线程预序列化时间过长 | 如需可新增每 tick 实体预算 (曾预留的 entityChunksPerTickBase 死旋钮从未接入调度器, 已移除) |
 
 ### v0.7.0 — SavedData (DimensionDataStorage) 异步化 + SaveListener API [已落地]
 
