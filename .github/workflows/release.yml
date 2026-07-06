@@ -85,9 +85,11 @@ jobs:
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Build Forge 1.20.1 + NeoForge 1.21.1 mod jars
-        # 双端构建。entity 终态接力修复两端均经真机回归 (forge 1.20.1 测试服 + neoforge 1.21.1
-        # runServer, 见 v0.16.1 发行说明), 故 0.16.1 起 neoforge 随版发布。
-        run: ./gradlew :forge:build :neoforge:build --no-daemon
+        # 根 build (而非 :forge:build :neoforge:build): 后者只拉起两端 test, 漏掉被 source-merge
+        # 复用的 common 核心状态机套件 (:common:test); 根 build 聚合三模块全部测试进发版门禁。
+        # entity 终态接力修复两端均经真机回归 (forge 1.20.1 测试服 + neoforge 1.21.1 runServer,
+        # 见 v0.16.1 发行说明), 故 0.16.1 起 neoforge 随版发布。
+        run: ./gradlew build --no-daemon
 
       - name: Verify jar artifacts
         id: jar

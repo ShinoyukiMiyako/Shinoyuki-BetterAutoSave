@@ -1,0 +1,89 @@
+name: CI
+
+# push 到 main 与所有 PR 触发, 跑根 ./gradlew build 聚合 common+forge+neoforge 三套测试。
+# 补齐发版前唯一自动化门禁 (release.yml 手动 dispatch) 之外的常态测试门禁: common 的核心状态机
+# 套件 (ChunkSaveStateTest / EntityStateMapTest / MustDrainGaugeBalanceTest / SaveQueueTest /
+# AdaptiveThrottleTest) 被两端 source-merge 复用却不随 :forge:build / :neoforge:build 触发,
+# 根 build 才会拉起 :common:test。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & unit tests (common + forge + neoforge)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 and 21
+        # forge / common toolchain Java 17, neoforge toolchain Java 21; 两个都装, Gradle toolchain
+        # 按模块自动选, 与 release.yml 一致。
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build and test all modules
+        # 根 build 聚合 :common:build / :forge:build / :neoforge:build, 各自 build -> check -> test,
+        # 故 common 状态机套件与两端集成套件一并进入门禁。
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            common/build/reports/tests/
+            forge/build/reports/tests/
+            neoforge/build/reports/tests/
+          if-no-files-found: ignore
+
+  gametest:
+    name: Restore rollback GameTest (forge)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 and 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run restore rollback GameTest
+        # 无头 dedicated server 仅跑 GameTest, 退出码反映 PASS/FAIL。覆盖 restore 事务回滚
+        # (ChunkRestoreGameTest, 数据完整性关键), 该用例不在 build/check 生命周期内, 须单独触发。
+        run: ./gradlew :forge:runGameTestServer --no-daemon --stacktrace
+
+      - name: Upload gametest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gametest-logs
+          path: forge/run-gametest/logs/
+          if-no-files-found: ignore
