@@ -50,7 +50,7 @@ No. BAS is designed on one premise: it must never be less safe than vanilla:
 - On shutdown it waits for every pending save to hit the disk before letting the server exit.
 - The final save at shutdown goes through the vanilla synchronous path, exactly as if BAS were not installed.
 - BAS never "holds saves for later" — a chunk enters background processing the moment it should be saved. There is no "nothing saved for minutes, crash loses it all" window (some similar mods have this problem, see compatibility below).
-- If a background write fails it retries automatically; when retries are exhausted it falls back to the vanilla synchronous write instead of pretending it succeeded.
+- If a background write fails it retries automatically and never pretends it succeeded: for chunks and saved data (SavedData) an exhausted retry falls back to the vanilla synchronous write (the chunk must still be loaded); entities have no coordinate recovery queue and are already evicted from memory by vanilla, so an exhausted retry logs an ERROR and drops that chunk's latest entity increment — the same outcome as vanilla here (vanilla entity saving likewise has no retry and no synchronous fallback; BAS actually retries a few more times first).
 
 ## How it works (optional reading)
 
