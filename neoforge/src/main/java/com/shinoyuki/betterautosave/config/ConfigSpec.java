@@ -56,8 +56,11 @@ public final class ConfigSpec {
 
         DEADLINE_GUARD_SECONDS = BUILDER
                 .comment("When the autosave cycle has fewer seconds remaining than this value, throttling is bypassed",
-                         "to ensure all dirty chunks complete a snapshot within the cycle. Vanilla cycle length is 300s.")
-                .defineInRange("deadlineGuardSeconds", 30, 0, 240);
+                         "to ensure all dirty chunks complete a snapshot within the cycle. Vanilla cycle length is 300s.",
+                         "Minimum 5: 0 would disable the deadline guard entirely (remainingSeconds is always >= 0, so the",
+                         "'remaining < guard' condition never holds), letting sustained low TPS defer every dirty chunk for a",
+                         "whole cycle with no forced flush - a footgun that widens the loss window on kill/OOM, so the floor is 5.")
+                .defineInRange("deadlineGuardSeconds", 30, 5, 240);
 
         BUILDER.pop();
 
