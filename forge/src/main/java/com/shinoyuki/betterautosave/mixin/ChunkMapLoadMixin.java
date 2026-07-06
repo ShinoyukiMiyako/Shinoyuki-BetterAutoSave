@@ -127,30 +127,44 @@ public abstract class ChunkMapLoadMixin {
                 // 顺序执行: replay 把 worker 截走的 POI/光照/事件副作用落回主线程, 严格先于该任务 return -> 严格先于
                 // scheduleChunkLoad 返回的 EMPTY future 完成 -> 严格先于下游 protoChunkToFullChunk 消费 ProtoChunk
                 // (CompletableFuture complete -> 续段 happens-before), 与 vanilla read 内同步完成 POI/光照后才返回等价。
-                return task.result().<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>thenApplyAsync(loadResult -> {
-                    // Tier A: replay 前先用 worker 预读的 POI 字节填缓存 (poiColumnNbt != null = 已预读)。填好后
-                    // 紧接的 deferred checkConsistencyWithBlocks -> getOrLoad 命中缓存 O(1), 不在主线程阻塞读盘。
-                    // 必须严格先于 replayOnMainThread (deferred 里含 checkConsistency)。null = 未预读, 走 vanilla。
-                    if (loadResult.poiColumnNbt() != null) {
-                        ((SectionStorageLoadAccess) poiManager)
-                                .betterautosave$populateColumnOnMain(pos, loadResult.poiColumnNbt());
+                // handleAsync 单点承接两类不同源的失败, 用 workerError 区分, 各记各的文案, 不再共用一条 fallback:
+                // (一) workerError != null: worker read-stage 解析抛/abandon 异常完成 task.result() —— worker 只读盘
+                //     未施加任何主线程副作用, 主线程整段重读干净且 vanilla 等价 (下方 deserialize-failed 文案)。
+                // (二) workerError == null 但 replay-stage 抛: worker 已解析成功, 部分延迟副作用可能已落地 (POI/光照按
+                //     位置重建幂等无损, 事件可能已半程派发) —— 明示是 replay 失败, 不把行为不端的 cap/监听器误报成反序列化
+                //     损坏 (replay-failed 文案)。两路都在主线程 (mainExec), 绝不在完成异常的 worker 线程重读 (那样
+                //     readLambda 内 POI/光照 redirect 因 current()==null 走 inline -> worker 跨线程写 PoiManager 崩)。
+                return task.result().<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>handleAsync(
+                        (loadResult, workerError) -> {
+                    if (workerError != null) {
+                        metrics.recordChunkLoadFallback();
+                        LOGGER.error("[BetterAutoSave] async load deserialize failed for chunk {} dim={}, falling back "
+                                + "to vanilla main-thread read", pos, level.dimension().location(), workerError);
+                        return readLambda.apply(opt);
                     }
-                    LoadDeferredActions.replayOnMainThread(server, loadResult.deferred());
-                    ((ChunkMapAccessor) this).betterautosave$markPosition(pos,
-                            loadResult.chunk().getStatus().getChunkType());
-                    metrics.recordChunkLoadCompleted();
-                    return Either.left(loadResult.chunk());
-                }, mainExec).exceptionallyAsync(throwable -> {
-                    // worker 解析失败 (重试耗尽) / degraded 逐出 -> 异常完成短路到这里。exceptionallyAsync(mainExec) 强制
-                    // fallback 重读跑在主线程 (绝不能跑在完成异常的 worker 线程: 那样 readLambda 内 POI/光照 redirect 因
-                    // current()==null 走 inline -> worker 跨线程写 PoiManager 崩)。主线程重读 = vanilla 本来的行为, 仅失败
-                    // 罕路径, 墙钟与 vanilla 主线程 read 相当。readLambda.apply(opt) 含 markPosition + Either.left, opt 非空
-                    // 走真实 read; 若区块真损坏再抛, 冒泡进 vanilla 自己的 exceptionallyAsync(handleChunkLoadFailure) 建空
-                    // chunk, 与不装 BAS 等价。
-                    metrics.recordChunkLoadFallback();
-                    LOGGER.error("[BetterAutoSave] async load deserialize failed for chunk {} dim={}, falling back to "
-                            + "vanilla main-thread read", pos, level.dimension().location(), throwable);
-                    return readLambda.apply(opt);
+                    try {
+                        // Tier A: replay 前先用 worker 预读的 POI 字节填缓存 (poiColumnNbt != null = 已预读)。填好后
+                        // 紧接的 deferred checkConsistencyWithBlocks -> getOrLoad 命中缓存 O(1), 不在主线程阻塞读盘。
+                        // 必须严格先于 replayOnMainThread (deferred 里含 checkConsistency)。null = 未预读, 走 vanilla。
+                        if (loadResult.poiColumnNbt() != null) {
+                            ((SectionStorageLoadAccess) poiManager)
+                                    .betterautosave$populateColumnOnMain(pos, loadResult.poiColumnNbt());
+                        }
+                        LoadDeferredActions.replayOnMainThread(server, loadResult.deferred());
+                        ((ChunkMapAccessor) this).betterautosave$markPosition(pos,
+                                loadResult.chunk().getStatus().getChunkType());
+                        metrics.recordChunkLoadCompleted();
+                        return Either.left(loadResult.chunk());
+                    } catch (Throwable replayError) {
+                        // replay-stage 自身抛 (第三方 cap 的 readCapsFromNBT deserialize 抛 / 某 ChunkDataEvent.Load
+                        // 监听器抛)。兜底仍整段重读 vanilla; 重读再抛 (区块真损坏或监听器再抛) 冒泡进 vanilla 自己的
+                        // handleChunkLoadFailure 建空 chunk, 与不装 BAS 等价, 不二次落进本 handler。
+                        metrics.recordChunkLoadFallback();
+                        LOGGER.error("[BetterAutoSave] async load main-thread replay failed for chunk {} dim={} "
+                                + "(a deferred capability/listener threw); falling back to vanilla main-thread read",
+                                pos, level.dimension().location(), replayError);
+                        return readLambda.apply(opt);
+                    }
                 }, mainExec);
             }, mainExec).whenComplete((result, throwable) -> limiter.release());
         }, mainExec);

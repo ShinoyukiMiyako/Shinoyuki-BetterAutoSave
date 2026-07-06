@@ -196,8 +196,13 @@ class AsyncLoadSplitParityTest {
         List<MethodNode> chain = chainMethodAndItsLambdas(MIXIN, CHAIN_HANDLER);
         assertEquals(1, totalCalls(chain, "replayOnMainThread"),
                 "chain: worker read-stage 完成后 replay-stage 必须 replayOnMainThread 把 POI/光照/事件副作用落回主线程");
-        assertEquals(1, totalCalls(chain, "recordChunkLoadFallback"),
-                "chain: worker 解析失败必须经 exceptionallyAsync recordChunkLoadFallback 并退回 vanilla 主线程 read (兜底)");
+        // handleAsync 单点承接两类失败源 (workerError!=null 的 worker 解析失败 + replay-stage 自身抛), 各自 record
+        // 一次 fallback, 故计 2。删掉两源区分 (回退成共用一条 fallback) -> 计数变 1 -> 此断言挂。
+        assertEquals(2, totalCalls(chain, "recordChunkLoadFallback"),
+                "chain: worker 解析失败与主线程 replay 失败两类各经一次 recordChunkLoadFallback 退回 vanilla 主线程 read");
+        // 两类失败源必须各记各的 LOGGER.error (deserialize-failed vs replay-failed), 不共用一条误导文案。
+        assertTrue(totalCalls(chain, "error") >= 2,
+                "chain: worker 解析失败与 replay 失败必须分别记 LOGGER.error, 不把 replay 失败误报成反序列化损坏");
         // v2 replay-stage 在主线程补做 vanilla 续段里 read 之后的 markPosition (经 accessor @Invoker)。
         assertEquals(1, totalCalls(chain, "betterautosave$markPosition"),
                 "chain: replay-stage 必须 markPosition 对齐 vanilla 续段 (read 后写 chunkTypeCache)");
