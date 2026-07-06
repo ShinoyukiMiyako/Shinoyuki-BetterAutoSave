@@ -2,6 +2,7 @@ package com.shinoyuki.betterautosave.core.snapshot;
 
 import com.shinoyuki.betterautosave.api.PipelineStateListener;
 import com.shinoyuki.betterautosave.api.SaveListenerRegistry;
+import com.shinoyuki.betterautosave.core.io.AtomicNbtWriter;
 import com.shinoyuki.betterautosave.diagnostic.SaveMetrics;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
@@ -151,7 +152,8 @@ class SnapshotPipelineDegradedTest {
         savedData.setDirty(false);
         String name = "test_stranded_saveddata";
         pipeline.savedDataInFlight().add(name);
-        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"),
+                AtomicNbtWriter.serializeUncompressed(new CompoundTag()),
                 savedData, null, name, pipeline.savedDataInFlight());
         metrics.incInFlightSerializing();
         pipeline.savedDataWorkerQueue().offer(new SavedDataSaveTask(snapshot, metrics));
@@ -191,7 +193,8 @@ class SnapshotPipelineDegradedTest {
         savedData.setDirty(false);
         String name = "test_reclaim_stranded";
         pipeline.savedDataInFlight().add(name);
-        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"),
+                AtomicNbtWriter.serializeUncompressed(new CompoundTag()),
                 savedData, null, name, pipeline.savedDataInFlight());
         SavedDataSaveTask task = new SavedDataSaveTask(snapshot, metrics);
         // 模拟 "已过闸门但 drain 之后才 offer": 主线程 inc serializing + offer 到已无 worker 的队列.
@@ -228,7 +231,8 @@ class SnapshotPipelineDegradedTest {
         savedData.setDirty(false);
         String name = "test_reclaim_noop";
         pipeline.savedDataInFlight().add(name);
-        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"), new CompoundTag(),
+        SavedDataSnapshot snapshot = new SavedDataSnapshot(name, new File(name + ".dat"),
+                AtomicNbtWriter.serializeUncompressed(new CompoundTag()),
                 savedData, null, name, pipeline.savedDataInFlight());
         SavedDataSaveTask task = new SavedDataSaveTask(snapshot, metrics);
         metrics.incInFlightSerializing();

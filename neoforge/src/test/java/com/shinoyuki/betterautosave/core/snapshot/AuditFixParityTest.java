@@ -21,8 +21,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * 调用计数断言, deletion-sensitive (删修复 -> 计数归零 -> 断言挂)。
  *
  * <ul>
- *   <li>M1: DimensionDataStorageMixin 异步前对 mod save() 返回的 tag copy() 脱钩 (worker 序列化期间 mod
- *       mutate 不损坏)</li>
+ *   <li>M1: DimensionDataStorageMixin 异步前把 mod save() 返回的 tag 序列化成脱钩字节 (serializeUncompressed)
+ *       脱钩 (worker 序列化期间 mod mutate 不损坏)。issue #12 起由 copy() 改为序列化字节: 同样脱钩但不分配
+ *       平行 NBT 树, 对超大 SavedData 不再是主线程秒级尖峰</li>
  *   <li>M2: SnapshotPipeline.drainQueueOnDegrade 逐出三条队列残留 task 各自 abandon 善后 (worker 全灭防静默丢数据)</li>
  *   <li>m6: chunk/entity dispatch 的 inc-offer 之间补偿 (offer 抛时 decInFlightSerializing) 防 serializing gauge 泄漏</li>
  * </ul>
@@ -76,12 +77,12 @@ class AuditFixParityTest {
     }
 
     @Test
-    void m1_savedData_mixin_copies_mod_tag_before_async() throws IOException {
+    void m1_savedData_mixin_decouples_mod_tag_before_async() throws IOException {
         MethodNode m = loadMethod("com.shinoyuki.betterautosave.mixin.DimensionDataStorageMixin",
                 "betterautosave$interceptSave");
-        assertTrue(countCalls(m, "copy") >= 1,
-                "M1: interceptSave 必须对 mod save() 返回的 tag 调 copy() 脱钩 live 引用, 否则 worker 异步序列化"
-                        + "期间 mod mutate -> CME / torn write");
+        assertTrue(countCalls(m, "serializeUncompressed") >= 1,
+                "M1: interceptSave 必须把 mod save() 返回的 tag 序列化成脱钩字节 (serializeUncompressed), 否则 worker"
+                        + "异步序列化期间 mod mutate -> CME / torn write。issue #12 起由 copy() 改为序列化字节脱钩。");
     }
 
     @Test
