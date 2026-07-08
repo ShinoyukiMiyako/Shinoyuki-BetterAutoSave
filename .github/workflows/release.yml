@@ -139,10 +139,18 @@ jobs:
           draft: false
           prerelease: ${{ inputs.prerelease }}
 
-      # 同步发布到 Modrinth (项目 shinoyuki-betterautosave)。发的是同一个自包含 fat jar + 同一份发行说明。
+      # 同步发布到 Modrinth (项目 shinoyuki-betterautosave)。按加载器拆两个独立版本。
+      # 为何拆: Modrinth 单个版本的 loaders / game-versions 标签作用于整版, primary 文件是启动器
+      # (PCL / Prism 等) 默认抓取的那个。若把 forge -all.jar 与 neoforge.jar 塞进同一版本并给两端
+      # 标签, 该版本会同时出现在 "NeoForge 1.21.1" 与 "Forge 1.20.1" 等所有 加载器×MC 组合下 (含
+      # 不存在的 Forge 1.21.1 / NeoForge 1.20.1), 且 primary 恒为首个文件 (forge -all.jar) —— NeoForge
+      # 1.21.1 用户过滤后默认下到 Forge 1.20.1 jar, FML 报 "需要 forge/1.20.1", 即用户所见的 "不兼容
+      # neoforge" (与补丁号无关)。故一端一版, 各自单文件即自身 primary; 版本号加 +forge / +neoforge
+      # 后缀满足 Modrinth 版本号唯一性 (build metadata, 不影响排序)。
       # version-type 跟随 prerelease 勾选: 预发布 -> beta 通道, 正式 -> release 通道。
       # env.MODRINTH_TOKEN 为空时整步跳过 (fork 或未配 secret 不会让发版失败)。
-      - name: Publish to Modrinth
+      # Modrinth 面向国际用户, changelog 用英文 .en.md (GitHub release 正文仍用中文 .md)。
+      - name: Publish Forge jar to Modrinth
         if: inputs.dry_run == false && env.MODRINTH_TOKEN != ''
         uses: Kir-Antipov/mc-publish@v3
         env:
@@ -150,19 +158,26 @@ jobs:
         with:
           modrinth-id: shinoyuki-betterautosave
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
-          # 单个 Modrinth 版本号同时挂两端 jar (forge -all + neoforge), loaders / game-versions 取并集。
-          # 首个文件 (forge -all.jar) 为 primary; 用户按 加载器+MC版本 过滤后下对应文件。
-          files: |
-            ${{ steps.jar.outputs.forge_path }}
-            ${{ steps.jar.outputs.neoforge_path }}
-          name: BetterAutoSave ${{ steps.version.outputs.tag }}
-          version: ${{ steps.version.outputs.version }}
+          files: ${{ steps.jar.outputs.forge_path }}
+          name: BetterAutoSave ${{ steps.version.outputs.tag }} (Forge 1.20.1)
+          version: ${{ steps.version.outputs.version }}+forge
           version-type: ${{ inputs.prerelease && 'beta' || 'release' }}
-          # Modrinth 面向国际用户, changelog 用英文 .en.md (GitHub release 正文仍用中文 .md)。
           changelog-file: release-notes/${{ steps.version.outputs.tag }}.en.md
-          loaders: |
-            forge
-            neoforge
-          game-versions: |
-            1.20.1
-            1.21.1
+          loaders: forge
+          game-versions: 1.20.1
+
+      - name: Publish NeoForge jar to Modrinth
+        if: inputs.dry_run == false && env.MODRINTH_TOKEN != ''
+        uses: Kir-Antipov/mc-publish@v3
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+        with:
+          modrinth-id: shinoyuki-betterautosave
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          files: ${{ steps.jar.outputs.neoforge_path }}
+          name: BetterAutoSave ${{ steps.version.outputs.tag }} (NeoForge 1.21.1)
+          version: ${{ steps.version.outputs.version }}+neoforge
+          version-type: ${{ inputs.prerelease && 'beta' || 'release' }}
+          changelog-file: release-notes/${{ steps.version.outputs.tag }}.en.md
+          loaders: neoforge
+          game-versions: 1.21.1
