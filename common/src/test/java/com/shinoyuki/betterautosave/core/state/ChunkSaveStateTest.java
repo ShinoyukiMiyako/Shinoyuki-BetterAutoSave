@@ -82,15 +82,14 @@ class ChunkSaveStateTest {
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, r1);
         assertEquals(1, s.retryCount());
 
-        s.trySnapshot();
-        s.enterSerializing();
+        // 重试是原地重投 (ChunkSaveTask.submitIo -> enterIoPending), 不是新周期: 期间保持在飞, 主线程接管不了。
+        assertFalse(s.trySnapshot(), "原地重投期间主线程不得开新周期");
         s.enterIoPending();
         ChunkSaveState.IoOutcome r2 = s.ioFailed(2);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, r2);
         assertEquals(2, s.retryCount());
 
-        s.trySnapshot();
-        s.enterSerializing();
+        assertFalse(s.trySnapshot(), "原地重投期间主线程不得开新周期");
         s.enterIoPending();
         ChunkSaveState.IoOutcome r3 = s.ioFailed(2);
         assertEquals(ChunkSaveState.IoOutcome.FAILED_TERMINAL, r3);

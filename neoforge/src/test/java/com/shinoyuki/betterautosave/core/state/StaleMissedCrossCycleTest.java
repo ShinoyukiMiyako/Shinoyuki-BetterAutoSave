@@ -116,7 +116,7 @@ class StaleMissedCrossCycleTest {
         state.markDirty();          // gen=2
 
         // gen1 回调用 landAndTake (合并): missed 标 C1 周期 (land 时刻周期), 不会漂移。
-        ChunkSaveState.LandResult gen1 = state.landAndTake();
+        ChunkSaveState.LandResult gen1 = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, gen1.outcome());
         assertEquals(c1, state.slot().missedCycle(), "missed 带 land 周期 C1");
 
@@ -136,7 +136,7 @@ class StaleMissedCrossCycleTest {
         assertTrue(state.hasPendingSnapshot(), "槽为 READY 等 gen2 回调");
 
         // gen2 落地正确 REQUEUE_DIRTY (inFlightGeneration 未被幽灵自踢覆盖)。
-        ChunkSaveState.LandResult gen2 = state.landAndTake();
+        ChunkSaveState.LandResult gen2 = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, gen2.outcome(),
                 "gen2 落地必判 REQUEUE_DIRTY, 不被幽灵自踢覆盖 inFlightGeneration");
         assertSame(gen3, gen2.relayPending());
@@ -157,7 +157,7 @@ class StaleMissedCrossCycleTest {
         state.enterIoPending();
         assertNull(state.takeReadyPendingSnapshot(), "EMPTY 上 take 标 missed (上一周期序号) 返 null");
         state.markDirty();          // 推 generation 让下面 land 走 REQUEUE 不误清
-        state.landAndTake();        // 落地 REQUEUE (phase=DIRTY), missed 仍在 (上一周期)
+        state.landAndTake(true);        // 落地 REQUEUE (phase=DIRTY), missed 仍在 (上一周期)
 
         // 开新周期: enterSerializing 分配新 cycleSeq, 旧 missed 周期序号与之不等.
         state.trySnapshot();

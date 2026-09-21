@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * ChunkRecoveryQueue 行为单测.
  *
- * <p>现场: ChunkSaveTask IO 失败回调 (worker 线程) 调 ioFailed 把 phase 置回 DIRTY/FAILED,
+ * <p>现场: ChunkSaveTask IO 失败回调 (worker 线程) 调 ioFailed 终态置 FAILED (安全网另经 markNoInFlightDirty 置 DIRTY),
  * 但 vanilla isUnsaved 仍是 capture 时清的 false, 三条重入门全跳过 → 永久丢失. 本队列让
  * 失败回调投递, 主线程 drain 还原 isUnsaved.
  *
@@ -29,7 +29,8 @@ class ChunkRecoveryQueueTest {
     void offer_then_drain_restores_unsaved_and_makes_state_redispatchable() {
         ChunkRecoveryQueue queue = new ChunkRecoveryQueue();
 
-        // 模拟一个 IO 失败后状态机已 ioFailed -> DIRTY 的 chunk.
+        // 模拟 onUnhandledError 安全网: ioFailed 判 REQUEUE_DIRTY 后 task 已死无后续重投, 由安全网
+        // markNoInFlightDirty 发布真终态 DIRTY, 再投坐标进恢复队列 (与 ChunkSaveTask.runUnhandledSafetyNet 同序).
         ChunkSaveState state = new ChunkSaveState(PACKED, DIM, 1L);
         state.markDirty();
         state.trySnapshot();
@@ -37,6 +38,9 @@ class ChunkRecoveryQueueTest {
         state.enterIoPending();
         ChunkSaveState.IoOutcome outcome = state.ioFailed(3);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, outcome);
+        assertEquals(ChunkSaveState.Phase.IO_PENDING, state.phase(),
+                "ioFailed 的 REQUEUE 不碰状态字, 原地重投要保持在飞");
+        state.markNoInFlightDirty();
         assertEquals(ChunkSaveState.Phase.DIRTY, state.phase());
 
         // worker 线程投递 (REQUEUE_DIRTY -> terminal=false).

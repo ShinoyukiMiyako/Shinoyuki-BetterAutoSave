@@ -51,9 +51,11 @@ import java.util.concurrent.atomic.AtomicReference;
  * 主线程   publishPendingSnapshot            PREPARING->READY; 同周期 missed 或 TERMINAL_HANDED 则返 snapshot 主线程自踢
  * 主线程   abortPendingSnapshot              dispatch 抛: PREPARING->EMPTY 撤销, 恒取回非 null
  * 主线程   reenterSerializingForPending      接力前锁 inFlightGeneration=pending 代 + 新 inFlightCycleSeq, phase=SERIALIZING
- * 回调     landAndTake                       land+take 单 CAS: land 判 CLEAN/REQUEUE + 同一 CAS 取 READY 接力 / 标本周期 missedCycle
+ * 回调     landAndTake(canReoffer)           land+take 单 CAS: land 判 CLEAN/REQUEUE + 同一 CAS 取 READY 接力 / 标本周期 missedCycle;
+ *                                            canReoffer 时取走 READY 的同一 CAS 直接写成接力周期 (SERIALIZING + RELAY), 不经 DIRTY
  * 回调     ioCompletedSuccessfully           land only (不并 take, 供 entity-parity 单测/降级直驱): CLEAN_LANDED(清 drainOwner) / REQUEUE_DIRTY
- * 回调     ioFailed                          land: 超 maxRetries ? FAILED_TERMINAL(清 drainOwner) : REQUEUE_DIRTY
+ * 回调     ioFailed                          land: 超 maxRetries ? FAILED_TERMINAL(清 drainOwner) : REQUEUE_DIRTY (不碰状态字, 原地重投保持在飞)
+ * 回调     markNoInFlightDirty               安全网: task 已死无后续重投时发布真终态 DIRTY
  * 回调     takeReadyPendingSnapshot          REQUEUE_DIRTY 接力 (拆分入口): READY 取走 / PREPARING|EMPTY 标本周期 missedCycle 离开
  * 回调     takeReadyForTerminalConsumer      终态死亡: READY 消费 / PREPARING 标 missedCycle+拨 TERMINAL_HANDED 交还 / EMPTY 仅标 missedCycle
  * 关服     drainSlot                         关服终局任意态全清 -> NONE + drainOwner 配平 (主线程已不再 publish 才安全)
@@ -73,6 +75,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *       CAS, 消除 "land 已见但 take 未发生" 的窗口本体, 故 missed 必带 land 周期序号 (主线程开新周期是在 missed
  *       写定之后); (2) 即便残留任何 stale missed, 它带旧周期序号, 新周期 begin/publish 校验不等丢弃, 不提前自踢、
  *       inFlightGeneration 不被误覆盖、在飞回调不误判 CLEAN_LANDED。</li>
+ *   <li>瞬态 DIRTY: DIRTY 只在回调真终态退出 (之后不再有在飞消费者) 时发布。会继续在飞的回调一律不经 DIRTY ——
+ *       原地重投 ({@link #ioFailed} 的 REQUEUE 不碰状态字) 与接力重投 ({@link #landAndTake} canReoffer 时同一
+ *       CAS 直接进接力周期)。否则主线程在两次 CAS 之间读到 DIRTY 会误判 "无在飞周期" 开新周期, 与回调的重投双在飞。</li>
  *   <li>begin 前终态: takeReadyForTerminalConsumer 的 EMPTY 分支对称标 missedCycle (本周期序号), 主线程 begin
  *       同周期继承之并发现 drainOwner 被 ioFailed 清空而重新获取 IN_FLIGHT (返 true 让调用方补 inc gauge),
  *       publish 见同周期 missed 自踢不发 READY 孤儿; PREPARING 分支额外拨 drainOwner=TERMINAL_HANDED (第二个
@@ -378,13 +383,24 @@ public final class ChunkSaveState {
      * (交还主线程 publish 自踢); NONE 标 missedCycle=本周期 (供主线程随后 begin 同周期继承)。CLEAN_LANDED 不碰槽
      * (蕴含无碰撞编辑, 不应有 pending), 清 drainOwner。
      *
+     * <p><b>READY 取走即入接力周期 (canReoffer=true)</b>: 取走 READY 的回调并未终态退出, 它接着重投这份接力。
+     * 若本 CAS 先发布 phase=DIRTY、再由调用方另一次 CAS 进接力周期, 两次 CAS 之间 phase 可观测为 DIRTY, 而碰撞
+     * 登记的纯 capture 不清 isUnsaved —— 主线程 ChunkMap.save 据此判 "无在飞周期" 开新周期, 随后接力的重入把
+     * inFlightGeneration 盖回接力旧代, 两个周期同时在飞、两边落地都判 REQUEUE_DIRTY、drainOwner 永不清零。
+     * 故 canReoffer 时在同一 CAS 里直接写成接力周期 (与 {@link #reenterSerializingForPending} 终值相同):
+     * 锁 inFlightGeneration=接力代, 分配新 inFlightCycleSeq, phase=SERIALIZING, drainOwner=RELAY。DIRTY 只在
+     * 回调真终态退出 (无接力可投) 时发布。canReoffer=false (无重投 sink) 时保留取走后置 DIRTY 的原语义。
+     *
+     * @param canReoffer 调用方持有接力重投 sink, 取走的 READY 必被重投
      * @return land 的判定 + REQUEUE_DIRTY 时取走的 READY 接力 (CLEAN_LANDED 或非 READY 时 relayPending 为 null)
      */
-    public LandResult landAndTake() {
+    public LandResult landAndTake(boolean canReoffer) {
         SlotWord cur;
         SlotWord next;
         IoOutcome outcome;
         CapturedSnapshot relayPending;
+        // 接力周期序号只在命中 READY 且可重投时才分配, 跨 CAS 重试复用同一个, 避免每轮重试都消耗一个号。
+        long relayCycleSeq = 0L;
         do {
             cur = word.get();
             relayPending = null;
@@ -397,8 +413,16 @@ public final class ChunkSaveState {
                 switch (cur.pendingKind) {
                     case READY -> {
                         relayPending = cur.pendingSnapshot;
-                        next = cur.withPhase(Phase.DIRTY)
-                                .withPending(PendingKind.NONE, null, 0L, NO_MISSED, cur.drainOwner);
+                        if (canReoffer) {
+                            if (relayCycleSeq == 0L) {
+                                relayCycleSeq = cycleSeqAllocator.incrementAndGet();
+                            }
+                            next = cur.withInFlight(relayPending.capturedGeneration(), relayCycleSeq, Phase.SERIALIZING)
+                                    .withPending(PendingKind.NONE, null, 0L, NO_MISSED, DrainOwner.RELAY);
+                        } else {
+                            next = cur.withPhase(Phase.DIRTY)
+                                    .withPending(PendingKind.NONE, null, 0L, NO_MISSED, cur.drainOwner);
+                        }
                     }
                     case PREPARING -> {
                         // 标本周期 (land 时刻的 inFlightCycleSeq) missed: land 与标 missed 同一 CAS,
@@ -439,23 +463,45 @@ public final class ChunkSaveState {
         }
     }
 
+    /**
+     * IO 失败的 land 判定。超 maxRetries 走 FAILED_TERMINAL 写 phase=FAILED 并清 drainOwner; 否则 REQUEUE_DIRTY。
+     *
+     * <p><b>REQUEUE 不碰状态字</b>: in-place 重投 (ChunkSaveTask.onIoFailure) 的回调并未终态退出, 它紧接着
+     * submitIo 用已序列化旧代 tag 原地重投, 下一个终态仍会取槽。若此处把 phase 写成 DIRTY, 在本 CAS 与 submitIo 的
+     * enterIoPending 之间 phase 可观测为 DIRTY: 主线程 ChunkMap.save 据此判 "无在飞周期" 走新周期路径 ——
+     * trySnapshot 若赢, enterSerializing 覆盖 inFlightGeneration 与回调的原地重投双在飞; trySnapshot 若输, 调用方
+     * 按 "已被接管" 取消本次 save 而不登记接力, 卸载场景下编辑后那代增量无副本。故 REQUEUE 全程不写 phase:
+     * 进入时 phase=IO_PENDING, 不写则保持在飞, submitIo 再写回 IO_PENDING, isInFlight 三态判定严格正确。
+     * 与 {@link EntitySaveState#ioFailed} 同一修法。
+     *
+     * <p>onUnhandledError 安全网经本方法走 REQUEUE 时 task 已死、无后续 submitIo, 必须自行调
+     * {@link #markNoInFlightDirty} 发布真终态 DIRTY, 否则 state 永卡在飞态。
+     */
     public IoOutcome ioFailed(int maxRetries) {
         int n = retryCount.incrementAndGet();
+        if (n <= maxRetries) {
+            lastTransitionClearedDrain = false;
+            return IoOutcome.REQUEUE_DIRTY;
+        }
         SlotWord cur;
-        SlotWord next;
-        IoOutcome outcome;
         do {
             cur = word.get();
-            if (n > maxRetries) {
-                next = cur.withPhase(Phase.FAILED).withDrainOwner(DrainOwner.NONE);
-                outcome = IoOutcome.FAILED_TERMINAL;
-            } else {
-                next = cur.withPhase(Phase.DIRTY);
-                outcome = IoOutcome.REQUEUE_DIRTY;
-            }
-            lastTransitionClearedDrain = outcome == IoOutcome.FAILED_TERMINAL && cur.drainOwner != DrainOwner.NONE;
-        } while (!word.compareAndSet(cur, next));
-        return outcome;
+            lastTransitionClearedDrain = cur.drainOwner != DrainOwner.NONE;
+        } while (!word.compareAndSet(cur, cur.withPhase(Phase.FAILED).withDrainOwner(DrainOwner.NONE)));
+        return IoOutcome.FAILED_TERMINAL;
+    }
+
+    /**
+     * 发布 "无在飞消费者, 等下周期重新捕获" 的真终态 DIRTY (无条件, 不碰 generation / retryCount / 接力槽 /
+     * drainOwner)。供 onUnhandledError 安全网在 {@link #ioFailed} 返 REQUEUE_DIRTY 后调: 该 task 已死无后续重投,
+     * 必须把停在 SERIALIZING/IO_PENDING 的 phase 推到 DIRTY, 让下次 ChunkMap.save 走常规 trySnapshot 路径重新
+     * 捕获。与 {@link EntitySaveState#markNoInFlightDirty} 对称。
+     */
+    public void markNoInFlightDirty() {
+        SlotWord cur;
+        do {
+            cur = word.get();
+        } while (!word.compareAndSet(cur, cur.withPhase(Phase.DIRTY)));
     }
 
     // 上一次终态转换 (CLEAN_LANDED / FAILED_TERMINAL) 是否真把 drainOwner 由非NONE清成NONE。供 IO 完成回调

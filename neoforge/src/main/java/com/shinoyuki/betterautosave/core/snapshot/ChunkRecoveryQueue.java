@@ -9,8 +9,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * IO 失败后的主线程待恢复队列.
  *
  * <p><b>背景</b>: ChunkSaveTask 的 IO 失败回调 (whenComplete 错误分支 /
- * onUnhandledError) 跑在 IOWorker 线程, 调 {@code ChunkSaveState.ioFailed} 把 phase
- * 置回 DIRTY (REQUEUE_DIRTY) 或 FAILED (FAILED_TERMINAL). 但三条重入路径
+ * onUnhandledError) 跑在 IOWorker 线程, 经 {@code ChunkSaveState.ioFailed} 终态把 phase 置 FAILED
+ * (FAILED_TERMINAL), 或由 onUnhandledError 安全网在 REQUEUE_DIRTY 后经 markNoInFlightDirty 置 DIRTY. 但三条重入路径
  * (ChunkMapMixin autosave / ChunkMapSaveMixin eager+unload / SaveDispatcher) 全部以
  * vanilla {@code chunk.isUnsaved()} 为门, 而 capture 早已 {@code setUnsaved(false)}.
  * IO 失败后 vanilla isUnsaved 仍是 false → 三条门全跳过 → 失败 chunk 除非玩家再次编辑

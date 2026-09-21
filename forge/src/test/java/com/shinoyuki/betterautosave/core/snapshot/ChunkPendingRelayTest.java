@@ -396,7 +396,8 @@ class ChunkPendingRelayTest {
      * 必须取走 pending (不泄漏) + 清 mustDrain + 配平 gauge, 走 ERROR 安全网。
      *
      * <p>判定标准: 删 onUnhandledError 的 takePendingSnapshot -> 槽残留 true, hasPendingSnapshot
-     * 断言挂; 删 mustDrain 清除路径 -> mustDrain 永真, gauge 泄漏。
+     * 断言挂; 删 mustDrain 清除路径 -> mustDrain 永真, gauge 泄漏; 删安全网的 markNoInFlightDirty ->
+     * phase 停在 SERIALIZING (ioFailed 的 REQUEUE 不碰状态字), phase 断言挂。
      */
     @Test
     void unhandled_error_with_pending_but_no_sink_clears_slot_and_must_drain() {
@@ -420,6 +421,8 @@ class ChunkPendingRelayTest {
         assertFalse(state.hasPendingSnapshot(), "sink 不可达也必须取走 pending 清空槽 (防永久泄漏)");
         assertFalse(state.mustDrain(), "无接力可投时必须清 mustDrain");
         assertEquals(0L, metrics.snapshot().mustDrainPending(), "mustDrain gauge 配平归零");
+        assertEquals(ChunkSaveState.Phase.DIRTY, state.phase(),
+                "task 已死无后续重投, 安全网必须发布真终态 DIRTY 让下次 save 重新捕获, 不得停在 SERIALIZING");
     }
 
     /**

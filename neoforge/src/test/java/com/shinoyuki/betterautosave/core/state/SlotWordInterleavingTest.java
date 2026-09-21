@@ -77,7 +77,7 @@ class SlotWordInterleavingTest {
         merged.enterIoPending();
         merged.markDirty();          // gen=2 (纯编辑, 槽 EMPTY)
 
-        ChunkSaveState.LandResult gen1 = merged.landAndTake();   // land+take 原子: missed 标 gen1 周期
+        ChunkSaveState.LandResult gen1 = merged.landAndTake(true);   // land+take 原子: missed 标 gen1 周期
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, gen1.outcome());
         assertEquals(gen1Cycle, merged.slot().missedCycle(),
                 "合并 landAndTake: missed 必带 land 时刻的 gen1 周期序号 (而非任何更晚的周期)");
@@ -97,7 +97,7 @@ class SlotWordInterleavingTest {
         assertNull(merged.publishPendingSnapshot(),
                 "合并路径: stale missed 跨周期被丢, publish 发布 READY 不提前自踢");
         assertTrue(merged.hasPendingSnapshot(), "槽为 READY 等 gen2 回调");
-        ChunkSaveState.LandResult gen2Land = merged.landAndTake();
+        ChunkSaveState.LandResult gen2Land = merged.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, gen2Land.outcome(),
                 "gen2 落地正确 REQUEUE_DIRTY, inFlightGeneration 未被幽灵自踢覆盖");
         assertSame(gen3, gen2Land.relayPending());
@@ -180,7 +180,7 @@ class SlotWordInterleavingTest {
         // 主线程自踢接力: reenter (drainOwner=RELAY) + 接力 IO 落地 CLEAN -> 清 drainOwner -> dec gauge。
         state.reenterSerializingForPending(selfReoffer.capturedGeneration());
         state.enterIoPending();
-        ChunkSaveState.LandResult relayLand = state.landAndTake();
+        ChunkSaveState.LandResult relayLand = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.CLEAN_LANDED, relayLand.outcome(),
                 "接力 IO 落地 generation(2)==inFlightGeneration(2) -> CLEAN_LANDED");
         if (state.lastTransitionClearedMustDrain()) {

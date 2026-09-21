@@ -181,7 +181,8 @@ public final class ChunkSaveTask implements SaveTask {
             return;
         }
         // 未超 maxRetries: 用已序列化的 tag 原地重投, 不清 mustDrain (重投仍在途,
-        // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰 mustDrain, gauge 维持.
+        // 关服 join 必须继续等). ioFailed 在 REQUEUE_DIRTY 不碰状态字 (mustDrain 与 phase 都不动), gauge 维持,
+        // phase 全程保持 IO_PENDING, 主线程在本回调与 submitIo 之间也只会看到在飞态。
         metrics.recordChunkRetried();
         submitIo(state, tag);
     }
@@ -270,7 +271,9 @@ public final class ChunkSaveTask implements SaveTask {
         // stale missed 不会被误标成新周期序号。
         // CLEAN_LANDED 时 landAndTake 内部 CAS 清 drainOwner, 用 lastTransitionClearedMustDrain 配平 gauge
         // (单一 CAS 既清 drainOwner 又驱动 dec, 无读快照拆分缝隙).
-        ChunkSaveState.LandResult land = state.landAndTake();
+        // 有重投 sink 时取走 READY 的同一 CAS 直接进接力周期, 不在 land 与重入之间发布瞬态 DIRTY
+        // (碰撞登记不清 isUnsaved, 主线程 ChunkMap.save 读到 DIRTY 会开新周期与接力双在飞)。
+        ChunkSaveState.LandResult land = state.landAndTake(pendingReoffer != null);
         if (state.lastTransitionClearedMustDrain()) {
             metrics.decMustDrainPending();
         }
@@ -289,9 +292,8 @@ public final class ChunkSaveTask implements SaveTask {
             ChunkSnapshot pending = (ChunkSnapshot) land.relayPending();
             if (pending != null && pendingReoffer != null) {
                 // 重投在序列化 worker 上做 assemble (不在本 IOWorker 邮箱线程内联, 防堵全服写盘)。
-                // reenterSerializingForPending 把 inFlightGeneration 锁到 pending 自己的代。
+                // landAndTake 已在取走 READY 的同一 CAS 里把 inFlightGeneration 锁到 pending 自己的代并进接力周期。
                 // serializing gauge 的 inc 由 reoffer sink 在真正 offer 时做 (关服残窗 ERROR 路径不 inc)。
-                state.reenterSerializingForPending(pending.capturedGeneration());
                 safeReoffer(state, pending);
             }
             metrics.recordChunkRetried();
@@ -304,7 +306,7 @@ public final class ChunkSaveTask implements SaveTask {
 
     /**
      * 接力重投的安全包装。reoffer sink 同步抛 (生产几乎仅 teardown-NPE / OOM) 时不得静默丢 pending ——
-     * 此刻 pending 已从槽取出 (REQUEUE_DIRTY 路径来自 landAndTake().relayPending(), 两条终态路径来自
+     * 此刻 pending 已从槽取出 (REQUEUE_DIRTY 路径来自 landAndTake(canReoffer).relayPending(), 两条终态路径来自
      * takeReadyForTerminalConsumer), 只活在调用栈局部, sink 抛则永久丢失且 mustDrain 永挂、serializing 可能泄漏。
      *
      * <p><b>补偿</b>: serializing gauge 由 sink 自身在 inc 与 offer 之间自包 try 配平 (见
@@ -373,17 +375,22 @@ public final class ChunkSaveTask implements SaveTask {
     /**
      * onUnhandledError 无接力可投时的安全网 (EMPTY_DEAD, 或 READY 但 sink 不可达)。无在途接力任务挂在
      * mustDrain 上, 故清 mustDrain —— 否则 REQUEUE_DIRTY 下 mustDrain 永挂, 关服 join 死等且 gauge 泄漏。
-     * compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec。随后 ioFailed 推 phase + enqueueRecovery
-     * 还原 isUnsaved 让 vanilla 兜底。
+     * compareAndClearMustDrain 单一 CAS 既清 boolean 又驱动 dec。随后 ioFailed 判终态 (FAILED_TERMINAL 置 FAILED;
+     * REQUEUE_DIRTY 不碰状态字, 由 markNoInFlightDirty 置 DIRTY) + enqueueRecovery 还原 isUnsaved 让 vanilla 兜底。
      */
     private void runUnhandledSafetyNet(ChunkSaveState state) {
         if (state.compareAndClearMustDrain()) {
             metrics.decMustDrainPending();
         }
         ChunkSaveState.IoOutcome outcome = state.ioFailed(BetterAutoSaveConfig.maxRetries());
-        // worker 未捕获异常 (assemble 后 / IO 提交期抛非 IOException) 把 phase 推到 DIRTY/FAILED,
+        // worker 未捕获异常 (assemble 后 / IO 提交期抛非 IOException) 后 phase 须推到 DIRTY/FAILED,
         // 但 tag 此刻不在作用域内 (assemble 抛则根本没 tag, storeChunk 同步抛则 tag 在 execute 局部),
         // 无法在此重投. 仍投坐标恢复队列还原 isUnsaved 让 vanilla 兜底.
+        // ioFailed 的 REQUEUE 不碰状态字 (原地重投要保持在飞), 本 task 已死无后续 submitIo, 故自行发布真终态
+        // DIRTY; 否则 phase 停在 SERIALIZING, 该 state 永卡在飞态, 后续 save 恒走碰撞分支登记无人消费的接力。
+        if (outcome == ChunkSaveState.IoOutcome.REQUEUE_DIRTY) {
+            state.markNoInFlightDirty();
+        }
         enqueueRecovery(outcome);
         if (outcome == ChunkSaveState.IoOutcome.FAILED_TERMINAL) {
             metrics.recordChunkFailed();

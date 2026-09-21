@@ -79,7 +79,7 @@ class ChunkOrphanReadyInterleavingTest {
         assertEquals(1L, gauge.get());
 
         // 在飞回调干净 CLEAN_LANDED 退出 (generation 未推进时落地): phase=CLEAN, 清 drainOwner, gauge dec 归零.
-        ChunkSaveState.LandResult clean = state.landAndTake();
+        ChunkSaveState.LandResult clean = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.CLEAN_LANDED, clean.outcome());
         if (state.lastTransitionClearedMustDrain()) {
             gauge.decrementAndGet();
@@ -115,7 +115,7 @@ class ChunkOrphanReadyInterleavingTest {
         state.reenterSerializingForPending(toReoffer.capturedGeneration());
         state.enterIoPending();
         long selfKickedGeneration = toReoffer.preBuiltFullTag().getLong("gen");
-        ChunkSaveState.LandResult relay = state.landAndTake();
+        ChunkSaveState.LandResult relay = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.CLEAN_LANDED, relay.outcome(),
                 "自踢接力 IO 落地 generation==inFlightGeneration -> CLEAN_LANDED");
         if (state.lastTransitionClearedMustDrain()) {
@@ -159,7 +159,7 @@ class ChunkOrphanReadyInterleavingTest {
                 "begin 在 phase != CLEAN (在飞消费者仍在) 时不得立 noInFlightConsumer 标记");
 
         // 在飞 G1 land (begin 之后): REQUEUE_DIRTY 见 PREPARING 标本周期 missed 离开, 不取未就绪 tag.
-        ChunkSaveState.LandResult land = state.landAndTake();
+        ChunkSaveState.LandResult land = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, land.outcome(),
                 "G2 已推进, 在飞 G1 落地 REQUEUE_DIRTY");
         assertNull(land.relayPending(),
@@ -177,7 +177,7 @@ class ChunkOrphanReadyInterleavingTest {
         // 接力链经自踢落盘 G2, gauge 配平.
         state.reenterSerializingForPending(toReoffer.capturedGeneration());
         state.enterIoPending();
-        ChunkSaveState.LandResult relay = state.landAndTake();
+        ChunkSaveState.LandResult relay = state.landAndTake(true);
         assertEquals(ChunkSaveState.IoOutcome.CLEAN_LANDED, relay.outcome(),
                 "自踢接力落地 CLEAN_LANDED");
         if (state.lastTransitionClearedMustDrain()) {

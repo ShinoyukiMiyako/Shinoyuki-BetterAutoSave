@@ -77,8 +77,14 @@ class SaveDispatcherRecoveryTest {
         ChunkSaveState.IoOutcome outcome = state.ioFailed(3);
         assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, outcome);
         assertEquals(1, state.retryCount());
+        // 原地重投 (保持在飞); 重投期间又被编辑, 重投落地判 REQUEUE_DIRTY 且无接力 -> 回调终态退出发布 DIRTY,
+        // retryCount 不归零 (只有 CLEAN_LANDED 归零), 残留到下一次接管。
+        state.enterIoPending();
+        state.markDirty();
+        assertEquals(ChunkSaveState.IoOutcome.REQUEUE_DIRTY, state.landAndTake(true).outcome());
+        assertEquals(1, state.retryCount());
         // 重新被接管又抛 dispatch 异常.
-        state.trySnapshot();
+        assertTrue(state.trySnapshot());
         state.enterSerializing();
 
         SaveDispatcher.recoverAfterDispatchFailure(state, unsaved -> {
